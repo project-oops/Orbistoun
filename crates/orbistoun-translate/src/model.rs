@@ -61,6 +61,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample_c_lz",
     "image_sample_c",
     "image_store",
+    "image_store_mip",
     "image_get_resinfo",
     "global_load_ubyte",
     "global_load_sbyte",
@@ -940,7 +941,11 @@ pub trait Model {
     /// sampler and cannot be written, the other is written and has no sampler. The module declares
     /// no format, because the guest's format is in a descriptor that is not decoded (D692). A
     /// `volume` is three-dimensional.
-    fn storage_image(&mut self, _descriptor: u32, _volume: bool) -> Result<Stored, &'static str> {
+    fn storage_image(
+        &mut self,
+        _descriptor: u32,
+        (_volume, _level): (bool, Option<u32>),
+    ) -> Result<Stored, &'static str> {
         Err(concat!(
             "this model has no storage image to write - one is bound by a graphics pipeline, ",
             "and a compute dispatch has nowhere to put one"
@@ -1301,6 +1306,18 @@ pub trait Model {
     /// register `source`, so a descriptor the program moved out of its user data is still found
     /// there. Called after the write; a model with no use for it ignores it.
     fn note_scalar_copy(&mut self, _destination: u32, _source: u32) {}
+
+    /// Says that vector register `destination` was just written, in every running lane, with a
+    /// plain copy of scalar register `source`. Called after the write; a model with no use for it
+    /// ignores it.
+    fn note_vector_copy(&mut self, _destination: u32, _source: u32) {}
+
+    /// The user-data word vector register `register` holds in every lane, when a plain copy put it
+    /// there and nothing has written the register since: a dispatch's level, moved from its user
+    /// data before the store that names it.
+    fn vector_user_data(&self, _register: u32) -> Option<u32> {
+        None
+    }
 
     /// The program counter: a private variable holding the index of the block to run. Private
     /// because it is written in one arm of the dispatch switch and read in the header.
@@ -2969,21 +2986,7 @@ fn vector_instruction<M: Model + ?Sized>(
             Ok(())
         }
 
-        "v_mov_b32_e32" => {
-            let (destination, source) = two_operands(instruction)?;
-            let Operand::Vector(register) = destination else {
-                return Err(TranslateError::Unsupported {
-                    offset: instruction.offset,
-                    detail: "v_mov_b32 destination is not a vector register",
-                });
-            };
-            for lane in running_lanes(model) {
-                let value = model.read_source(instruction, source, lane)?;
-                model.write_vector_lane(u32::from(*register), lane, value);
-            }
-            model.count();
-            Ok(())
-        }
+        "v_mov_b32_e32" => vector_move(model, instruction),
 
         // The short-form vector ALU: integer address arithmetic and float arithmetic.
         "v_add_f32_e32"
@@ -3158,7 +3161,7 @@ fn memory_instruction<M: Model + ?Sized>(
         }
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
-        "image_store" => image_store(model, instruction, name),
+        "image_store" | "image_store_mip" => image_store(model, instruction, name),
         // A level's size, asked of the image a fetch would read.
         "image_get_resinfo" => image_size(model, instruction, name),
 
@@ -5646,6 +5649,30 @@ fn scalar_move<M: Model + ?Sized>(
             detail: "no translation for this scalar move",
         }),
     }
+}
+
+/// `v_mov_b32`: each running lane's source, into the destination; a copy of a scalar register is
+/// noted, so a level moved out of the user data is still found there.
+fn vector_move<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_mov_b32 destination is not a vector register",
+        });
+    };
+    for lane in running_lanes(model) {
+        let value = model.read_source(instruction, source, lane)?;
+        model.write_vector_lane(u32::from(*register), lane, value);
+    }
+    if let Operand::Scalar(from) = source {
+        model.note_vector_copy(u32::from(*register), u32::from(*from));
+    }
+    model.count();
+    Ok(())
 }
 
 /// Translates a local-data-share access.
@@ -9920,6 +9947,15 @@ fn address_form(
     Ok(offset)
 }
 
+/// Whether an image instruction takes its level from an address register, after the coordinates:
+/// a levelled sample, a fetch from a level, and a store to one.
+fn takes_its_level(name: &str) -> bool {
+    matches!(
+        name,
+        "image_sample_l" | "image_load_mip" | "image_store_mip"
+    )
+}
+
 /// Reads a texture access's operands, refusing anything it cannot use.
 ///
 /// The operand at index three differs: a sample names a sampler there and a fetch its mask. The
@@ -9969,7 +10005,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     }
     // The level from a register rather than named: the last address element, after the coordinates,
     // as compiled levelled samples place it, and as `image_load_mip` takes its integer level.
-    let levelled = matches!(name, "image_sample_l" | "image_load_mip");
+    let levelled = takes_its_level(name);
     let offset = address_form(name, shape, (a16, fetches)).map_err(refuse)?;
 
     let (Some(Operand::Vector(destination)), Some(Operand::Vector(address))) =
@@ -10611,8 +10647,22 @@ fn image_store<M: Model + ?Sized>(
         data: d16,
     } = halves;
 
+    // A store to a level writes the level its address names after the coordinates. The host binds
+    // that level's own surface, so the level has to be one it can read for the dispatch: a
+    // user-data word the program copied into the register, as PPSA04263's copy into a level does.
+    let level = if name == "image_store_mip" {
+        let register = addresses[2];
+        Some(model.vector_user_data(register).ok_or_else(|| {
+            refuse(concat!(
+                "a store to a level the program computes rather than takes from its user data - ",
+                "the host binds one level's surface, and which one has to be known per dispatch"
+            ))
+        })?)
+    } else {
+        None
+    };
     let stored = model
-        .storage_image(descriptor, shape.volume)
+        .storage_image(descriptor, (shape.volume, level))
         .map_err(refuse)?;
     if stored.integer && d16 {
         return Err(refuse(

@@ -19,6 +19,8 @@ pub enum DispatchFormat {
     R8,
     /// One eight-bit unsigned integer channel, the guest's `8_UINT`.
     R8Uint,
+    /// Four eight-bit unsigned integer channels, the guest's `8_8_8_8_UINT` in the same byte order.
+    Rgba8Uint,
     /// Four thirty-two-bit unsigned channels, the guest's `32_32_32_32_UINT`: four words a texel.
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, the guest's `32_UINT`: a word a texel.
@@ -38,6 +40,7 @@ impl DispatchFormat {
             Self::Rgba8 => vk::Format::R8G8B8A8_UNORM,
             Self::R8 => vk::Format::R8_UNORM,
             Self::R8Uint => vk::Format::R8_UINT,
+            Self::Rgba8Uint => vk::Format::R8G8B8A8_UINT,
             Self::Rgba32Uint => vk::Format::R32G32B32A32_UINT,
             Self::R32Uint => vk::Format::R32_UINT,
             Self::R32Float => vk::Format::R32_SFLOAT,
@@ -49,7 +52,7 @@ impl DispatchFormat {
     /// Bytes one texel takes.
     const fn bytes(self) -> usize {
         match self {
-            Self::Rgba8 | Self::Rgb10A2 | Self::R32Uint | Self::R32Float => 4,
+            Self::Rgba8 | Self::Rgba8Uint | Self::Rgb10A2 | Self::R32Uint | Self::R32Float => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,

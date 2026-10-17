@@ -778,7 +778,7 @@ fn bound_buffer_store(name: &str) -> bool {
 pub(crate) fn bound_image_access(name: &str) -> bool {
     matches!(
         name,
-        "image_load" | "image_load_mip" | "image_store" | "image_get_resinfo"
+        "image_load" | "image_load_mip" | "image_store" | "image_store_mip" | "image_get_resinfo"
     )
 }
 

@@ -2841,6 +2841,8 @@ pub enum TexelFormat {
     R8,
     /// One eight-bit unsigned integer channel, a texel a byte: the guest's `8_UINT`.
     R8Uint,
+    /// Four eight-bit unsigned integer channels, a texel a word: the guest's `8_8_8_8_UINT`.
+    Rgba8Uint,
     /// Four thirty-two-bit unsigned channels, a texel four words.
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, a texel a word: the guest's `32_UINT`.
@@ -2868,7 +2870,8 @@ impl TexelFormat {
             | Self::Rgba8Srgb
             | Self::Rgb10A2
             | Self::R32Uint
-            | Self::R32Float => 4,
+            | Self::R32Float
+            | Self::Rgba8Uint => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
@@ -2884,7 +2887,10 @@ impl TexelFormat {
     /// Whether the format's channels are unsigned integers, which a shader declares as such.
     #[must_use]
     pub const fn is_integer(self) -> bool {
-        matches!(self, Self::Rgba32Uint | Self::R32Uint | Self::R8Uint)
+        matches!(
+            self,
+            Self::Rgba32Uint | Self::R32Uint | Self::R8Uint | Self::Rgba8Uint
+        )
     }
 }
 
@@ -3430,6 +3436,19 @@ type DispatchImageSurface = (
 
 /// The image a dispatch source names: its descriptor read from the user data or its table,
 /// decoded, and placed.
+/// A descriptor's `SQ_IMG_RSRC_WORD3` viewing only the level `level` levels past its base: its
+/// `BASE_LEVEL` (bits 15:12) and `LAST_LEVEL` (19:16) both set to it (`gfx10-rsrc.json`, as
+/// [`decode_image_descriptor`] reads them). An `image_store_mip` writes that level, and the level's
+/// own surface is bound for it. A level past the view's last is refused.
+fn viewed_level(word3: u32, level: u32) -> Result<u32, String> {
+    let (base, last) = (word3 >> 12 & 0xF, word3 >> 16 & 0xF);
+    let at = base
+        .checked_add(level)
+        .filter(|&at| at <= last)
+        .ok_or_else(|| format!("a store to level {level} of a view of levels {base} to {last}"))?;
+    Ok(word3 & !0xF_F000 | at << 12 | at << 16)
+}
+
 fn dispatch_image_surface(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
@@ -3462,6 +3481,9 @@ fn dispatch_image_surface(
         for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
             *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
+    }
+    if let Some(index) = source.level_user_data {
+        words[3] = viewed_level(words[3], user(index)?)?;
     }
     let descriptor = decode_image_descriptor(words);
     let format = dispatch_format(&descriptor, words)?;
@@ -3620,6 +3642,7 @@ fn describe_dispatch_image(descriptor: &ImageDescriptor, words: [u32; 8]) -> Str
 fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<TexelFormat, String> {
     match descriptor.format {
         FORMAT_8_8_8_8_UNORM => Ok(TexelFormat::Rgba8),
+        FORMAT_8_8_8_8_UINT => Ok(TexelFormat::Rgba8Uint),
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
         FORMAT_2_10_10_10_UNORM => Ok(TexelFormat::Rgb10A2),
         FORMAT_16_16_16_16_FLOAT => Ok(TexelFormat::Rgba16Float),
@@ -3666,6 +3689,27 @@ mod dispatch_format_tests {
         let format = super::dispatch_format(&descriptor, words).expect("bound");
         assert_eq!(format, super::TexelFormat::R8Uint);
         assert_eq!((format.bytes(), format.is_integer()), (1, true));
+    }
+
+    /// An `8_8_8_8_UINT` image (`gfx10-rsrc.json:65`, format 60) is four bytes of unsigned
+    /// integer a texel: what PPSA04263's compute program copies from level to level, 4KB_S.
+    #[test]
+    fn four_eight_bit_unsigned_channels_are_a_word_of_integer() {
+        // Format 60, 64 x 64, the channels as they are, a 2D image in 4KB_S (swizzle mode 5).
+        let words = [
+            0,
+            60 << 20 | (63 & 3) << 30,
+            63 >> 2 | 63 << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 5 << 20 | 9 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("bound");
+        assert_eq!(format, super::TexelFormat::Rgba8Uint);
+        assert_eq!((format.bytes(), format.is_integer()), (4, true));
     }
 }
 
@@ -5755,6 +5799,8 @@ const FORMAT_8_8_8_8_UNORM: u32 = 56;
 const FORMAT_8_UNORM: u32 = 1;
 /// `GFX10_FORMAT_8_UINT` (`gfx10-rsrc.json`, value 5): one eight-bit unsigned integer channel.
 const FORMAT_8_UINT: u32 = 5;
+/// `GFX10_FORMAT_8_8_8_8_UINT` (`gfx10-rsrc.json:65`): four eight-bit unsigned integer channels.
+const FORMAT_8_8_8_8_UINT: u32 = 60;
 /// `GFX10_FORMAT_BC3_UNORM` (`gfx10-rsrc.json:127`): four-by-four texels to a sixteen-byte block.
 const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_BC1_UNORM` (`gfx10-rsrc.json:123`): four-by-four texels to an eight-byte block.
@@ -5903,6 +5949,7 @@ fn bind_textures(
                     volume: false,
                     compare: false,
                     saturated: [false; 2],
+                    level_user_data: None,
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -7006,6 +7053,7 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Rgba8
         | TexelFormat::R8
         | TexelFormat::R8Uint
+        | TexelFormat::Rgba8Uint
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
         | TexelFormat::R32Float
@@ -7287,6 +7335,7 @@ fn swizzle_texels_by_channel(
                 // A draw's texture is never a sixteen- or eight-byte one: `sampled_format` reads no
                 // such format, so its arm is the four-byte one's.
                 TexelFormat::Rgba8
+                | TexelFormat::Rgba8Uint
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::Rgba16Float
                 | TexelFormat::R32Uint
@@ -8849,6 +8898,7 @@ mod tests {
                 volume: false,
                 compare: false,
                 saturated: [false; 2],
+                level_user_data: None,
             }],
         )]);
         let mut commands = vec![
@@ -8930,6 +8980,7 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated: [false; 2],
+                    level_user_data: None,
                 }],
             )]);
             let mut commands = vec![
@@ -8992,6 +9043,7 @@ mod tests {
                 volume: false,
                 compare: false,
                 saturated: [false; 2],
+                level_user_data: None,
             }],
         )]);
         let mut commands = vec![
@@ -9075,6 +9127,7 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated,
+                    level_user_data: None,
                 }],
             )]);
             let mut commands = vec![
@@ -9253,6 +9306,7 @@ mod tests {
             volume: false,
             compare: true,
             saturated: [false; 2],
+            level_user_data: None,
         };
         let bound = user_data_texture(&source, 8, &user, &Memory, &mut super::TexelCache::new());
         let Some(RenderCommand::BindDepthTexture {
@@ -9351,6 +9405,7 @@ mod tests {
                 volume: false,
                 compare: true,
                 saturated: [false; 2],
+                level_user_data: None,
             }],
         )]);
         let draw = RenderCommand::Draw {
@@ -9433,6 +9488,7 @@ mod tests {
             volume: false,
             compare: true,
             saturated: [false; 2],
+            level_user_data: None,
         };
         let bound = user_data_texture(
             &source,
@@ -9623,6 +9679,18 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(2).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A store to a level views that level alone: base and last level both moved to it, counted
+    /// from the view's base, and nothing else in the word changed. A level past the view's last is
+    /// refused.
+    #[test]
+    fn a_store_to_a_level_views_that_level_alone() {
+        // A view of levels 1 to 4, its type and selects in the other bits.
+        let word3 = 0x9004_1fac;
+        assert_eq!(super::viewed_level(word3, 2), Ok(0x9003_3fac));
+        assert_eq!(super::viewed_level(word3, 0), Ok(0x9001_1fac));
+        assert!(super::viewed_level(word3, 4).is_err(), "past level 4");
     }
 
     /// A `BC1_UNORM` texture (`gfx10-rsrc.json:123`, format 169) is bound as its eight-byte blocks as
@@ -10195,6 +10263,7 @@ mod tests {
             cube,
             volume: false,
             compare: false,
+            level_user_data: None,
         };
         assert!(super::shaped_for(command, &source(true)));
         assert!(
@@ -10507,6 +10576,7 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated: [true; 2],
+                    level_user_data: None,
                 }],
             )]);
             let mut commands = vec![
@@ -11150,6 +11220,7 @@ mod tests {
             volume: false,
             compare: false,
             saturated: [false; 2],
+            level_user_data: None,
         };
         let cube = TextureSource { cube: true, ..flat };
         let compared = TextureSource {

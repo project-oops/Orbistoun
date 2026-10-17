@@ -949,6 +949,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 cube: false,
                 volume: false,
                 compare: false,
+                level_user_data: None,
             },
             TextureSource {
                 slot: 1,
@@ -961,6 +962,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 cube: false,
                 volume: false,
                 compare: false,
+                level_user_data: None,
             },
         ]
     );
@@ -1443,6 +1445,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             cube: false,
             volume: false,
             compare: false,
+            level_user_data: None,
         }]
     );
 }

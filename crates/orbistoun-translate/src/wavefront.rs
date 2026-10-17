@@ -2235,6 +2235,9 @@ pub struct Wavefront<'a> {
     /// Scalar registers the program filled with a plain copy of one still holding a user-data word,
     /// and that word: a descriptor moved out of its user data is still read from there.
     scalar_copies: BTreeMap<u32, u32>,
+    /// Vector registers holding, in every lane, a user-data word a plain copy from a scalar put
+    /// there, by the word: a dispatch's level, moved before the store that names it.
+    vector_copies: BTreeMap<u32, u32>,
 }
 
 /// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
@@ -2430,6 +2433,7 @@ impl Wavefront<'_> {
             cube: shape.cube,
             volume: shape.volume,
             compare: shape.compare,
+            level_user_data: None,
         })
     }
 
@@ -3060,6 +3064,7 @@ impl<'a> Wavefront<'a> {
             untraced_by: buffers.untraced_by.clone(),
             global_share: None,
             scalar_copies: BTreeMap::new(),
+            vector_copies: BTreeMap::new(),
         };
 
         this.seed_entry(user_data_source, &user_data, &system);
@@ -5170,6 +5175,8 @@ impl Model for Wavefront<'_> {
     /// A select rather than a branch: the old value is kept where the mask says the lane is
     /// inactive.
     fn write_vector_lane(&mut self, register: u32, lane: u32, value: Id) {
+        // Whatever it held is gone; a copy says so again once the write is done.
+        self.vector_copies.remove(&register);
         self.store_lane_masked(register, lane, value);
     }
 
@@ -5251,7 +5258,7 @@ impl Model for Wavefront<'_> {
     fn storage_image(
         &mut self,
         descriptor: u32,
-        volume: bool,
+        (volume, level): (bool, Option<u32>),
     ) -> Result<model::Stored, &'static str> {
         // The fragment stage only: the harness binds its storage image with fragment stage flags,
         // and the `vec4` texel type comes from the colour output, which only a fragment module has.
@@ -5268,7 +5275,11 @@ impl Model for Wavefront<'_> {
             ));
         }
         if let Some((stored, was)) = self.images.stored {
-            if was != descriptor || stored.volume != volume {
+            let same_level = self
+                .images
+                .stored_source
+                .is_none_or(|source| source.level_user_data == level);
+            if was != descriptor || stored.volume != volume || !same_level {
                 return Err(concat!(
                     "this shader stores to more than one image and a pipeline binds one - ",
                     "resolving which is which needs the descriptors decoded, and writing ",
@@ -5288,6 +5299,7 @@ impl Model for Wavefront<'_> {
             };
             let mut source = self.new_texture_source(descriptor, (None, shape))?;
             source.slot = 0;
+            source.level_user_data = level;
             self.images.stored_source = Some(source);
         }
 
@@ -5503,6 +5515,19 @@ impl Model for Wavefront<'_> {
         self.builder
             .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
         value
+    }
+
+    fn note_vector_copy(&mut self, destination: u32, source: u32) {
+        let word = self
+            .still_seeded(source, 1)
+            .or_else(|| self.scalar_copies.get(&source).copied());
+        if let Some(word) = word {
+            self.vector_copies.insert(destination, word);
+        }
+    }
+
+    fn vector_user_data(&self, register: u32) -> Option<u32> {
+        self.vector_copies.get(&register).copied()
     }
 
     fn note_scalar_copy(&mut self, destination: u32, source: u32) {
@@ -5946,6 +5971,11 @@ pub struct TextureSource {
     /// Whether the module samples this texture as depth compared against a reference (D816).
     #[serde(default)]
     pub compare: bool,
+    /// The stage's user-data word holding the level a store writes, counted from the descriptor's
+    /// base level: an `image_store_mip` whose level the program copied from its user data. The
+    /// host binds that level's own surface. `None` for a store to the level the view names.
+    #[serde(default)]
+    pub level_user_data: Option<u32>,
 }
 
 /// The table load that reached a descriptor's registers, where it is known: the table's base and
@@ -7305,6 +7335,66 @@ mod exact_memory_tests {
                 ..UserData::default()
             },
         )
+    }
+
+    /// `image_store_mip v[0:3], v[4:6], s[0:7] dmask:0xf dim:2D` after `v_mov_b32 v6, <level>`,
+    /// translated as a compute dispatch whose user data holds the descriptor and, at word 8, a
+    /// level: the shape of PPSA04263's copy into a level, `v_mov_b32 v6, s6` before its store.
+    fn store_to_a_level(
+        level: u32,
+    ) -> Result<(Vec<u32>, usize, super::ImageSources), crate::TranslateError> {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("image_store_mip")
+            .expect("image_store_mip");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // v_mov_b32 v6, <level>; the store to the 2D image (dimension code 1); s_endpgm.
+        let words = [
+            0x7e0c_0200 | level,
+            encoding.value | (opcode << encoding.opcode.shift) | (0xf << 8) | (1 << 3),
+            4,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::spanning_address(0x4_0000_0000, 1024).expect("a window"),
+            UserData {
+                count: 9,
+                compute: Some(ComputeInputs {
+                    threads: [64, 1, 1],
+                    thread_id_components: 1,
+                    ..ComputeInputs::default()
+                }),
+                ..UserData::default()
+            },
+        )
+    }
+
+    /// A store to a level its user data names binds that level: the stored image's source says
+    /// which word holds it, so the host binds the level's own surface. A level the program
+    /// computes is refused by name rather than written to the wrong level.
+    #[test]
+    fn a_store_to_a_level_names_the_word_holding_it() {
+        let (_, _, (_, stored)) = store_to_a_level(8).expect("a store to a level from s8");
+        assert_eq!(stored.and_then(|source| source.level_user_data), Some(8));
+        // v_mov_b32 v6, 1 (inline integer code 129): a level no user data holds.
+        let refused = store_to_a_level(129).expect_err("refused").to_string();
+        assert!(refused.contains("level"), "{refused}");
     }
 
     /// An image access of a dimensionality not translated is refused naming it, so the report

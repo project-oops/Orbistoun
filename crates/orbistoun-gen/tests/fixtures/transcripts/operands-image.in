@@ -112,3 +112,14 @@ image_get_resinfo v[100:103], v200, s[80:87] dmask:0xf dim:SQ_RSRC_IMG_2D
 image_get_resinfo v250, v10, s[40:47] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_get_resinfo v[8:9], v254, s[92:99] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_get_resinfo v[60:62], v31, s[64:71] dmask:0x7 dim:SQ_RSRC_IMG_2D
+
+// ---- image_store_mip ---------------------------------------------------------------
+// A store to an explicit level: `image_store`'s data and resource, and the level after the
+// coordinates, so a 2D one reads three address registers. PPSA04263's compute program at
+// 0x740043149800 runs it as Story Mode loads (MIMG opcode 9). Each field high in turn.
+image_store_mip v[24:27], v[28:30], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_store_mip v255, v[100:102], s[92:99] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_store_mip v[40:41], v[200:202], s[20:27] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_store_mip v[60:62], v[10:12], s[80:87] dmask:0x7 dim:SQ_RSRC_IMG_2D
+image_store_mip v[24:27], v[28:30], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+image_store_mip v70, v[140:142], s[20:27] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
