@@ -268,6 +268,11 @@ static RING_RETURNED: [AtomicU8; MAX_RECORDED_CALLS] =
 /// Per-import call counts. Allocated once when a table is built, never on the call path.
 static COUNTS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
+/// Where each import nothing implements was first called from: the return address of its first
+/// call, or zero. Allocated with [`COUNTS`]; written only on calls that land on a stub, so
+/// implemented calls never touch it.
+static FIRST_STUB_SITES: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
+
 /// The shape bits an argument value ORs into its slot's profile, so the kinds a slot saw across
 /// calls accumulate into a picture of what that argument is.
 ///
@@ -1274,11 +1279,22 @@ pub struct RecordedCall {
 /// Called once, at table construction, so the call path stays allocation-free.
 pub fn prepare_counters(count: usize) {
     let _ = COUNTS.set((0..count).map(|_| AtomicU64::new(0)).collect());
+    let _ = FIRST_STUB_SITES.set((0..count).map(|_| AtomicU64::new(0)).collect());
     let _ = SHAPES.set(
         (0..count * SAVED_ARGUMENT_REGISTERS)
             .map(|_| AtomicU8::new(0))
             .collect(),
     );
+}
+
+/// Where import `index` was first called from, if it landed on a stub: the return address of its
+/// first call, the place the guest acts on the placeholder it was answered. Zero when it was never
+/// called on a stub, or the address could not be read.
+pub fn first_stub_site(index: usize) -> u64 {
+    FIRST_STUB_SITES
+        .get()
+        .and_then(|sites| sites.get(index))
+        .map_or(0, |site| site.load(Ordering::Relaxed))
 }
 
 /// Total calls the guest has made through any thunk.
@@ -1507,6 +1523,9 @@ unsafe extern "sysv64" fn on_guest_call(
     if forced {
         capture_caller_stack(sequence, index, entry_rsp);
     }
+    if handler.is_none() {
+        note_first_stub_site(index, entry_rsp);
+    }
 
     // After the dump, so the dump records what the guest passed rather than what this planted.
     forced_write(index, args);
@@ -1533,6 +1552,22 @@ unsafe extern "sysv64" fn on_guest_call(
     publish_last(index, call_site(entry_rsp), answer);
 
     answer
+}
+
+/// Keeps the first place import `index` was called from on a stub. One relaxed load on every later
+/// stubbed call; the address is read only for the first.
+fn note_first_stub_site(index: u64, entry_rsp: u64) {
+    let Some(site) = FIRST_STUB_SITES.get().and_then(|s| s.get(index as usize)) else {
+        return;
+    };
+    if site.load(Ordering::Relaxed) == 0 {
+        let _ = site.compare_exchange(
+            0,
+            call_site(entry_rsp),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
 }
 
 /// Marks this thread as inside import `index`, answering what it was inside before.

@@ -2342,6 +2342,7 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         ended_by: ENDED_BY.get().cloned(),
         threads: thread_notes(),
         said: orbistoun_core::said::lines(),
+        tested_answers: tested_answers(&counts),
         conditions: {
             // Merged at read time, because the conditions are recorded before the import labels
             // exist and resolving which import to plant into needs them.
@@ -2405,6 +2406,34 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
             .collect(),
         fault,
     }
+}
+
+/// Bytes read at a call site for [`tested_answers`]: six of the longest instructions.
+const ANSWER_TEST_BYTES: usize = 90;
+
+/// The imports among `counts` that landed on a stub and whose answer the title branches on where
+/// it first called them, read from its code at the return address.
+fn tested_answers(counts: &[(usize, u64)]) -> Vec<orbistoun_report::trace::TestedAnswer> {
+    counts
+        .iter()
+        .filter(|(index, _)| !orbistoun_thunk::is_implemented(*index))
+        .filter_map(|(index, _)| {
+            let site = orbistoun_thunk::first_stub_site(*index);
+            let mut code = [0u8; ANSWER_TEST_BYTES];
+            // SAFETY: a read of guest memory through the checked accessor, which refuses an
+            // address nothing maps.
+            let read = site != 0 && unsafe { orbistoun_mem::guest::read_into(site, &mut code) };
+            let test = orbistoun_loader::inventory::answer_test(&code, site).filter(|_| read)?;
+            Some(orbistoun_report::trace::TestedAnswer {
+                label: labelled(*index),
+                site: locate(site).map_or_else(
+                    || format!("{site:#x}"),
+                    |(name, offset)| format!("{name}+{offset:#x}"),
+                ),
+                test,
+            })
+        })
+        .collect()
 }
 
 /// What to call a stub in a report.

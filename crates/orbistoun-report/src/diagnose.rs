@@ -1287,6 +1287,20 @@ fn unimplemented(trace: &CallTrace) -> Vec<Finding> {
                 if !c.shape.is_empty() {
                     evidence.push(format!("the guest called it as {}", c.shape));
                 }
+                // Where the placeholder decides the title's way: the branch on the answer at the
+                // first call site, from the title's own code.
+                evidence.extend(
+                    trace
+                        .tested_answers
+                        .iter()
+                        .filter(|tested| tested.label == c.label)
+                        .map(|tested| {
+                            format!(
+                                "where it was first called, {}, the title branches on the answer: {} - the placeholder picks that branch",
+                                tested.site, tested.test
+                            )
+                        }),
+                );
                 // The pointers it was handed belong to the finding, so a programmatic reader such
                 // as the dispatcher sees that the call was given a structure.
                 evidence.extend(pointer_arguments(trace, &c.label));
@@ -1717,6 +1731,7 @@ mod tests {
             ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
+            tested_answers: Vec::new(),
             quiet: None,
             title_modules: Vec::new(),
             module: "m".to_owned(),
@@ -1910,6 +1925,36 @@ mod tests {
                 .as_ref()
                 .expect("has one")
                 .contains("libSceAgc")
+        );
+    }
+
+    /// Where the title branches on a stub's answer reaches that import's finding, so the place a
+    /// placeholder decides the title's way is named without a disassembler.
+    #[test]
+    fn a_branch_on_a_stub_s_answer_is_carried_into_its_finding() {
+        let mut trace = empty();
+        trace.total_calls = 1;
+        trace.calls = vec![CalledImport {
+            index: 0,
+            label: "libSceNpEntitlementAccess::sceNpEntitlementAccessInitialize".to_owned(),
+            calls: 1,
+            implemented: false,
+            shape: String::new(),
+        }];
+        trace.tested_answers = vec![crate::trace::TestedAnswer {
+            label: "libSceNpEntitlementAccess::sceNpEntitlementAccessInitialize".to_owned(),
+            site: "eboot.bin+0x2d4e906".to_owned(),
+            test: "test eax,eax; js 0000000002D4EB5Fh".to_owned(),
+        }];
+        let found = findings(&trace);
+        assert!(
+            found[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("eboot.bin+0x2d4e906")
+                    && e.contains("test eax,eax; js 0000000002D4EB5Fh")),
+            "{:?}",
+            found[0].evidence
         );
     }
 
@@ -2546,6 +2591,7 @@ mod tests {
             ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
+            tested_answers: Vec::new(),
             quiet: None,
             title_modules: Vec::new(),
             module: "m".to_owned(),

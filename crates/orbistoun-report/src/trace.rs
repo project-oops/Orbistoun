@@ -147,6 +147,11 @@ pub struct CallTrace {
     /// standard descriptors), so it is independent of any one engine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub said: Vec<String>,
+    /// Imports nothing implements whose answer the title branches on where it first called them.
+    ///
+    /// The place a placeholder decides which way the title goes, read from the title's code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tested_answers: Vec<TestedAnswer>,
     /// Every guest thread, and the last call each one made.
     ///
     /// Says which thread a run that goes quiet is waiting on. Empty for a run with no thread
@@ -961,6 +966,18 @@ pub struct AskedSyscall {
     /// Its first argument, which for an unnamed call narrows what it might be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_argument: Option<u64>,
+}
+
+/// An import nothing implements, and the branch the title takes on its answer where it first
+/// called it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TestedAnswer {
+    /// The import, as [`CalledImport::label`] names it.
+    pub label: String,
+    /// Where its first call returned to, such as `eboot.bin+0x2d4e906`.
+    pub site: String,
+    /// The test of the answer and the jump on it, such as `test eax,eax; js 0000000002D4EB5Fh`.
+    pub test: String,
 }
 
 /// One import a guest called, and whether anything answered it.
@@ -1905,6 +1922,7 @@ mod tests {
             ended_by: None,
             threads: Vec::new(),
             said: Vec::new(),
+            tested_answers: Vec::new(),
             quiet: None,
             title_modules: Vec::new(),
             module: "m".to_owned(),

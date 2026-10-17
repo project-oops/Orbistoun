@@ -335,6 +335,71 @@ fn references_in((segment, start): (&[u8], u64), target: u64) -> Vec<Reference> 
     found
 }
 
+/// How many instructions past a call [`answer_test`] reads for a branch on its answer.
+const ANSWER_TEST_REACH: usize = 6;
+
+/// The conditional jumps, each a branch on the flags a `test` or `cmp` left.
+const CONDITIONAL_JUMPS: [Mnemonic; 16] = [
+    Mnemonic::Ja,
+    Mnemonic::Jae,
+    Mnemonic::Jb,
+    Mnemonic::Jbe,
+    Mnemonic::Je,
+    Mnemonic::Jne,
+    Mnemonic::Jg,
+    Mnemonic::Jge,
+    Mnemonic::Jl,
+    Mnemonic::Jle,
+    Mnemonic::Jo,
+    Mnemonic::Jno,
+    Mnemonic::Jp,
+    Mnemonic::Jnp,
+    Mnemonic::Js,
+    Mnemonic::Jns,
+];
+
+/// What the code at `at` - a call's return address - branches on in the call's answer: the `test`
+/// or `cmp` of `rax` (at any width) and the conditional jump after it, in Intel syntax. `None` when
+/// the code overwrites the answer, leaves, or does not branch within six
+/// instructions. Says which way a placeholder answer sends the title, read from its own code.
+#[must_use]
+pub fn answer_test(code: &[u8], at: u64) -> Option<String> {
+    let mut formatter = IntelFormatter::new();
+    let text = |instruction: &iced_x86::Instruction, formatter: &mut IntelFormatter| {
+        let mut text = String::new();
+        formatter.format(instruction, &mut text);
+        text
+    };
+    let mut tested = None;
+    for instruction in Decoder::with_ip(64, code, at, DecoderOptions::NONE)
+        .into_iter()
+        .take(ANSWER_TEST_REACH)
+    {
+        let names_answer = instruction.op_count() > 0
+            && instruction.op0_kind() == iced_x86::OpKind::Register
+            && matches!(
+                instruction.op0_register(),
+                iced_x86::Register::RAX
+                    | iced_x86::Register::EAX
+                    | iced_x86::Register::AX
+                    | iced_x86::Register::AL
+            );
+        match instruction.mnemonic() {
+            Mnemonic::Test | Mnemonic::Cmp if names_answer => {
+                tested = Some(text(&instruction, &mut formatter));
+            }
+            mnemonic if CONDITIONAL_JUMPS.contains(&mnemonic) => {
+                return tested
+                    .map(|tested| format!("{tested}; {}", text(&instruction, &mut formatter)));
+            }
+            Mnemonic::Call | Mnemonic::Ret | Mnemonic::Jmp => return None,
+            _ if names_answer => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Decodes `code`, which starts at guest address `at`, into `found`.
 fn sweep(code: &[u8], at: u64, found: &mut Inventory) {
     let mut decoder = Decoder::with_ip(64, code, at, DecoderOptions::NONE);
@@ -435,6 +500,25 @@ mod tests {
         assert_eq!(
             super::references_in((&code, 0x1000), 0x3000)[0].within,
             0x1010
+        );
+    }
+
+    /// A test of the answer and the jump on it are named; code that overwrites the answer first,
+    /// or leaves before branching, names nothing.
+    #[test]
+    fn a_branch_on_a_call_s_answer_is_named() {
+        let tested = super::answer_test(&[0x85, 0xc0, 0x78, 0x05], 0x1000).unwrap_or_default();
+        assert!(
+            tested.starts_with("test eax,eax; js") && tested.ends_with("1009h"),
+            "{tested}"
+        );
+        let saved_first = [0x89, 0xc3, 0x85, 0xc0, 0x74, 0x00];
+        assert!(super::answer_test(&saved_first, 0x1000).is_some());
+        let overwritten = [0x31, 0xc0, 0x85, 0xc0, 0x74, 0x00];
+        assert_eq!(super::answer_test(&overwritten, 0x1000), None);
+        assert_eq!(
+            super::answer_test(&[0xc3, 0x85, 0xc0, 0x74, 0x00], 0x1000),
+            None
         );
     }
 
