@@ -99,6 +99,9 @@ macro_rules! span_labels {
             Span::BufferBind => $as!("textures: buffers"),
             Span::BuildModules => $as!("build: modules"),
             Span::BuildResources => $as!("build: resources"),
+            Span::TextureStaged => $as!("texture: staged"),
+            Span::TextureImage => $as!("texture: image"),
+            Span::TextureStaging => $as!("texture: staging"),
             Span::BuildPipeline => $as!("build: pipeline"),
             Span::KeepPipelineCache => $as!("build: keep cache"),
             Span::BufferResolve => $as!("buffers: resolve"),
@@ -529,6 +532,12 @@ pub enum Span {
     BuildModules,
     /// Within a draw's pipeline build: its textures, storage image and buffers made.
     BuildResources,
+    /// Within [`Self::BuildResources`]: a texture's texels laid out as its host format stages them.
+    TextureStaged,
+    /// Within [`Self::BuildResources`]: a texture's device image made, its memory bound and viewed.
+    TextureImage,
+    /// Within [`Self::BuildResources`]: a texture's staging buffer made and its texels copied in.
+    TextureStaging,
     /// Within a draw's pipeline build: the device's pipeline made.
     BuildPipeline,
     /// The driver's pipeline cache written to disk, where it grew (D744).
@@ -659,7 +668,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 119] = [
+    pub const ALL: [Self; 122] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -723,6 +732,9 @@ impl Span {
         Self::BufferBind,
         Self::BuildModules,
         Self::BuildResources,
+        Self::TextureStaged,
+        Self::TextureImage,
+        Self::TextureStaging,
         Self::BuildPipeline,
         Self::KeepPipelineCache,
         Self::BufferResolve,

@@ -2698,8 +2698,9 @@ impl<'a> TextureWords<'a> {
 /// A texture's upload, laid out: every level's texels in staging order, the fine level's extent, and
 /// how many levels there are.
 #[derive(Debug, PartialEq, Eq)]
-struct Staged {
-    texels: Vec<u32>,
+struct Staged<'a> {
+    /// Where they already lie in staging order, or laid out afresh.
+    texels: std::borrow::Cow<'a, [u32]>,
     width: u32,
     height: u32,
     levels: u32,
@@ -2713,24 +2714,30 @@ struct Staged {
 /// zero, so the count is derived. Only the harness asks for it: a guest's texture has the levels it
 /// carries. The coarse level fills its whole halved extent, so the copy reads exactly what the
 /// buffer holds.
-fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
+fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged<'_> {
     let width = row.max(1);
     let cells = usize::try_from(width).unwrap_or(1);
     let rows = texels.len().div_ceil(cells).max(1);
-    let mut padded = texels.to_vec();
-    padded.resize(cells * rows, 0);
     let height = u32::try_from(rows).unwrap_or(1);
     let levels = if coarse_level && width > 1 && height > 1 {
         2
     } else {
         1
     };
-    if levels > 1 {
-        let coarse = (width / 2).max(1) as usize * (height / 2).max(1) as usize;
-        padded.resize(padded.len() + coarse, COARSE_TEXEL);
-    }
+    // Whole rows at one level are already in staging order: staged where they lie.
+    let texels = if levels == 1 && texels.len() == cells * rows {
+        std::borrow::Cow::Borrowed(texels)
+    } else {
+        let mut padded = texels.to_vec();
+        padded.resize(cells * rows, 0);
+        if levels > 1 {
+            let coarse = (width / 2).max(1) as usize * (height / 2).max(1) as usize;
+            padded.resize(padded.len() + coarse, COARSE_TEXEL);
+        }
+        std::borrow::Cow::Owned(padded)
+    };
     Staged {
-        texels: padded,
+        texels,
         width,
         height,
         levels,
@@ -2835,9 +2842,9 @@ fn border_colour_info(
 /// The host format a texture is created in and its texels as staged: `Rgba8` words padded and
 /// given their coarse level where asked; compressed blocks and packed floats as they are, one level,
 /// since averaging their bytes would mix their bit fields (D774).
-fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format, Staged) {
+fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Format, Staged<'a>) {
     let as_they_are = || Staged {
-        texels: texture.words.to_vec(),
+        texels: std::borrow::Cow::Borrowed(texture.words),
         width: texture.width,
         height: texture.height.unwrap_or(1),
         levels: 1,
@@ -2847,7 +2854,7 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
     let flat = texture.faces <= 1 && texture.slices.is_none();
     // A guest's mip chain, every level as it was read (D833).
     let chain = || Staged {
-        texels: texture.words.to_vec(),
+        texels: std::borrow::Cow::Borrowed(texture.words),
         width: texture.width,
         height: texture.height.unwrap_or(1),
         levels: texture.levels,
@@ -2918,7 +2925,11 @@ fn create_texture(
     sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
-    let (format, staged) = staged_texture(&texture, coarse_level);
+    let (format, staged) =
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::TextureStaged, || {
+            staged_texture(&texture, coarse_level)
+        });
+    let image_made = orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::TextureImage);
     let Staged {
         texels: padded,
         width,
@@ -2978,8 +2989,12 @@ fn create_texture(
     unsafe { device.bind_image_memory(image, memory, 0) }
         .map_err(|e| DispatchError::Vulkan("bind_image_memory(texture)", e))?;
 
+    drop(image_made);
     let size = words_to_bytes(padded.len());
-    let (staging, staging_memory) = staging_buffer(devices, &padded)?;
+    let (staging, staging_memory) =
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::TextureStaging, || {
+            staging_buffer(devices, &padded)
+        })?;
 
     let (aspect, compare) = texture_aspect(texture.encoding);
     let view_info = vk::ImageViewCreateInfo::default()
@@ -7749,7 +7764,8 @@ mod tests {
     /// expect.
     #[test]
     fn the_harness_coarse_level_stages_its_whole_extent() {
-        let laid = staged(&vec![7; 256 * 256], 256, true);
+        let sevens = vec![7; 256 * 256];
+        let laid = staged(&sevens, 256, true);
         assert_eq!(laid.levels, 2);
         assert_eq!(laid.texels.len(), 256 * 256 + 128 * 128);
         assert!(laid.texels[256 * 256..].iter().all(|&t| t == COARSE_TEXEL));
@@ -7760,5 +7776,25 @@ mod tests {
             1,
             "a one-by-one image has one level"
         );
+    }
+
+    /// Texels that fill whole rows at one level are staged where they lie, not copied: a video
+    /// plane's 4 MB were copied once to stage and again into the staging buffer. Padded rows or a
+    /// second level are laid out afresh.
+    #[test]
+    fn whole_rows_at_one_level_are_staged_where_they_lie() {
+        let texels = vec![5_u32; 4 * 3];
+        assert!(matches!(
+            staged(&texels, 4, false).texels,
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            staged(&texels[..10], 4, false).texels,
+            std::borrow::Cow::Owned(_)
+        ));
+        assert!(matches!(
+            staged(&texels, 4, true).texels,
+            std::borrow::Cow::Owned(_)
+        ));
     }
 }
