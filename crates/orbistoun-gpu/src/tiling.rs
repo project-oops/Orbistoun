@@ -79,6 +79,34 @@ pub fn linear_bpp1_packed(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
     packed
 }
 
+/// [`linear_bpp1_packed`], shared. Rows that lie one after another - the pitch is the width - are
+/// read straight into the shared words, one allocation and one pass: the packed vector and its copy
+/// into shared texels were each a pass over GTA V's 4 MB video planes. A wider pitch packs as
+/// [`linear_bpp1_packed`] does.
+///
+/// # Panics
+///
+/// As [`linear_bpp1_packed`].
+#[must_use]
+pub fn linear_bpp1_packed_shared(bytes: &[u8], width: u32, height: u32) -> std::sync::Arc<[u32]> {
+    let count = width as usize * height as usize;
+    if SurfaceLayout::LinearBpp1.linear_pitch(width) != width {
+        return linear_bpp1_packed(bytes, width, height).into();
+    }
+    let texels = &bytes[..count];
+    let words = texels.chunks_exact(4);
+    let tail = words.remainder();
+    let last = (!tail.is_empty()).then(|| {
+        tail.iter()
+            .rev()
+            .fold(0_u32, |word, &byte| word << 8 | u32::from(byte))
+    });
+    words
+        .map(|four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+        .chain(last)
+        .collect()
+}
+
 /// Texels per side of an 8-bpp `64KB_R_X` block: 64 KiB of one-byte texels, 256 x 256.
 const RX_BPP1_BLOCK_EXTENT: u32 = 256;
 
@@ -2975,6 +3003,23 @@ mod tests {
             .collect();
         assert_eq!(unpacked, widened);
         assert_eq!(packed.len(), 4, "fifteen bytes in four words");
+    }
+
+    /// The shared packed texels are the packed ones, rows at the width or at a wider pitch.
+    #[test]
+    fn a_one_byte_linear_surface_reads_shared_as_packed() {
+        use super::SurfaceLayout;
+        let layout = SurfaceLayout::LinearBpp1;
+        for (width, height) in [(5, 3), (256, 2), (7, 1)] {
+            let bytes: Vec<u8> = (0..layout.words(width, height) * 4)
+                .map(|at| u8::try_from(at % 251).expect("small"))
+                .collect();
+            assert_eq!(
+                *super::linear_bpp1_packed_shared(&bytes, width, height),
+                super::linear_bpp1_packed(&bytes, width, height),
+                "{width} x {height}"
+            );
+        }
     }
 
     /// A 128-bpp `64KB_D_X` surface lies as addrlib places it for this console: each coordinate

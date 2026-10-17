@@ -7659,12 +7659,16 @@ fn read_tiled_base(
     } else {
         let started = std::time::Instant::now();
         let bytes = memory.read(surface.base, span)?;
-        let mut hasher = crate::ContentHasher::new(span / 4);
-        hasher.bytes(bytes);
-        let hash = hasher.finish() ^ u64::from(float_tag);
+        let hash = crate::perf::span(crate::perf::Span::BaseHash, || {
+            let mut hasher = crate::ContentHasher::new(span / 4);
+            hasher.bytes(bytes);
+            hasher.finish()
+        }) ^ u64::from(float_tag);
         let shared = match texels.get(&key) {
             Some(cached) if cached.hash == hash => cached.texels.clone(),
-            _ if packs => crate::tiling::linear_bpp1_packed(bytes, width, height).into(),
+            _ if packs => crate::perf::span(crate::perf::Span::BaseTexels, || {
+                crate::tiling::linear_bpp1_packed_shared(bytes, width, height)
+            }),
             _ => {
                 // The guest's words read where they lie when they are aligned, as they are for any
                 // surface base; a copy only otherwise. Both are the little-endian words the host

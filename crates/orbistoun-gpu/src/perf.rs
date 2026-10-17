@@ -108,6 +108,8 @@ macro_rules! span_labels {
             Span::BufferRead => $as!("buffers: read"),
             Span::TextureKept => $as!("textures: kept"),
             Span::TextureBase => $as!("textures: base level"),
+            Span::BaseHash => $as!("base level: hash"),
+            Span::BaseTexels => $as!("base level: texels"),
             Span::TextureLinear => $as!("textures: linear read"),
             Span::TextureBorders => $as!("textures: borders"),
             Span::TextureLevels => $as!("textures: levels"),
@@ -546,6 +548,10 @@ pub enum Span {
     TextureKept,
     /// A tiled texture's base level, kept or read and detiled.
     TextureBase,
+    /// Within [`Self::TextureBase`]: a level read afresh hashed, so the same contents are known.
+    BaseHash,
+    /// Within [`Self::TextureBase`]: a level read afresh made into texels - detiled or packed.
+    BaseTexels,
     /// A linear texture read from guest memory and hashed, its kept texels written since.
     TextureLinear,
     /// The border colours a submission's samplers name, read from its border table.
@@ -653,7 +659,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 117] = [
+    pub const ALL: [Self; 119] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -726,6 +732,8 @@ impl Span {
         Self::BufferRead,
         Self::TextureKept,
         Self::TextureBase,
+        Self::BaseHash,
+        Self::BaseTexels,
         Self::TextureLinear,
         Self::TextureBorders,
         Self::TextureLevels,
