@@ -13,17 +13,17 @@ pub mod syscall;
 
 pub use dispatch::{
     ArgumentDump, CALLEE_SAVED_REGISTERS, CallerStack, DUMP_BYTES, ForcedWrite, GuestFn, Plant,
-    Pointing, RecordedCall, SHAPE_OTHER, SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, abi_conformance,
-    arg_shapes, argument_dumps, call_counts, caller_stacks, classify_arg, current_call,
-    current_thread, describe_shape, dropped_ranges, dumps_dropped, entry_alignment_conforms,
-    first_stub_site, float_arguments, forced_return_count, forced_write_counts, host_thread,
-    implemented_count, implemented_count_within, inside_by_thread, inside_seconds,
-    install_call_budget, install_float_handlers, install_forced_dumps, install_forced_returns,
-    install_forced_writes, install_handlers, install_policy_returns, install_policy_writes,
-    install_readable_ranges, install_stub_returns, install_writable_ranges, is_implemented,
-    is_mapped, last_call, last_call_on, note_readable_range, opening_calls, opening_sequence,
-    ranges_known, readable_span, recent_calls_on, recorded_calls, stack_arguments, threads_inside,
-    total_calls,
+    Pointing, RecordedCall, SHAPE_OTHER, SHAPE_POINTER, SHAPE_SCALAR, SHAPE_ZERO, ThreadInside,
+    abi_conformance, arg_shapes, argument_dumps, call_counts, caller_stacks, classify_arg,
+    current_call, current_thread, describe_shape, dropped_ranges, dumps_dropped,
+    entry_alignment_conforms, first_stub_site, float_arguments, forced_return_count,
+    forced_write_counts, host_thread, implemented_count, implemented_count_within,
+    inside_by_thread, inside_seconds, install_call_budget, install_float_handlers,
+    install_forced_dumps, install_forced_returns, install_forced_writes, install_handlers,
+    install_policy_returns, install_policy_writes, install_readable_ranges, install_stub_returns,
+    install_writable_ranges, is_implemented, is_mapped, last_call, last_call_on,
+    note_readable_range, opening_calls, opening_sequence, ranges_known, readable_span,
+    recent_calls_on, recorded_calls, stack_arguments, threads_inside, total_calls,
 };
 
 use orbistoun_mem::{AddressSpace, MemError, Protection};

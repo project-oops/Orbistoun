@@ -272,9 +272,10 @@ static COUNTS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new(
 /// index. Allocated with [`COUNTS`].
 static INSIDE_TICKS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
-/// How many imports each published thread's time inside is kept for; ticks inside any further
-/// import are not kept per thread, though the run's per-import totals count them.
-pub const THREAD_IMPORTS_KEPT: usize = 16;
+/// How many imports each published thread's time inside is kept for. When all are taken, a call
+/// that spent more than the lightest holds replaces it; time in imports not kept is still in the
+/// thread's total and the run's per-import totals.
+pub const THREAD_IMPORTS_KEPT: usize = 64;
 
 /// Each published thread's imports, plus one (zero for an empty entry), that its time inside is
 /// kept for, by slot. Written only by the thread the slot belongs to.
@@ -284,11 +285,34 @@ static THREAD_INSIDE_IMPORT: [[AtomicU64; THREAD_IMPORTS_KEPT]; PUBLISHED_THREAD
 static THREAD_INSIDE_TICKS: [[AtomicU64; THREAD_IMPORTS_KEPT]; PUBLISHED_THREADS] =
     [const { [const { AtomicU64::new(0) }; THREAD_IMPORTS_KEPT] }; PUBLISHED_THREADS];
 
+/// One thread's [`inside_by_thread`] row: its host thread, its life and time inside in seconds, and
+/// its kept imports' seconds.
+pub type ThreadInside = (u64, (f64, f64), Vec<(u32, f64)>);
+
+/// Each published thread's counter at its first import call, and at the end of its latest: its
+/// life as its calls bound it, by slot.
+static THREAD_FIRST_TICK: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+static THREAD_LAST_TICK: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+/// Each published thread's ticks inside any import, kept in its table or not, by slot.
+static THREAD_INSIDE_ALL: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+
 /// Adds `spent` ticks inside import `index` to this thread's table, in its entry for the import or
 /// the first empty one; dropped when all are taken by other imports. Only this thread writes its
 /// slot, so a load and a store suffice.
-fn note_thread_inside(index: u64, spent: u64) {
+fn note_thread_inside(index: u64, (entered, spent): (u64, u64)) {
     let slot = published_slot();
+    if let (Some(first), Some(last)) = (THREAD_FIRST_TICK.get(slot), THREAD_LAST_TICK.get(slot)) {
+        if first.load(Ordering::Relaxed) == 0 {
+            first.store(entered, Ordering::Relaxed);
+        }
+        last.store(entered.wrapping_add(spent), Ordering::Relaxed);
+    }
+    if let Some(all) = THREAD_INSIDE_ALL.get(slot) {
+        all.store(all.load(Ordering::Relaxed) + spent, Ordering::Relaxed);
+    }
     let (Some(imports), Some(ticks)) = (
         THREAD_INSIDE_IMPORT.get(slot),
         THREAD_INSIDE_TICKS.get(slot),
@@ -308,6 +332,19 @@ fn note_thread_inside(index: u64, spent: u64) {
             }
             _ => {}
         }
+    }
+    // Full: a call that spent more than the lightest entry holds takes its place, so the imports a
+    // thread spends its time inside are the ones kept. What the entry held is still in the thread's
+    // total, said as time in imports not kept.
+    let lightest = ticks
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, ticks)| ticks.load(Ordering::Relaxed));
+    if let Some((at, held)) = lightest
+        && held.load(Ordering::Relaxed) < spent
+    {
+        held.store(spent, Ordering::Relaxed);
+        imports[at].store(index + 1, Ordering::Relaxed);
     }
 }
 
@@ -1373,11 +1410,12 @@ pub fn inside_seconds() -> Vec<f64> {
         .collect()
 }
 
-/// Each published host thread's time inside the imports its table kept, as `(host thread, [(import,
-/// seconds)])`, converted as [`inside_seconds`] converts.
+/// Each published host thread's life - from its first import call to the end of its latest - its
+/// time inside any import, and its time inside the imports its table kept, as `(host thread, (life
+/// seconds, seconds inside), [(import, seconds)])`, converted as [`inside_seconds`] converts.
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // tick counts far below 2^52 matter only to a ratio
-pub fn inside_by_thread() -> Vec<(u64, Vec<(u32, f64)>)> {
+pub fn inside_by_thread() -> Vec<ThreadInside> {
     let Some(&(start, since)) = INSIDE_SINCE.get() else {
         return Vec::new();
     };
@@ -1403,7 +1441,17 @@ pub fn inside_by_thread() -> Vec<(u64, Vec<(u32, f64)>)> {
                     ))
                 })
                 .collect();
-            (PUBLISHED_HOST[slot].load(Ordering::Relaxed), kept)
+            let life = THREAD_LAST_TICK[slot]
+                .load(Ordering::Relaxed)
+                .saturating_sub(THREAD_FIRST_TICK[slot].load(Ordering::Relaxed));
+            (
+                PUBLISHED_HOST[slot].load(Ordering::Relaxed),
+                (
+                    life as f64 / per_second,
+                    THREAD_INSIDE_ALL[slot].load(Ordering::Relaxed) as f64 / per_second,
+                ),
+                kept,
+            )
         })
         .collect()
 }
@@ -1665,7 +1713,7 @@ unsafe extern "sysv64" fn on_guest_call(
     if let Some(inside) = INSIDE_TICKS.get().and_then(|t| t.get(index as usize)) {
         inside.fetch_add(spent, Ordering::Relaxed);
     }
-    note_thread_inside(index, spent);
+    note_thread_inside(index, (entered, spent));
     leave_import(outer);
 
     // A named import's dumped calls are dumped again as they return, so an out-parameter shows

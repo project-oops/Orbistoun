@@ -3064,55 +3064,75 @@ fn inside_line(rows: &[(String, f64, u64)]) -> Option<String> {
     ))
 }
 
+/// A thread's name, its life and time inside any import in seconds, and its kept imports' labels
+/// and seconds.
+type NamedThreadInside = (String, (f64, f64), Vec<(String, f64)>);
+
 /// How many threads [`inside_by_thread_lines`] names, and how many imports for each.
 const INSIDE_THREADS_NAMED: usize = 8;
 const INSIDE_THREAD_IMPORTS_NAMED: usize = 3;
 
-/// One line per thread that spent at least [`INSIDE_LEAST_SECONDS`] inside imports, the most
-/// first: its name, its seconds inside, and its heaviest imports, from `(name, [(import,
-/// seconds)])` rows - which thread waits on what, where the sum across threads cannot say.
-fn inside_by_thread_lines(threads: &[(String, Vec<(String, f64)>)]) -> Vec<String> {
+/// One line per thread, those longest in their own code first: its seconds in its own code - its
+/// life less its time inside imports - its seconds inside, and its heaviest imports, from `(name,
+/// (life seconds, seconds inside any import), [(import, seconds)])` rows. Threads that lived under [`INSIDE_LEAST_SECONDS`] are
+/// left out. The busy threads a frame waits on come first, not the idle ones that sleep all run.
+fn inside_by_thread_lines(threads: &[NamedThreadInside]) -> Vec<String> {
+    use std::fmt::Write as _;
+
     let mut named: Vec<_> = threads
         .iter()
-        .map(|(name, inside)| {
+        .filter(|(_, (life, _), _)| *life >= INSIDE_LEAST_SECONDS)
+        .map(|(name, (life, total), inside)| {
             let mut heaviest: Vec<&(String, f64)> = inside
                 .iter()
                 .filter(|(_, seconds)| *seconds >= INSIDE_LEAST_SECONDS)
                 .collect();
             heaviest.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let kept: f64 = inside.iter().map(|(_, seconds)| seconds).sum();
             (
                 name.as_str(),
-                inside.iter().map(|(_, seconds)| seconds).sum::<f64>(),
+                (life - total).max(0.0),
+                (*total, (total - kept).max(0.0)),
                 heaviest,
             )
         })
-        .filter(|(_, total, _)| *total >= INSIDE_LEAST_SECONDS)
         .collect();
     named.sort_by(|a, b| b.1.total_cmp(&a.1));
     named
         .into_iter()
         .take(INSIDE_THREADS_NAMED)
-        .map(|(name, total, heaviest)| {
+        .map(|(name, own, (total, not_kept), heaviest)| {
             let parts: Vec<String> = heaviest
                 .iter()
                 .take(INSIDE_THREAD_IMPORTS_NAMED)
                 .map(|(label, seconds)| format!("{label} {seconds:.1} s"))
                 .collect();
-            format!("{name}: {total:.1} s inside imports - {}", parts.join(", "))
+            let mut line = format!(
+                "{name}: {own:.1} s in its own code, {total:.1} s inside imports - {}",
+                parts.join(", ")
+            );
+            // Time inside imports past the thread's table is not lost: it is said, unnamed.
+            let not_kept = format!("{not_kept:.1}");
+            if not_kept != "0.0" {
+                let _ = write!(line, "; {not_kept} s in imports not kept");
+            }
+            line
         })
         .collect()
 }
 
-/// Each guest thread's time inside the imports the thunk kept for it, by the thread's name.
-fn thread_inside() -> Vec<(String, Vec<(String, f64)>)> {
+/// Each guest thread's life and time inside the imports the thunk kept for it, by the thread's
+/// name.
+fn thread_inside() -> Vec<NamedThreadInside> {
     let by_host = orbistoun_thunk::inside_by_thread();
     orbistoun_kernel::thread::all()
         .into_iter()
         .filter(|record| record.host != 0)
         .filter_map(|record| {
-            let (_, inside) = by_host.iter().find(|(host, _)| *host == record.host)?;
+            let (_, life, inside) = by_host.iter().find(|(host, ..)| *host == record.host)?;
             Some((
                 record.name,
+                *life,
                 inside
                     .iter()
                     .map(|&(index, seconds)| (labelled(index as usize), seconds))
@@ -3214,13 +3234,16 @@ mod inside_tests {
         assert_eq!(super::inside_line(&rows[2..]), None);
     }
 
-    /// Each thread's time inside imports is named with its heaviest imports, the threads with the
-    /// most first: which thread waits on what, where the sum across threads cannot say.
+    /// Each thread is named with the time it spent in its own code - its life between its first
+    /// and last import call, less its time inside imports - and its heaviest imports, the threads
+    /// longest in their own code first: the busy threads a frame waits on, not the idle ones that
+    /// sleep all run.
     #[test]
     fn each_thread_names_what_it_spent_its_time_inside() {
-        let thread = |name: &str, inside: &[(&str, f64)]| {
+        let thread = |name: &str, (life, all): (f64, f64), inside: &[(&str, f64)]| {
             (
                 name.to_owned(),
+                (life, all),
                 inside
                     .iter()
                     .map(|&(label, seconds)| (label.to_owned(), seconds))
@@ -3228,9 +3251,11 @@ mod inside_tests {
             )
         };
         let lines = super::inside_by_thread_lines(&[
-            thread("audio", &[("Push", 3.0)]),
+            thread("idle", (150.0, 149.5), &[("Usleep", 149.5)]),
+            // Time inside an import its table did not keep still counts as inside.
             thread(
                 "render",
+                (100.0, 70.0),
                 &[
                     ("WaitSema", 40.0),
                     ("SubmitDcb", 20.0),
@@ -3238,13 +3263,16 @@ mod inside_tests {
                     ("Usleep", 0.5),
                 ],
             ),
-            thread("idle", &[("Lock", 0.0004)]),
+            thread("quiet", (0.0004, 0.0), &[]),
         ]);
         assert_eq!(
             lines,
             [
-                "render: 61.5 s inside imports - WaitSema 40.0 s, SubmitDcb 20.0 s, Lock 1.0 s",
-                "audio: 3.0 s inside imports - Push 3.0 s",
+                concat!(
+                    "render: 30.0 s in its own code, 70.0 s inside imports - ",
+                    "WaitSema 40.0 s, SubmitDcb 20.0 s, Lock 1.0 s; 8.5 s in imports not kept"
+                ),
+                "idle: 0.5 s in its own code, 149.5 s inside imports - Usleep 149.5 s",
             ]
         );
     }
