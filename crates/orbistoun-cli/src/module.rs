@@ -115,16 +115,46 @@ pub(crate) fn cmd_disasm(
     Ok(())
 }
 
-/// `callers` - what names an image offset, walked `depth` levels up through the functions holding
-/// each reference. A function reached at an earlier level is not walked again.
+/// The linkage slot whose import `labels` names `name`, bare or as `library::name`, or by `hash`,
+/// the name's import hash, where orbistoun declares no such name and the label is the hash.
+fn named_slot(
+    labels: &std::collections::BTreeMap<u64, String>,
+    name: &str,
+    hash: u64,
+) -> Option<u64> {
+    let hashed = format!("{hash:#018x}");
+    labels.iter().find_map(|(&slot, label)| {
+        let bare = label.rsplit("::").next().unwrap_or(label);
+        (label == name || bare == name || *label == hashed).then_some(slot)
+    })
+}
+
+/// `callers` - what names an image offset, or the linkage slot an import is called through, walked
+/// `depth` levels up through the functions holding each reference: the slot's first level is its
+/// linkage stub, the next the title's calls. A function reached at an earlier level is not walked
+/// again.
 pub(crate) fn cmd_callers(
     service: &Service,
     path: &std::path::Path,
     at: &str,
     depth: usize,
 ) -> Result<()> {
-    let target = image_offset(at)
-        .with_context(|| format!("{at} is not an image offset such as image+0x2b42a40"))?;
+    let target = if let Some(offset) = image_offset(at) {
+        offset
+    } else {
+        let hash = service.hash_name(at).as_raw();
+        let slot = named_slot(&service.slot_labels_path(path)?, at, hash).with_context(|| {
+            format!(
+                concat!(
+                    "{} is neither an image offset such as image+0x2b42a40 nor an import the ",
+                    "module calls through a linkage slot"
+                ),
+                at
+            )
+        })?;
+        println!("{at} is called through the linkage slot at image+{slot:#x}");
+        slot
+    };
     let mut level = vec![target];
     let mut walked = std::collections::BTreeSet::from([target]);
     for indent in 0..depth.max(1) {
@@ -140,7 +170,10 @@ pub(crate) fn cmd_callers(
                     "{pad}image+{function:#x} <- image+{:#x}  {}  (in image+{:#x})",
                     reference.at, reference.how, reference.within
                 );
-                if reference.within != reference.at && walked.insert(reference.within) {
+                // A data word names no function to walk; an instruction does, even the first of its
+                // function, as a linkage stub's jump is.
+                let in_code = reference.within != reference.at || reference.how.starts_with("jmp");
+                if in_code && walked.insert(reference.within) {
                     next.push(reference.within);
                 }
             }
@@ -579,5 +612,32 @@ mod tests {
             super::import_line(&import),
             "0x0000000000001234  libc  malloc  [data]  [weak]"
         );
+    }
+
+    /// An import named bare, with its library, or by the hash of an undeclared name finds the
+    /// linkage slot it is called through.
+    #[test]
+    fn an_import_name_finds_its_linkage_slot() {
+        let labels = std::collections::BTreeMap::from([
+            (0x10, "libSceNpTrophy2::sceNpTrophy2GetGameInfo".to_owned()),
+            (
+                0x18,
+                "libSceNpTrophy2::sceNpTrophy2GetGameInfoArray".to_owned(),
+            ),
+            (0x20, "0x00000000deadbeef".to_owned()),
+        ]);
+        assert_eq!(
+            super::named_slot(&labels, "sceNpTrophy2GetGameInfo", 1),
+            Some(0x10)
+        );
+        assert_eq!(
+            super::named_slot(&labels, "libSceNpTrophy2::sceNpTrophy2GetGameInfoArray", 1),
+            Some(0x18)
+        );
+        assert_eq!(
+            super::named_slot(&labels, "anUndeclaredName", 0xdead_beef),
+            Some(0x20)
+        );
+        assert_eq!(super::named_slot(&labels, "GetGameInfo", 1), None);
     }
 }

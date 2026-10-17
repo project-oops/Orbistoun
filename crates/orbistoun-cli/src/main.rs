@@ -130,13 +130,14 @@ enum Command {
         #[arg(long)]
         words: bool,
     },
-    /// List what names an image offset in a module - each call, jump or address-take, with the
-    /// function holding it, and each data word relocated to it - walking up `--depth` callers:
-    /// what reaches a function that never runs.
+    /// List what names an image offset or an import in a module - each call, jump or address-take,
+    /// with the function holding it, and each data word relocated to it - walking up `--depth`
+    /// callers: what reaches a function that never runs, or where a title calls an import.
     Callers {
         /// Path to a guest executable or module.
         path: std::path::PathBuf,
-        /// The address: an image offset, as `image+0x2b42a40` or `0x2b42a40`.
+        /// The address: an image offset, as `image+0x2b42a40` or `0x2b42a40`, or an import's name,
+        /// as `sceNpTrophy2GetGameInfo`, for the linkage slot it is called through.
         at: String,
         /// How many callers up to walk, each level the callers of the functions holding the last.
         #[arg(long, default_value_t = 1)]

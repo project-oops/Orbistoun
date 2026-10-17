@@ -1124,6 +1124,26 @@ impl Service {
         )?)
     }
 
+    /// Each procedure linkage slot of the module at `path`, by image offset, with the import it
+    /// holds: `library::name` where the registry knows it, its hash otherwise.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or its container parsed.
+    pub fn slot_labels_path(
+        &self,
+        path: &Path,
+    ) -> Result<std::collections::BTreeMap<u64, String>, ServiceError> {
+        let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(orbistoun_loader::inventory::slot_labels(
+            &bytes,
+            &self.registry,
+        )?)
+    }
+
     /// Every place the module at `path` names image offset `target`: each call, jump or address-take
     /// with the function holding it, and each data word relocated to it.
     ///
