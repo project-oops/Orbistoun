@@ -112,3 +112,18 @@ known_by = "assumed"
 assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne has not measured the call."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpRegisterNpReachabilityStateCallback"
+arity = 2
+purpose = "(function, userdata): registers a callback for the network's reachability."
+returns = "status"
+edge_cases = [
+    "orbistoun keeps it and answers 0; the next sceNpCheckCallback delivers it once as (user, 0 unreachable, userdata), as the state callbacks are delivered signed out. A null function answers 0x80550003, a second registration 0x80550008.",
+    "PPSA04263 registers one at its online start-up (image+0x2d3bb95).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer and delivery, as the reference emulators give them; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

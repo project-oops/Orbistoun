@@ -296,3 +296,18 @@ known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 4."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceSystemServiceSetNoticeScreenSkipFlag"
+arity = 1
+purpose = "(flag): sets the system's notice-screen skip flag for the title's next launch."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0. The flag decides the next launch's notice screens, so a run, always a first launch, goes on reading 0 from sceSystemServiceGetNoticeScreenSkipFlag.",
+    "PPSA04263 sets it once its notices are shown (image+0xc18af1).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The answer the reference emulators give; obSCEne has not measured the setter."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

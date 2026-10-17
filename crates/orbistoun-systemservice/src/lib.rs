@@ -40,6 +40,8 @@ guest_module! {
         "sceSystemServiceGetStatus" => 1,
         // (flag): one byte.
         "sceSystemServiceGetNoticeScreenSkipFlag" => 1,
+        // (flag)
+        "sceSystemServiceSetNoticeScreenSkipFlag" => 1,
         "sceSystemServiceReceiveEvent" => 1,
         "sceSystemServiceGetHdrToneMapLuminance" => 1,
         // title id, argv, parameter block.
@@ -643,6 +645,15 @@ fn system_service_get_notice_screen_skip_flag(args: &[u64; GUEST_ARG_REGISTERS])
     }
 }
 
+/// `sceSystemServiceSetNoticeScreenSkipFlag(flag)`: answers 0. The flag is the system's, for this
+/// title's next launch - the notice screens a launch shows are decided when it starts - so a run,
+/// always a first launch, goes on reading 0 (assumed, as the reference emulators answer it; the
+/// console's own log reads the flag at launch). PPSA04263 sets it once its notices are shown
+/// (image+0xc18af1).
+const fn system_service_set_notice_screen_skip_flag(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
 /// `sceUserServiceGetInitialUser(out)` - the user a title should start as.
 fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
@@ -855,6 +866,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     (
         "sceSystemServiceGetNoticeScreenSkipFlag",
         system_service_get_notice_screen_skip_flag,
+    ),
+    (
+        "sceSystemServiceSetNoticeScreenSkipFlag",
+        system_service_set_notice_screen_skip_flag,
     ),
     (
         "sceUserServiceGetGamePresets",

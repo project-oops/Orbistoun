@@ -19,6 +19,8 @@ guest_module! {
         // (user, out)
         "sceNpGetState" => 2,
         // (function, userdata)
+        "sceNpRegisterNpReachabilityStateCallback" => 2,
+        // (function, userdata)
         "sceNpRegisterPremiumEventCallback" => 2,
         // (function, userdata)
         "sceNpRegisterStateCallbackA" => 2,
@@ -41,6 +43,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         (
             "sceNpRegisterPremiumEventCallback",
             register_premium_event_callback,
+        ),
+        (
+            "sceNpRegisterNpReachabilityStateCallback",
+            register_np_reachability_state_callback,
         ),
         ("sceNpUnregisterStateCallbackA", unregister_state_callback_a),
         ("sceNpSetNpTitleId", set_np_title_id),
@@ -70,6 +76,51 @@ fn check_callback(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             orbistoun_kernel::thread::call_guest(function, [user, u64::from(SIGNED_OUT), userdata])
         };
     }
+    if let Some((function, userdata)) = reachability_owed() {
+        // SAFETY: `function` is the guest's own reachability callback, handed over by
+        // `sceNpRegisterNpReachabilityStateCallback`; it is called as the library would, with the
+        // user, the reachability and the guest's own userdata.
+        let _ = unsafe {
+            orbistoun_kernel::thread::call_guest(function, [user, u64::from(UNREACHABLE), userdata])
+        };
+    }
+    0
+}
+
+/// The reachability an offline console reports: the network cannot be reached.
+const UNREACHABLE: u32 = 0;
+
+/// The reachability callback a title registered, its userdata, and whether its one delivery is
+/// still owed.
+static REACHABILITY_CALLBACK: std::sync::Mutex<Option<(u64, u64, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// The reachability callback still owed its delivery, marked delivered.
+fn reachability_owed() -> Option<(u64, u64)> {
+    let mut held = REACHABILITY_CALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (function, userdata, owed) = held.as_mut()?;
+    std::mem::replace(owed, false).then_some((*function, *userdata))
+}
+
+/// `sceNpRegisterNpReachabilityStateCallback(function, userdata)`: keeps the callback and answers
+/// 0; the next `sceNpCheckCallback` delivers it once - `(user, 0, userdata)`, unreachable, the one
+/// reachability an offline console has - as the state callbacks are delivered signed out (assumed,
+/// as the reference emulators answer it). A null function answers [`NP_INVALID_ARGUMENT`]; a
+/// second registration, [`NP_CALLBACK_ALREADY_REGISTERED`]. PPSA04263 registers one at its online
+/// start-up (image+0x2d3bb95).
+fn register_np_reachability_state_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return NP_INVALID_ARGUMENT;
+    }
+    let mut held = REACHABILITY_CALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.is_some() {
+        return NP_CALLBACK_ALREADY_REGISTERED;
+    }
+    *held = Some((args[0], args[1], true));
     0
 }
 
@@ -264,6 +315,25 @@ fn register_premium_event_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::StateCallbacks;
+
+    /// A reachability callback is kept and owed one delivery; a null one and a second are refused.
+    #[test]
+    fn a_reachability_callback_is_owed_one_delivery() {
+        assert_eq!(
+            super::register_np_reachability_state_callback(&[0; 6]),
+            super::NP_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            super::register_np_reachability_state_callback(&[0x4000, 9, 0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            super::register_np_reachability_state_callback(&[0x5000, 9, 0, 0, 0, 0]),
+            super::NP_CALLBACK_ALREADY_REGISTERED
+        );
+        assert_eq!(super::reachability_owed(), Some((0x4000, 9)));
+        assert_eq!(super::reachability_owed(), None, "delivered once");
+    }
 
     /// A premium-event callback is kept and answered 0; a null one is refused.
     #[test]
