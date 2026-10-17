@@ -1242,7 +1242,7 @@ fn stored_image_writes(
         let mut before = images
             .stored
             .as_ref()
-            .map(|stored| std::borrow::Cow::Borrowed(stored.texels.as_slice()));
+            .map(|stored| std::borrow::Cow::Borrowed(&*stored.texels));
         // Texels a descriptor reorders were read into the shader's order; memory keeps its own.
         if let Some(order) = images.stored_order {
             for texel in &mut texels {
@@ -6382,7 +6382,7 @@ mod tests {
         let mut spanned = vec![0; surface.bytes()];
         surface.tile(&before, &mut spanned).expect("tiled");
         let stored = DispatchTexels {
-            texels: before.clone(),
+            texels: before.clone().into(),
             format: TexelFormat::Rgba8,
             width,
             height,
@@ -6427,7 +6427,7 @@ mod tests {
         };
         let reordered = DispatchImages {
             stored: Some(DispatchTexels {
-                texels: swapped(&before),
+                texels: swapped(&before).into(),
                 format: TexelFormat::Rgba8,
                 width,
                 height,

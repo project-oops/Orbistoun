@@ -3009,6 +3009,20 @@ impl DispatchSurface {
                 ..
             } => {
                 let size = *bytes_per_texel as usize;
+                // A one-byte texel is its byte in a word's low eight bits: each row read byte by
+                // byte, as the fold below would, in a form the compiler reads many at a time.
+                if size == 1 {
+                    let mut texels = Vec::with_capacity(*width as usize * *height as usize);
+                    for row in 0..*height as usize {
+                        let start = row * *pitch as usize;
+                        texels.extend(
+                            spanned[start..start + *width as usize]
+                                .iter()
+                                .map(|&byte| u32::from(byte)),
+                        );
+                    }
+                    return texels;
+                }
                 // A texel wider than a word is its words in order.
                 let word = size.min(4);
                 (0..*height as usize)
@@ -3174,8 +3188,9 @@ fn slice_words(words: &[u32], z: u32) -> Vec<u32> {
 /// One image a dispatch binds, as linear texels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTexels {
-    /// Row-major texels, each its bits in the low bytes of a word.
-    pub texels: Vec<u32>,
+    /// Row-major texels, each its bits in the low bytes of a word: shared with the detiled images
+    /// kept, so a dispatch that reads the same image again copies none of it.
+    pub texels: std::sync::Arc<[u32]>,
     /// What a texel is.
     pub format: TexelFormat,
     /// Width in texels.
@@ -3235,8 +3250,8 @@ fn dispatch_images(
                 let texels = detiled.detile(&surface, &spanned);
                 match order {
                     Some(order) => texels
-                        .into_iter()
-                        .map(|texel| to_shader_channels(texel, order))
+                        .iter()
+                        .map(|&texel| to_shader_channels(texel, order))
                         .collect(),
                     None => texels,
                 }
@@ -3258,7 +3273,7 @@ fn dispatch_images(
                         keys: (crate::dcc::meta_start(dcc), bytes),
                         surface: (descriptor.base, chain),
                     });
-                vec![0; surface.texels() * format.words() as usize]
+                vec![0; surface.texels() * format.words() as usize].into()
             }
             crate::dcc::Keys::Other => {
                 return Err(concat!(
@@ -3300,13 +3315,13 @@ fn fetched_image(
             let texels = detiled.detile(&surface, &read_spanned(&surface, memory)?);
             match order {
                 Some(order) => texels
-                    .into_iter()
-                    .map(|texel| to_shader_channels(texel, order))
+                    .iter()
+                    .map(|&texel| to_shader_channels(texel, order))
                     .collect(),
                 None => texels,
             }
         }
-        crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize],
+        crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize].into(),
         crate::dcc::Keys::Other => {
             return Err(concat!(
                 "the fetched image's compression keys need per-block addressing, which is ",
@@ -3349,7 +3364,7 @@ fn fetched_integer(images: &DispatchImages) -> Result<bool, String> {
 /// detile is a function of the two, and MDEM00001's dispatches read the same images every frame -
 /// comparing their bytes costs a fraction of swizzling every texel again.
 #[derive(Debug, Default)]
-struct DetiledImages(Vec<(DispatchSurface, Vec<u8>, Vec<u32>)>);
+struct DetiledImages(Vec<(DispatchSurface, Vec<u8>, std::sync::Arc<[u32]>)>);
 
 /// How many detiled images are kept: a dispatch binds two, and a frame runs a few.
 const DETILED_KEPT: usize = 8;
@@ -3357,7 +3372,7 @@ const DETILED_KEPT: usize = 8;
 impl DetiledImages {
     /// `spanned`, `surface`'s bytes, detiled: the texels kept for them where the surface and the
     /// bytes are the ones kept, else detiled now and kept.
-    fn detile(&mut self, surface: &DispatchSurface, spanned: &[u8]) -> Vec<u32> {
+    fn detile(&mut self, surface: &DispatchSurface, spanned: &[u8]) -> std::sync::Arc<[u32]> {
         if let Some(at) = self
             .0
             .iter()
@@ -3369,7 +3384,13 @@ impl DetiledImages {
             self.0.push(entry);
             return texels;
         }
-        let texels = surface.detile(spanned);
+        let started = std::time::Instant::now();
+        let texels: std::sync::Arc<[u32]> = surface.detile(spanned).into();
+        crate::detiled::note(
+            &format!("{} read by a dispatch", surface.layout_name()),
+            spanned.len() as u64,
+            started.elapsed(),
+        );
         if self.0.len() >= DETILED_KEPT {
             self.0.remove(0);
         }
@@ -11280,21 +11301,24 @@ mod tests {
         };
         let mut spanned: Vec<u8> = (0..67_u32).flat_map(u32::to_le_bytes).collect();
         let mut detiled = DetiledImages::default();
-        assert_eq!(detiled.detile(&surface, &spanned), surface.detile(&spanned));
         assert_eq!(
-            detiled.detile(&surface, &spanned),
-            surface.detile(&spanned),
+            *detiled.detile(&surface, &spanned),
+            *surface.detile(&spanned)
+        );
+        assert_eq!(
+            *detiled.detile(&surface, &spanned),
+            *surface.detile(&spanned),
             "kept"
         );
         assert_eq!(
-            detiled.detile(&narrow, &spanned),
-            narrow.detile(&spanned),
+            *detiled.detile(&narrow, &spanned),
+            *narrow.detile(&spanned),
             "another surface"
         );
         spanned[4] = 0xff;
         assert_eq!(
-            detiled.detile(&surface, &spanned),
-            vec![0, 0xff, 2, 64, 65, 66],
+            *detiled.detile(&surface, &spanned),
+            [0, 0xff, 2, 64, 65, 66],
             "new bytes"
         );
     }
