@@ -550,6 +550,25 @@ struct RunPerf {
     window_ms: f64,
     flips: u64,
     phases: Vec<(String, f64)>,
+    /// The windows by their frames' shape - draws a flip - each shape's milliseconds, flips and
+    /// phases summed.
+    shapes: std::collections::BTreeMap<u64, Stretch>,
+}
+
+/// Windows summed: their milliseconds, flips and each phase's milliseconds.
+type Stretch = (f64, u64, Vec<(String, f64)>);
+
+/// How many frame shapes [`RunPerf::describe_shapes`] describes, those with the most flips.
+const SHAPES_DESCRIBED: usize = 3;
+
+/// Adds `phases` into `into`, phase by phase.
+fn add_phases(into: &mut Vec<(String, f64)>, phases: &[(String, f64)]) {
+    for (name, ms) in phases {
+        match into.iter_mut().find(|(kept, _)| kept == name) {
+            Some((_, total)) => *total += ms,
+            None => into.push((name.clone(), *ms)),
+        }
+    }
 }
 
 impl RunPerf {
@@ -560,44 +579,79 @@ impl RunPerf {
         }
         self.window_ms += report.window_ms;
         self.flips += report.flips;
-        for (name, ms) in &report.phases {
-            match self.phases.iter_mut().find(|(kept, _)| kept == name) {
-                Some((_, total)) => *total += ms,
-                None => self.phases.push((name.clone(), *ms)),
-            }
-        }
+        add_phases(&mut self.phases, &report.phases);
+        let shape = self
+            .shapes
+            .entry(report.draws / report.flips)
+            .or_insert_with(|| (0.0, 0, Vec::new()));
+        shape.0 += report.window_ms;
+        shape.1 += report.flips;
+        add_phases(&mut shape.2, &report.phases);
     }
 
     /// The run's line: each phase's milliseconds a flip, costliest first, the flips and their rate,
     /// and the flip's whole length - what of a frame the host spends where. `None` before a flip.
-    #[allow(clippy::cast_precision_loss)] // a run's flip count is far below 2^52
     fn describe(&self) -> Option<String> {
-        if self.flips == 0 || self.window_ms <= 0.0 {
-            return None;
-        }
-        let flips = self.flips as f64;
-        let mut phases: Vec<(&str, f64)> = self
-            .phases
-            .iter()
-            .filter(|(_, ms)| *ms > 0.0)
-            .map(|(name, ms)| (name.as_str(), ms / flips))
-            .collect();
-        phases.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let parts: Vec<String> = phases
-            .iter()
-            .map(|(name, ms)| format!("{name} {ms:.2} ms"))
-            .collect();
-        Some(format!(
-            concat!(
-                "host time per flip over the windows that flipped: {} flips at {:.1} a second; {} - ",
-                "the rest of each {:.1} ms flip is the guest's own time and what nothing measures"
-            ),
-            self.flips,
-            flips * 1000.0 / self.window_ms,
-            parts.join(", "),
-            self.window_ms / flips
-        ))
+        per_flip_line(
+            "host time per flip over the windows that flipped",
+            (self.window_ms, self.flips),
+            &self.phases,
+        )
     }
+
+    /// The same for each frame shape - windows of the same draws a flip - of the
+    /// [`SHAPES_DESCRIBED`] with the most flips, most first: a run whose fast frames drown the
+    /// average still names what its other frames spend.
+    fn describe_shapes(&self) -> Vec<String> {
+        let mut shapes: Vec<_> = self.shapes.iter().collect();
+        shapes.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(b.0)));
+        shapes
+            .into_iter()
+            .take(SHAPES_DESCRIBED)
+            .filter_map(|(draws, (window_ms, flips, phases))| {
+                per_flip_line(
+                    &format!("frames of {draws} draws"),
+                    (*window_ms, *flips),
+                    phases,
+                )
+            })
+            .collect()
+    }
+}
+
+/// `lead`, then each of `phases`' milliseconds over `flips` flips in `window_ms`, costliest first,
+/// with the flips' rate and length. `None` with no flip.
+#[allow(clippy::cast_precision_loss)] // a run's flip count is far below 2^52
+fn per_flip_line(
+    lead: &str,
+    (window_ms, flips): (f64, u64),
+    phases: &[(String, f64)],
+) -> Option<String> {
+    if flips == 0 || window_ms <= 0.0 {
+        return None;
+    }
+    let count = flips as f64;
+    let mut per_flip: Vec<(&str, f64)> = phases
+        .iter()
+        .filter(|(_, ms)| *ms > 0.0)
+        .map(|(name, ms)| (name.as_str(), ms / count))
+        .collect();
+    per_flip.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let parts: Vec<String> = per_flip
+        .iter()
+        .map(|(name, ms)| format!("{name} {ms:.2} ms"))
+        .collect();
+    Some(format!(
+        concat!(
+            "{}: {} flips at {:.1} a second; {} - ",
+            "the rest of each {:.1} ms flip is the guest's own time and what nothing measures"
+        ),
+        lead,
+        flips,
+        count * 1000.0 / window_ms,
+        parts.join(", "),
+        window_ms / count
+    ))
 }
 
 /// The run's perf windows so far.
@@ -1675,8 +1729,10 @@ fn log_flip_origins() {
     if let Some(line) = orbistoun_gpu::detiled::describe(&orbistoun_gpu::detiled::by_layout()) {
         tracing::info!("{line}");
     }
-    if let Some(line) = run_perf().lock().ok().and_then(|run| run.describe()) {
-        tracing::info!("{line}");
+    if let Ok(run) = run_perf().lock() {
+        for line in run.describe().into_iter().chain(run.describe_shapes()) {
+            tracing::info!("{line}");
+        }
     }
     let Some(shown) = origins.last else {
         return;
@@ -2610,6 +2666,45 @@ mod tests {
             ))
         );
         assert_eq!(super::RunPerf::default().describe(), None);
+    }
+
+    /// Windows are grouped by their frames' shape - draws a flip - and the shapes with the most
+    /// flips each get their own per-flip phases, so a run whose fast frames drown the average still
+    /// names what its other frames spend: GTA V's title screen flips a hundred times a second, its
+    /// intro video's two-draw frames under twenty.
+    #[test]
+    fn each_frame_shape_is_described_on_its_own() {
+        let mut run = super::RunPerf::default();
+        let window = |ms: f64, flips: u64, draws: u64, prepare: f64| orbistoun_proto::PerfReport {
+            window_ms: ms,
+            flips,
+            submissions: flips,
+            draws,
+            phases: vec![("prepare".to_owned(), prepare)],
+            spans: Vec::new(),
+        };
+        run.add(&window(1000.0, 100, 900, 100.0));
+        run.add(&window(1000.0, 10, 20, 300.0));
+        run.add(&window(1000.0, 10, 20, 100.0));
+        run.add(&window(1000.0, 1, 40, 900.0));
+        assert_eq!(
+            run.describe_shapes(),
+            [
+                concat!(
+                    "frames of 9 draws: 100 flips at 100.0 a second; prepare 1.00 ms - ",
+                    "the rest of each 10.0 ms flip is the guest's own time and what nothing measures"
+                ),
+                concat!(
+                    "frames of 2 draws: 20 flips at 10.0 a second; prepare 20.00 ms - ",
+                    "the rest of each 100.0 ms flip is the guest's own time and what nothing measures"
+                ),
+                concat!(
+                    "frames of 40 draws: 1 flips at 1.0 a second; prepare 900.00 ms - ",
+                    "the rest of each 1000.0 ms flip is the guest's own time and what nothing measures"
+                ),
+            ]
+        );
+        assert!(super::RunPerf::default().describe_shapes().is_empty());
     }
 
     /// A draw's capture reads as the counts it declared, then clip coordinates and where they land: a
