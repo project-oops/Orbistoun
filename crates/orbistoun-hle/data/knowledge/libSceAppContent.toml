@@ -46,3 +46,18 @@ assumptions = [
 ]
 found_in = ["PPSA25872-app0"]
 found_on = "2026-09-17"
+
+[[function]]
+name = "sceAppContentDownloadDataGetAvailableSpaceKb"
+arity = 6
+purpose = "(mountPoint, kb): the KiB left in the title's download data, into *kb."
+returns = "status"
+edge_cases = [
+    "orbistoun answers the size the title's param.json declares (downloadDataSize, MiB) less what /download0 already holds, in KiB, and 0; another mount point, a title declaring no download data, or a null destination answers the placeholder.",
+    "PPSA04263 asks for /download0 (image+0xb6fb75), declares 5120 MiB, writes its profile under /download0/saves, and keeps kb << 10 as the bytes it may write.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["That the console sizes the area by the title's declaration in MiB: the reference emulators answer the host's free space instead; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
