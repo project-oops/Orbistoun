@@ -1432,7 +1432,10 @@ fn printable_text(bytes: &[u8]) -> Option<String> {
 /// The guest names the mounts it needs, so a mount added afterwards answers a request that was
 /// made. Read here rather than printed on the guest's stack (D381).
 pub(crate) fn paths_wanted() {
-    let wanted = orbistoun_fs::wanted::unanswered_by();
+    // The paths an open or a stat could not answer, then those an asynchronous read's resolve
+    // could not: both are files the platform has and this run did not.
+    let mut wanted = orbistoun_fs::wanted::unanswered_by();
+    wanted.extend(orbistoun_kernel::apr::unresolved());
     if wanted.is_empty() {
         return;
     }

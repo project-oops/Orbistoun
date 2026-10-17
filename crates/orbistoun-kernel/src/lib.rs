@@ -7338,11 +7338,13 @@ fn resolve_paths(
                     tracing::debug!("the index does not name {path}; answered unresolved");
                 }
             }
-            paths.push(path);
+            paths.push(path.clone());
         }
         // The first unresolved path ends the call and later slots keep what the caller put there, as
         // the `sceKernelAprResolveFilepathsToIdsAndFileSizes` record in `libkernel.toml` measures.
+        // It is remembered for the run's report, with the call that asked.
         if answer.is_none() {
+            apr::note_unresolved(&path, orbistoun_thunk::current_call());
             break;
         }
     }

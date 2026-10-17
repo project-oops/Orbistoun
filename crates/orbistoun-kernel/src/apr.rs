@@ -446,8 +446,61 @@ pub(crate) fn synthesise(path: &str) -> Option<(u64, u64)> {
     Some((SYNTHESISED_FIRST + position as u64, size))
 }
 
+/// The most unresolved paths remembered: a title probing a tree it does not have can ask forever.
+const MOST_UNRESOLVED: usize = 256;
+
+/// A path a resolve could not answer, with the import that asked, as an index into the thunk table.
+type Unresolved = (String, Option<u32>);
+
+/// Each path a resolve could not answer, once, with the import that asked: what the run's report
+/// lists beside the paths an open or a stat could not answer.
+fn unresolved_paths() -> &'static Mutex<Vec<Unresolved>> {
+    static UNRESOLVED: OnceLock<Mutex<Vec<Unresolved>>> = OnceLock::new();
+    UNRESOLVED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Remembers `path`, which a resolve could not answer, with the import `by` that asked.
+pub(crate) fn note_unresolved(path: &str, by: Option<u32>) {
+    let Ok(mut held) = unresolved_paths().lock() else {
+        return;
+    };
+    if held.len() < MOST_UNRESOLVED && !held.iter().any(|(known, _)| known == path) {
+        held.push((path.to_owned(), by));
+    }
+}
+
+/// Every path a resolve could not answer this run, in the order asked, with the import that asked
+/// first, as an index into the thunk table.
+#[must_use]
+pub fn unresolved() -> Vec<Unresolved> {
+    unresolved_paths()
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+    /// A path a resolve could not answer is remembered once, in the order asked.
+    #[test]
+    fn an_unresolved_path_is_remembered_once() {
+        super::note_unresolved("/app0/nowhere/a.rpf", None);
+        super::note_unresolved("/app0/nowhere/b.rpf", Some(3));
+        super::note_unresolved("/app0/nowhere/a.rpf", Some(4));
+        let held = super::unresolved();
+        let ours: Vec<_> = held
+            .iter()
+            .filter(|(path, _)| path.starts_with("/app0/nowhere/"))
+            .collect();
+        assert_eq!(
+            ours,
+            [
+                &("/app0/nowhere/a.rpf".to_owned(), None),
+                &("/app0/nowhere/b.rpf".to_owned(), Some(3))
+            ]
+        );
+    }
+
     /// A test filesystem: one existing file and one directory.
     fn size_of(path: &str) -> Option<u64> {
         (path == "/app0/Media/ScriptingAssemblies.json").then_some(0x1b0)
