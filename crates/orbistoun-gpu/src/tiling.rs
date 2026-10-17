@@ -402,6 +402,36 @@ pub fn tiled_byte_offset_4kb_s_bpp8(x: u32, y: u32, width: u32) -> usize {
     block * S4_BLOCK_BYTES + offset
 }
 
+/// Byte offset of element `(x, y)` in a 64-bpp `64KB_S` surface `width` elements wide - a `BC1`
+/// image's blocks: its 128 x 64-element block, row-major across the pitch, then the element's bits
+/// as addrlib's pattern places them (`gfx10SwizzlePattern.h`, `GFX10_SW_64K_S_RBPLUS_PATINFO` at
+/// 8 bpe, `{1, 3, 4, 4, 0}`): [`tiled_byte_offset_4kb_s_bpp8`]'s twelve bits, then `NIBBLE3` row 4,
+/// `Y4 X5 Y5 X6`, in bits 12-15.
+#[must_use]
+pub fn tiled_byte_offset_64kb_s_bpp8(x: u32, y: u32, width: u32) -> usize {
+    const X_BITS: [usize; 7] = [0x8, 0x40, 0x80, 0x200, 0x800, 0x2000, 0x8000];
+    const Y_BITS: [usize; 6] = [0x10, 0x20, 0x100, 0x400, 0x1000, 0x4000];
+    let blocks_per_row = width.div_ceil(S64_BPP8_BLOCK_WIDTH) as usize;
+    let block =
+        (y / S64_BPP8_BLOCK_HEIGHT) as usize * blocks_per_row + (x / S64_BPP8_BLOCK_WIDTH) as usize;
+    let mut offset = 0;
+    for (bit, place) in X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * BLOCK_BYTES + offset
+}
+
+/// A 64-bpp `64KB_S` block's extent in elements: seven x bits and six y bits of its sixteen.
+const S64_BPP8_BLOCK_WIDTH: u32 = 128;
+const S64_BPP8_BLOCK_HEIGHT: u32 = 64;
+
 /// Tiles an 8-bpp `4KB_S` surface's linear texels, one byte each, into `tiled`, each through `map`:
 /// [`SurfaceLayout::tile_mapped`] for [`SurfaceLayout::S4KbBpp1`].
 fn tile_4kb_s_bpp1(
@@ -1082,6 +1112,9 @@ pub enum SurfaceLayout {
     /// `4KB_S` at eight bytes an element, a `BC1` image's blocks: 32 x 16-element blocks
     /// ([`tiled_byte_offset_4kb_s_bpp8`]). An element is two words.
     S4KbBpp8,
+    /// `64KB_S` at eight bytes an element, a `BC1` image's blocks: 128 x 64-element blocks
+    /// ([`tiled_byte_offset_64kb_s_bpp8`]). An element is two words.
+    S64KbBpp8,
     /// `4KB_S` at one byte a texel: 64 x 64-texel blocks ([`tiled_byte_offset_4kb_s_bpp1`]).
     S4KbBpp1,
     /// `64KB_R_X` at eight bytes a texel: 128 x 64-texel blocks, row-major, each by addrlib's
@@ -1129,7 +1162,7 @@ impl SurfaceLayout {
                 | Self::Rx64KbBpp16,
                 16,
             )
-            | (Self::S4KbBpp8 | Self::Rx64KbBpp8, 8)
+            | (Self::S4KbBpp8 | Self::S64KbBpp8 | Self::Rx64KbBpp8, 8)
             | (Self::S4KbBpp1, 1)
             | (Self::Rx64KbBpp2, 2) => Some(self),
             (
@@ -1138,6 +1171,7 @@ impl SurfaceLayout {
                 | Self::S64KbBpp16
                 | Self::S4KbBpp16
                 | Self::S4KbBpp8
+                | Self::S64KbBpp8
                 | Self::Rx64KbBpp8
                 | Self::Rx64KbBpp2
                 | Self::Rx64KbBpp16
@@ -1146,6 +1180,7 @@ impl SurfaceLayout {
             ) => None,
             (Self::Dx4Kb, 16) => Some(Self::Dx4KbBpp16),
             (Self::S64Kb, 16) => Some(Self::S64KbBpp16),
+            (Self::S64Kb, 8) => Some(Self::S64KbBpp8),
             (Self::S4Kb, 16) => Some(Self::S4KbBpp16),
             (Self::S4Kb, 8) => Some(Self::S4KbBpp8),
             (Self::S4Kb, 1) => Some(Self::S4KbBpp1),
@@ -1166,7 +1201,7 @@ impl SurfaceLayout {
             Self::Rx64KbBpp1 | Self::LinearBpp1 | Self::S4KbBpp1 => 0,
             Self::Rx64KbBpp2 => 1,
             Self::Rx64Kb | Self::Dx4Kb | Self::Linear | Self::S4Kb | Self::S64Kb => 2,
-            Self::S4KbBpp8 | Self::Rx64KbBpp8 => 3,
+            Self::S4KbBpp8 | Self::S64KbBpp8 | Self::Rx64KbBpp8 => 3,
             Self::Dx64KbBpp16
             | Self::Dx4KbBpp16
             | Self::S64KbBpp16
@@ -1179,6 +1214,7 @@ impl SurfaceLayout {
     fn eight_byte_offset(self, x: u32, y: u32, width: u32) -> usize {
         match self {
             Self::Rx64KbBpp8 => tiled_byte_offset_64kb_rx_bpp8_surface(x, y, width),
+            Self::S64KbBpp8 => tiled_byte_offset_64kb_s_bpp8(x, y, width),
             // `S4KbBpp8`, the only other layout of eight-byte elements.
             _ => tiled_byte_offset_4kb_s_bpp8(x, y, width),
         }
@@ -1286,6 +1322,12 @@ impl SurfaceLayout {
                     * BLOCK_BYTES
                     / 4
             }
+            Self::S64KbBpp8 => {
+                width.div_ceil(S64_BPP8_BLOCK_WIDTH) as usize
+                    * height.div_ceil(S64_BPP8_BLOCK_HEIGHT) as usize
+                    * BLOCK_BYTES
+                    / 4
+            }
             Self::S4KbBpp8 => {
                 width.div_ceil(S4_BPP8_BLOCK_WIDTH) as usize
                     * height.div_ceil(S4_BPP8_BLOCK_HEIGHT) as usize
@@ -1316,6 +1358,7 @@ impl SurfaceLayout {
             | Self::Rx64KbBpp16
             | Self::Dx64KbBpp16
             | Self::S64Kb
+            | Self::S64KbBpp8
             | Self::S64KbBpp16 => 16,
             // A linear surface has no blocks; its "block" is a row's 256 bytes, never a tail's.
             Self::Dx4Kb
@@ -1493,6 +1536,7 @@ impl SurfaceLayout {
             | Self::LinearBpp1
             | Self::S64Kb
             | Self::S64KbBpp16
+            | Self::S64KbBpp8
             | Self::S4Kb
             | Self::S4KbBpp16
             | Self::S4KbBpp8
@@ -1578,7 +1622,7 @@ impl SurfaceLayout {
                 })
                 .collect(),
             // Each element is two words, in order.
-            Self::S4KbBpp8 | Self::Rx64KbBpp8 => (0..height)
+            Self::S4KbBpp8 | Self::S64KbBpp8 | Self::Rx64KbBpp8 => (0..height)
                 .flat_map(|y| (0..width).map(move |x| (x, y)))
                 .flat_map(|(x, y)| {
                     let at = self.eight_byte_offset(x, y, width) / 4;
@@ -1731,7 +1775,7 @@ impl SurfaceLayout {
                 Ok(())
             }
             // Each element's two words, in order.
-            Self::S4KbBpp8 | Self::Rx64KbBpp8 => {
+            Self::S4KbBpp8 | Self::S64KbBpp8 | Self::Rx64KbBpp8 => {
                 tile_bpp8(self, (linear, tiled), (width, height), map)
             }
             Self::S4KbBpp1 => tile_4kb_s_bpp1((linear, tiled), (width, height), map),
@@ -1776,6 +1820,39 @@ impl SurfaceLayout {
 
 #[cfg(test)]
 mod tests {
+    /// A 64-bpp `64KB_S` surface - a `BC1` image's blocks, as PPSA04263's 3840 x 2160 loading
+    /// screen holds them - places each element by addrlib's pattern (`gfx10SwizzlePattern.h:1674`,
+    /// `{1, 3, 4, 4, 0}`): the `4KB_S` form's twelve bits, then NIBBLE3 row 4's `Y4 X5 Y5 X6`
+    /// (`:4289`), in 128 x 64-element blocks row-major across the pitch.
+    #[test]
+    fn a_64kb_s_eight_byte_element_lies_where_addrlib_puts_it() {
+        use super::{SurfaceLayout, SwizzleMode, tiled_byte_offset_4kb_s_bpp8};
+        let at = super::tiled_byte_offset_64kb_s_bpp8;
+        for (x, y, address) in [
+            (1, 0, 0x8),
+            (0, 1, 0x10),
+            (32, 0, 0x2000),
+            (0, 16, 0x1000),
+            (64, 0, 0x8000),
+            (0, 32, 0x4000),
+            (127, 63, 0xFFF8),
+            (128, 0, 0x1_0000),
+            (0, 64, 8 * 0x1_0000),
+        ] {
+            assert_eq!(at(x, y, 960), address, "({x}, {y}) in 960 wide");
+        }
+        // Within a 4 KiB block's 32 x 16 elements the two forms agree.
+        for (x, y) in [(5, 3), (31, 15), (17, 9)] {
+            assert_eq!(at(x, y, 960), tiled_byte_offset_4kb_s_bpp8(x, y, 32));
+        }
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled64KbS).expect("modelled");
+        assert_eq!(layout.at_bytes_per_texel(8), Some(SurfaceLayout::S64KbBpp8));
+        assert_eq!(
+            SurfaceLayout::S64KbBpp8.words(960, 540),
+            8 * 9 * 0x1_0000 / 4
+        );
+    }
+
     /// Tiling into a surface's first words writes exactly what tiling into the whole surface puts
     /// there, across a block row's end and partway into a block, and nothing past them.
     #[test]

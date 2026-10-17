@@ -5757,6 +5757,8 @@ const FORMAT_8_UNORM: u32 = 1;
 const FORMAT_8_UINT: u32 = 5;
 /// `GFX10_FORMAT_BC3_UNORM` (`gfx10-rsrc.json:127`): four-by-four texels to a sixteen-byte block.
 const FORMAT_BC3_UNORM: u32 = 173;
+/// `GFX10_FORMAT_BC1_UNORM` (`gfx10-rsrc.json:123`): four-by-four texels to an eight-byte block.
+const FORMAT_BC1_UNORM: u32 = 169;
 /// `GFX10_FORMAT_BC1_SRGB` (`gfx10-rsrc.json:124`): four-by-four texels to an eight-byte block,
 /// its colours sRGB-encoded.
 const FORMAT_BC1_SRGB: u32 = 170;
@@ -5798,6 +5800,12 @@ fn block_format(format: u32) -> Option<BlockFormat> {
             bytes: 16,
             encoding: crate::backend::TextureEncoding::Bc3,
             tag: 1 << 22,
+            opaque: false,
+        }),
+        FORMAT_BC1_UNORM => Some(BlockFormat {
+            bytes: 8,
+            encoding: crate::backend::TextureEncoding::Bc1,
+            tag: 1 << 22 | 1 << 25,
             opaque: false,
         }),
         FORMAT_BC1_SRGB => Some(BlockFormat {
@@ -6920,6 +6928,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         crate::backend::TextureEncoding::Rgba8
         | crate::backend::TextureEncoding::Bc3
         | crate::backend::TextureEncoding::Bc1Srgb
+        | crate::backend::TextureEncoding::Bc1
         | crate::backend::TextureEncoding::Bc3Srgb
         | crate::backend::TextureEncoding::Bc6hUfloat
         | crate::backend::TextureEncoding::R8 { .. } => 0,
@@ -7550,6 +7559,8 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
         crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
         crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
+        // Every single bit is taken; two together are no other layout's.
+        crate::tiling::SurfaceLayout::S64KbBpp8 => 1 << 18 | 1 << 15,
         crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
         crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
         crate::tiling::SurfaceLayout::Rx64KbBpp8 => 1 << 28,
@@ -9608,6 +9619,57 @@ mod tests {
         }) = bound
         else {
             panic!("bound as BC1 sRGB blocks: {bound:?}");
+        };
+        let tags: Vec<u32> = texels.chunks(2).map(|block| block[0]).collect();
+        assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
+        assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A `BC1_UNORM` texture (`gfx10-rsrc.json:123`, format 169) is bound as its eight-byte blocks as
+    /// `BC1_SRGB`'s are, for the host to sample natively without sRGB decode. PPSA04263's loading
+    /// screen samples a 3840 x 2160 one (`0xca900000`, `0x90900fac`), and its draw was refused.
+    #[test]
+    fn a_bc1_unorm_texture_binds_its_blocks_in_row_order() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 4096];
+        for (y, x) in [(0u32, 0u32), (0, 1), (1, 0), (1, 1)] {
+            let at = crate::tiling::tiled_byte_offset_4kb_s_bpp8(x, y, 2);
+            for word in 0..2u32 {
+                let value = (y << 12) | (x << 8) | word;
+                bytes[at + 4 * word as usize..][..4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        let (width, height) = (8u32, 8u32);
+        let words = [
+            0x100,
+            (169 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            // 2D, ADDR_SW_4KB_S, the channels as they are.
+            0x9050_0fac,
+            0,
+            0x70_0000,
+            0,
+            0,
+        ];
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 8,
+            height: 8,
+            encoding: crate::backend::TextureEncoding::Bc1,
+            faces: 1,
+            ..
+        }) = bound
+        else {
+            panic!("bound as BC1 blocks: {bound:?}");
         };
         let tags: Vec<u32> = texels.chunks(2).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");

@@ -2887,6 +2887,7 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
         orbistoun_gpu::TextureEncoding::Bc3Srgb => (vk::Format::BC3_SRGB_BLOCK, as_they_are()),
         // Hardware BC1 decodes the one-bit alpha a three-colour block selects, as `RGBA` does.
         orbistoun_gpu::TextureEncoding::Bc1Srgb => (vk::Format::BC1_RGBA_SRGB_BLOCK, as_they_are()),
+        orbistoun_gpu::TextureEncoding::Bc1 => (vk::Format::BC1_RGBA_UNORM_BLOCK, as_they_are()),
         // A depth target's depths as the host attachment held them (D817).
         orbistoun_gpu::TextureEncoding::DepthFloat
         | orbistoun_gpu::TextureEncoding::DepthCompare => (vk::Format::D32_SFLOAT, as_they_are()),

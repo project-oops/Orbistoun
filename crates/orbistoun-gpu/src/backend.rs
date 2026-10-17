@@ -491,6 +491,9 @@ pub enum TextureEncoding {
     /// row-major: the guest's compressed bytes as they are, which the host samples natively with
     /// the colours decoded from sRGB, as the guest's sampler decodes them.
     Bc1Srgb,
+    /// `BC1_UNORM` blocks, laid out as [`Self::Bc1Srgb`]'s, which the host samples natively with the
+    /// colours as they are.
+    Bc1,
     /// One word a texel, `10_11_11_FLOAT`'s packed unsigned floats as the guest holds them, which
     /// the host samples natively as `B10G11R11_UFLOAT_PACK32` (D774).
     Float11_11_10,
