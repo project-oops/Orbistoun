@@ -116,3 +116,18 @@ known_by = "assumed"
 assumptions = ["The condition and result layouts and the order are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataDelete"
+arity = 1
+purpose = "(param): deletes one of the user's saves of this title."
+returns = "status"
+edge_cases = [
+    "PPSA04263 fills param: +0x00 the user, +0x08 0 (no title id: its own), +0x10 a pointer to the directory name, after searching for that name (image+0x2b3f941); it raises its error flag on a negative answer (`jns` at image+0x2b3f98a).",
+    "orbistoun removes the directory of that name under the title's /data/savedata and answers 0; a save that does not exist answers 0x809f0008, as Mount3 without the create bit does. The mounted save, another user's or title's, and a call before Initialize3 answer the placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The parameter layout and the deletion are those the reference emulators give local saves (one answers 0 for an absent save; orbistoun keeps D792's not-found code); obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

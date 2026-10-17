@@ -29,6 +29,8 @@ guest_module! {
         "sceSaveDataUmount2" => 2,
         // (condition, result)
         "sceSaveDataDirNameSearch" => 2,
+        // (parameter)
+        "sceSaveDataDelete" => 1,
     }
 }
 
@@ -675,6 +677,89 @@ pub(crate) fn dir_name_search(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         0
     } else {
         SEARCH_PARAMETER
+    }
+}
+
+/// `sceSaveDataDelete(param)`: removes the signed-in user's save `param` names from the title's
+/// `/data/savedata` and answers 0 (assumed, as the reference emulators delete a local save).
+/// `param` is `{ user u32, _, title id *, name * }` - PPSA04263 fills it so after searching for the
+/// name, with no title id (its own), and raises its error flag on a negative answer. A save that
+/// does not exist answers [`SAVE_NOT_FOUND`], as a mount without the create bit does; the mounted
+/// save, another user's or another title's, and a call before `sceSaveDataInitialize3` answer the
+/// placeholder.
+pub(crate) fn delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let param = args[0];
+    let refuse = u64::from(GuestError::Unimplemented.as_raw());
+    if param == 0 || !INITIALISED.load(Ordering::Acquire) {
+        return refuse;
+    }
+    // SAFETY: the guest's parameter block, by the call's contract; read through checked accessors.
+    let user = unsafe { guest::read_u32(param) };
+    // SAFETY: as above, its title-id pointer.
+    let title = unsafe { guest::read_u64(param + 0x08) };
+    // SAFETY: as above, its directory-name pointer.
+    let name = unsafe { guest::read_u64(param + 0x10) };
+    let (Some(user), Some(0), Some(name)) = (user, title, name) else {
+        return refuse;
+    };
+    if user != crate::signed_in_user() {
+        return refuse;
+    }
+    let Some(directory) = save_directory_name(name) else {
+        return refuse;
+    };
+    let guest_path = format!("{SAVE_STORE}/{directory}");
+    if !orbistoun_fs::mount::is_directory(&guest_path) {
+        return SAVE_NOT_FOUND;
+    }
+    let mounted = MOUNTED.load(Ordering::Acquire)
+        && orbistoun_fs::mount::resolve_existing(SAVE_MOUNT_POINT)
+            == orbistoun_fs::mount::resolve_existing(&guest_path);
+    let Some(host) = orbistoun_fs::mount::resolve_for_removal(&guest_path) else {
+        return refuse;
+    };
+    if mounted || std::fs::remove_dir_all(host).is_err() {
+        return refuse;
+    }
+    0
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// A save is deleted from the title's own storage; deleting it again finds nothing, and another
+    /// user's save is refused.
+    #[test]
+    fn a_save_is_deleted_once() {
+        let root = std::env::temp_dir().join(format!("orbistoun-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("savedata/SAVE0001/sce_sys")).expect("a save");
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        orbistoun_fs::mount::mount_data(root.clone());
+        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+        let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
+
+        let name = b"SAVE0001\0";
+        let mut param = [0_u8; 0x40];
+        param[..4].copy_from_slice(&crate::signed_in_user().to_le_bytes());
+        param[0x10..0x18].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
+        let args = [param.as_ptr() as u64, 0, 0, 0, 0, 0];
+        assert_eq!(super::delete(&args), 0);
+        assert!(!root.join("savedata/SAVE0001").exists(), "deleted");
+        assert_eq!(
+            super::delete(&args),
+            super::SAVE_NOT_FOUND,
+            "nothing left to delete"
+        );
+
+        std::fs::create_dir_all(root.join("savedata/SAVE0001")).expect("a save");
+        param[..4].copy_from_slice(&(crate::signed_in_user() + 1).to_le_bytes());
+        assert_ne!(super::delete(&args), 0, "another user's");
+        assert!(root.join("savedata/SAVE0001").exists(), "kept");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
