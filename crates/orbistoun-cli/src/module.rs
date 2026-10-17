@@ -129,6 +129,20 @@ fn named_slot(
     })
 }
 
+/// The function whose callers a reference leads on to: a data word names none; a linkage stub's
+/// jump through its slot is the stub itself, which starts at the jump - stubs sit back to back, so
+/// the function holding the jump may be the stub before it; any other instruction leads to the
+/// function holding it.
+fn walked_from(at: u64, how: &str, within: u64) -> Option<u64> {
+    if how.starts_with("jmp qword ptr [") {
+        Some(at)
+    } else if within != at {
+        Some(within)
+    } else {
+        None
+    }
+}
+
 /// `callers` - what names an image offset, or the linkage slot an import is called through, walked
 /// `depth` levels up through the functions holding each reference: the slot's first level is its
 /// linkage stub, the next the title's calls. A function reached at an earlier level is not walked
@@ -170,11 +184,10 @@ pub(crate) fn cmd_callers(
                     "{pad}image+{function:#x} <- image+{:#x}  {}  (in image+{:#x})",
                     reference.at, reference.how, reference.within
                 );
-                // A data word names no function to walk; an instruction does, even the first of its
-                // function, as a linkage stub's jump is.
-                let in_code = reference.within != reference.at || reference.how.starts_with("jmp");
-                if in_code && walked.insert(reference.within) {
-                    next.push(reference.within);
+                if let Some(walk) = walked_from(reference.at, &reference.how, reference.within)
+                    && walked.insert(walk)
+                {
+                    next.push(walk);
                 }
             }
         }
@@ -611,6 +624,20 @@ mod tests {
         assert_eq!(
             super::import_line(&import),
             "0x0000000000001234  libc  malloc  [data]  [weak]"
+        );
+    }
+
+    /// A stub's jump through its slot leads to the stub itself, even where the stub before it holds
+    /// it; a call leads to the function holding it; a data word to nothing.
+    #[test]
+    fn a_walk_starts_from_the_stub_not_its_neighbour() {
+        let stub = super::walked_from(0x0339_1b70, "jmp qword ptr [3CB07B8h]", 0x0339_1b60);
+        assert_eq!(stub, Some(0x0339_1b70));
+        let call = super::walked_from(0x02d3_bb95, "call 0000000003391B70h", 0x02d3_b660);
+        assert_eq!(call, Some(0x02d3_b660));
+        assert_eq!(
+            super::walked_from(0x5000, "a data word relocated to it", 0x5000),
+            None
         );
     }
 
