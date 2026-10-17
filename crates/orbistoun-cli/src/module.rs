@@ -115,6 +115,41 @@ pub(crate) fn cmd_disasm(
     Ok(())
 }
 
+/// `callers` - what names an image offset, walked `depth` levels up through the functions holding
+/// each reference. A function reached at an earlier level is not walked again.
+pub(crate) fn cmd_callers(
+    service: &Service,
+    path: &std::path::Path,
+    at: &str,
+    depth: usize,
+) -> Result<()> {
+    let target = image_offset(at)
+        .with_context(|| format!("{at} is not an image offset such as image+0x2b42a40"))?;
+    let mut level = vec![target];
+    let mut walked = std::collections::BTreeSet::from([target]);
+    for indent in 0..depth.max(1) {
+        let mut next = Vec::new();
+        for function in level {
+            let found = service.references_path(path, function)?;
+            let pad = "  ".repeat(indent);
+            if found.is_empty() {
+                println!("{pad}image+{function:#x}: nothing names it directly");
+            }
+            for reference in found {
+                println!(
+                    "{pad}image+{function:#x} <- image+{:#x}  {}  (in image+{:#x})",
+                    reference.at, reference.how, reference.within
+                );
+                if reference.within != reference.at && walked.insert(reference.within) {
+                    next.push(reference.within);
+                }
+            }
+        }
+        level = next;
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_inspect(service: &Service, path: &std::path::Path) -> Result<()> {
     let info = service.inspect_path(path)?;
     let wrapper = match info.wrapper {

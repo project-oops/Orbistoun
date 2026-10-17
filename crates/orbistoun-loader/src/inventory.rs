@@ -241,6 +241,100 @@ fn disassemble_code(
     listed
 }
 
+/// One place a module names an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// Where, as an image offset: the instruction, or the data word a relocation fills.
+    pub at: u64,
+    /// The instruction in Intel syntax, or what the data word is.
+    pub how: String,
+    /// The start of the function holding the instruction - the first instruction after the
+    /// `int3` padding before it - or `at` itself for a data word.
+    pub within: u64,
+}
+
+/// Every place the module `whole` names image offset `target`: a call, jump or branch to it, an
+/// instruction taking it by `rip`-relative address, and a data word a `RELATIVE` relocation fills
+/// with it (a vtable or callback table). What reaches a function that never runs, walked one caller
+/// at a time.
+///
+/// # Errors
+///
+/// When the container cannot be parsed.
+pub fn references(whole: &[u8], target: u64) -> Result<Vec<Reference>, LoadError> {
+    let container = Container::parse(whole)?;
+    let mut found = Vec::new();
+    for (index, header) in container.program_headers()?.iter().enumerate() {
+        if header.p_type.get() != PT_LOAD || header.flags.get() & PF_X == 0 {
+            continue;
+        }
+        if let Some(code) = container.segment_data(whole, index)? {
+            found.extend(references_in((code, header.vaddr.get()), target));
+        }
+    }
+    if let Some(dyn_bytes) = container.dynamic_bytes(whole)? {
+        let info = DynamicInfo::parse(dyn_bytes);
+        if info.rela != 0
+            && info.relasz != 0
+            && let Some(at) = container.table_offset(whole, &info, info.rela)?
+        {
+            let len = usize::try_from(info.relasz).unwrap_or(0);
+            let table = whole.get(at..at.saturating_add(len)).unwrap_or_default();
+            found.extend(
+                parse_table(table)
+                    .iter()
+                    .filter(|entry| {
+                        entry.kind() == orbistoun_elf::reloc::kind::RELATIVE
+                            && u64::try_from(entry.addend.get()).ok() == Some(target)
+                    })
+                    .map(|entry| Reference {
+                        at: entry.offset.get(),
+                        how: "a data word relocated to it".to_owned(),
+                        within: entry.offset.get(),
+                    }),
+            );
+        }
+    }
+    Ok(found)
+}
+
+/// The instructions in `segment`, which starts at `start`, that name `target`, each with the start
+/// of the function holding it: the nearest instruction before it that follows `int3` padding or
+/// that a direct call in the segment targets, since a function can follow another unpadded.
+fn references_in((segment, start): (&[u8], u64), target: u64) -> Vec<Reference> {
+    let called: std::collections::HashSet<u64> =
+        Decoder::with_ip(64, segment, start, DecoderOptions::NONE)
+            .into_iter()
+            .filter(|instruction| instruction.mnemonic() == Mnemonic::Call)
+            .map(|instruction| instruction.near_branch_target())
+            .filter(|&to| to != 0)
+            .collect();
+    let mut decoder = Decoder::with_ip(64, segment, start, DecoderOptions::NONE);
+    let mut formatter = IntelFormatter::new();
+    let (mut within, mut after_padding) = (start, true);
+    let mut found = Vec::new();
+    for instruction in &mut decoder {
+        let padding = instruction.mnemonic() == Mnemonic::Int3;
+        if (after_padding && !padding) || called.contains(&instruction.ip()) {
+            within = instruction.ip();
+        }
+        after_padding = padding;
+        let names = instruction.near_branch_target() == target
+            || (instruction.is_ip_rel_memory_operand()
+                && instruction.ip_rel_memory_address() == target);
+        if names {
+            let mut how = String::new();
+            formatter.format(&instruction, &mut how);
+            found.push(Reference {
+                at: instruction.ip(),
+                how,
+                within,
+            });
+        }
+    }
+    found
+}
+
 /// Decodes `code`, which starts at guest address `at`, into `found`.
 fn sweep(code: &[u8], at: u64, found: &mut Inventory) {
     let mut decoder = Decoder::with_ip(64, code, at, DecoderOptions::NONE);
@@ -311,6 +405,37 @@ mod tests {
         );
         assert_eq!(found.amd_only[0].0, 0x1000);
         assert!(found.syscalls.is_empty());
+    }
+
+    /// A call to the address and an instruction taking it by `rip`-relative address are each named,
+    /// with the start of the function holding them - the first instruction after the `int3`
+    /// padding before it, or a call's target where a function follows another with no padding; a
+    /// jump elsewhere is not.
+    #[test]
+    fn calls_and_address_takes_of_an_address_are_found() {
+        let code = [
+            0xcc, 0xcc, // int3 padding
+            0xe8, 0xf9, 0x0f, 0x00, 0x00, // 0x1002: call 0x2000
+            0x48, 0x8d, 0x05, 0xf2, 0x0f, 0x00, 0x00, // 0x1007: lea rax, [rip+0xff2] = 0x2000
+            0xc3, // 0x100e: ret
+            0xcc, // int3 padding
+            0xe9, 0xeb, 0x1f, 0x00, 0x00, // 0x1010: jmp 0x3000
+            0xc3, // 0x1015: ret, and no padding
+            0xe8, 0xfb, 0xff, 0xff, 0xff, // 0x1016: call 0x1016, so a call names it
+            0x48, 0x8d, 0x05, 0xde, 0x0f, 0x00, 0x00, // 0x101b: lea rax, [rip+0xfde] = 0x2000
+            0xc3,
+        ];
+        let found = super::references_in((&code, 0x1000), 0x2000);
+        let sites: Vec<(u64, u64)> = found.iter().map(|r| (r.at, r.within)).collect();
+        assert_eq!(
+            sites,
+            [(0x1002, 0x1002), (0x1007, 0x1002), (0x101b, 0x1016)]
+        );
+        assert!(found[0].how.starts_with("call"), "{}", found[0].how);
+        assert_eq!(
+            super::references_in((&code, 0x1000), 0x3000)[0].within,
+            0x1010
+        );
     }
 
     /// `rdtsc` and `rdtscp` are found where they start: each reads the host's own counter, which

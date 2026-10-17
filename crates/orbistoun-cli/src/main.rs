@@ -39,8 +39,8 @@ use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
 use crate::lanes::cmd_lanes;
 use crate::learn::{cmd_knows, cmd_learn};
 use crate::module::{
-    cmd_calls_diff, cmd_disasm, cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables,
-    cmd_report, cmd_symbols, cmd_title_modules, cmd_verify,
+    cmd_callers, cmd_calls_diff, cmd_disasm, cmd_exports, cmd_imports, cmd_inspect, cmd_load,
+    cmd_module_tables, cmd_report, cmd_symbols, cmd_title_modules, cmd_verify,
 };
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
@@ -129,6 +129,18 @@ enum Command {
         /// List eight-byte data words there instead of instructions: a vtable or a table.
         #[arg(long)]
         words: bool,
+    },
+    /// List what names an image offset in a module - each call, jump or address-take, with the
+    /// function holding it, and each data word relocated to it - walking up `--depth` callers:
+    /// what reaches a function that never runs.
+    Callers {
+        /// Path to a guest executable or module.
+        path: std::path::PathBuf,
+        /// The address: an image offset, as `image+0x2b42a40` or `0x2b42a40`.
+        at: String,
+        /// How many callers up to walk, each level the callers of the functions holding the last.
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
     },
     /// Compare two runs' import calls: the imports only one reached, and those whose share of the
     /// calls moved - whether a setting changed anything the title asked of the platform.
@@ -1070,6 +1082,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Report { .. }
         | Command::Load { .. }
         | Command::Disasm { .. }
+        | Command::Callers { .. }
         | Command::CallsDiff { .. } => dispatch_module(cli.command, service)?,
         Command::Ask { .. } | Command::Session { .. } => dispatch_probe(cli.command)?,
         Command::Probe {
@@ -1164,6 +1177,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
             len,
             words,
         } => cmd_disasm(service, &path, &from, (len, words))?,
+        Command::Callers { path, at, depth } => cmd_callers(service, &path, &at, depth)?,
         Command::Nid { names } => {
             for name in &names {
                 println!("{:#018x}  {name}", service.hash_name(name).as_raw());

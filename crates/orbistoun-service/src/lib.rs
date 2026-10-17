@@ -1124,6 +1124,24 @@ impl Service {
         )?)
     }
 
+    /// Every place the module at `path` names image offset `target`: each call, jump or address-take
+    /// with the function holding it, and each data word relocated to it.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or its container parsed.
+    pub fn references_path(
+        &self,
+        path: &Path,
+        target: u64,
+    ) -> Result<Vec<orbistoun_loader::inventory::Reference>, ServiceError> {
+        let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(orbistoun_loader::inventory::references(&bytes, target)?)
+    }
+
     /// The eight-byte words of the module at `path` from image offset `from`, at most `len` bytes of
     /// them: a vtable or table in its data.
     ///
