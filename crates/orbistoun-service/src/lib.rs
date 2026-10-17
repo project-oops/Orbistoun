@@ -8,6 +8,7 @@
 //! into reportable shapes. Not here: presentation, argument parsing or transports.
 
 pub mod aot;
+pub mod callsdiff;
 pub mod linkplan;
 pub mod respond;
 pub mod titlemodules;

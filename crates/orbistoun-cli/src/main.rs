@@ -39,8 +39,8 @@ use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
 use crate::lanes::cmd_lanes;
 use crate::learn::{cmd_knows, cmd_learn};
 use crate::module::{
-    cmd_disasm, cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables, cmd_report,
-    cmd_symbols, cmd_title_modules, cmd_verify,
+    cmd_calls_diff, cmd_disasm, cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables,
+    cmd_report, cmd_symbols, cmd_title_modules, cmd_verify,
 };
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
@@ -129,6 +129,14 @@ enum Command {
         /// List eight-byte data words there instead of instructions: a vtable or a table.
         #[arg(long)]
         words: bool,
+    },
+    /// Compare two runs' import calls: the imports only one reached, and those whose share of the
+    /// calls moved - whether a setting changed anything the title asked of the platform.
+    CallsDiff {
+        /// The first run: its folder under the traces' runs, or its `trace.json`.
+        first: std::path::PathBuf,
+        /// The second run, the same way.
+        second: std::path::PathBuf,
     },
     /// Print a default stub-policy file.
     Policy,
@@ -1061,7 +1069,8 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Verify { .. }
         | Command::Report { .. }
         | Command::Load { .. }
-        | Command::Disasm { .. } => dispatch_module(cli.command, service)?,
+        | Command::Disasm { .. }
+        | Command::CallsDiff { .. } => dispatch_module(cli.command, service)?,
         Command::Ask { .. } | Command::Session { .. } => dispatch_probe(cli.command)?,
         Command::Probe {
             path,
@@ -1148,6 +1157,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::Symbols { filter } => cmd_symbols(service, filter.as_deref()),
         Command::Policy => println!("{}", service.default_policy_toml()?),
         Command::Inspect { path } => cmd_inspect(service, &path)?,
+        Command::CallsDiff { first, second } => cmd_calls_diff(&first, &second)?,
         Command::Disasm {
             path,
             from,

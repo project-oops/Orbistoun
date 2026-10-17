@@ -32,6 +32,52 @@ pub(crate) fn cmd_symbols(service: &Service, filter: Option<&str>) {
 }
 
 /// `inspect` - a container's structure, without executing or fully parsing it.
+/// A run's import calls by label, from its `trace.json` or the folder holding it.
+fn run_calls(path: &std::path::Path) -> Result<std::collections::BTreeMap<String, u64>> {
+    let file = if path.is_dir() {
+        path.join("trace.json")
+    } else {
+        path.to_owned()
+    };
+    let text =
+        std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+    let trace: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let calls = trace
+        .get("calls")
+        .and_then(serde_json::Value::as_array)
+        .with_context(|| format!("{} holds no calls", file.display()))?;
+    Ok(calls
+        .iter()
+        .filter_map(|call| {
+            Some((
+                call.get("label")?.as_str()?.to_owned(),
+                call.get("calls")?.as_u64()?,
+            ))
+        })
+        .collect())
+}
+
+/// `calls-diff` - how two runs' import calls differ.
+pub(crate) fn cmd_calls_diff(first: &std::path::Path, second: &std::path::Path) -> Result<()> {
+    let difference =
+        orbistoun_service::callsdiff::calls_difference(&run_calls(first)?, &run_calls(second)?);
+    if difference.is_empty() {
+        println!("the two runs reached the same imports, none of whose shares moved");
+        return Ok(());
+    }
+    for (label, calls) in &difference.only_first {
+        println!("only the first   {calls:>10}  {label}");
+    }
+    for (label, calls) in &difference.only_second {
+        println!("only the second  {calls:>10}  {label}");
+    }
+    for (label, before, after) in &difference.moved {
+        println!("moved  {before:>10} -> {after:<10}  {label}");
+    }
+    Ok(())
+}
+
 /// An image offset as a report spells it, `image+0x2b42a40`, or bare, `0x2b42a40`.
 fn image_offset(spelled: &str) -> Option<u64> {
     let digits = spelled.trim().trim_start_matches("image+");
