@@ -2243,10 +2243,38 @@ fn compare_at(f: GuestComparator, a: u64, b: u64) -> std::cmp::Ordering {
     raw.cmp(&0)
 }
 
+/// Sorts `items` by `compare`, stably, whatever it answers: a comparator that is no total order
+/// leaves some permutation, as a C library's `qsort` does, where the host's own sort stops on one
+/// it catches out (PPSA04263's main thread passes such a comparator). A bottom-up merge sort.
+fn merge_sort_by<T: Copy>(items: &mut [T], mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+    let mut scratch = items.to_vec();
+    let mut width = 1;
+    while width < items.len() {
+        for start in (0..items.len()).step_by(2 * width) {
+            let middle = (start + width).min(items.len());
+            let end = (start + 2 * width).min(items.len());
+            let (mut left, mut right) = (start, middle);
+            for slot in &mut scratch[start..end] {
+                let take_left =
+                    right >= end || (left < middle && compare(&items[left], &items[right]).is_le());
+                if take_left {
+                    *slot = items[left];
+                    left += 1;
+                } else {
+                    *slot = items[right];
+                    right += 1;
+                }
+            }
+        }
+        items.copy_from_slice(&scratch);
+        width *= 2;
+    }
+}
+
 /// `qsort(base, count, size, compare)`.
 ///
-/// Sorts an index permutation, then applies it, so the array does not move under the
-/// comparator while comparisons run. Stricter than the real implementation promises.
+/// Sorts an index permutation with [`merge_sort_by`], then applies it, so the array does not move
+/// under the comparator while comparisons run. Stricter than the real implementation promises.
 fn qsort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (base, count, size, compare) = (args[0], args[1], args[2], args[3]);
     let (Ok(count), Ok(size)) = (usize::try_from(count), usize::try_from(size)) else {
@@ -2259,7 +2287,9 @@ fn qsort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let f = unsafe { comparator(compare) };
 
     let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by(|a, b| compare_at(f, base + (*a * size) as u64, base + (*b * size) as u64));
+    merge_sort_by(&mut order, |a, b| {
+        compare_at(f, base + (*a * size) as u64, base + (*b * size) as u64)
+    });
 
     // Copied out first: applying a permutation in place needs the original.
     let total = count * size;
@@ -4105,6 +4135,38 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("getargv", getargv),
         ("sysconf", sysconf),
     ]
+}
+
+#[cfg(test)]
+mod qsort_tests {
+    /// A comparator that is no total order still sorts to a permutation, and never stops the
+    /// sort: PPSA04263's main thread hands `qsort` one, and the host's own sort panicked on it.
+    #[test]
+    fn an_inconsistent_comparator_sorts_to_a_permutation() {
+        let mut order: Vec<usize> = (0..1000).collect();
+        let mut calls = 0_u32;
+        super::merge_sort_by(&mut order, |_, _| {
+            calls += 1;
+            if calls % 3 == 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+        });
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..1000).collect::<Vec<_>>(), "every index once");
+    }
+
+    /// A consistent comparator sorts stably, as the index permutation it applies keeps ties in
+    /// order.
+    #[test]
+    fn a_consistent_comparator_sorts_stably() {
+        let keys = [3, 1, 2, 1, 3, 0];
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        super::merge_sort_by(&mut order, |a, b| keys[*a].cmp(&keys[*b]));
+        assert_eq!(order, [5, 1, 3, 2, 0, 4]);
+    }
 }
 
 #[cfg(test)]
