@@ -268,6 +268,30 @@ static RING_RETURNED: [AtomicU8; MAX_RECORDED_CALLS] =
 /// Per-import call counts. Allocated once when a table is built, never on the call path.
 static COUNTS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
+/// The time stamp counter's ticks each import's calls spent inside it, summed across threads, by
+/// index. Allocated with [`COUNTS`].
+static INSIDE_TICKS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
+
+/// The counter and the clock when the counters were prepared, which [`inside_seconds`] converts
+/// ticks to seconds against.
+static INSIDE_SINCE: std::sync::OnceLock<(u64, std::time::Instant)> = std::sync::OnceLock::new();
+
+/// The host's time stamp counter: two reads around an answer cost a few nanoseconds where the
+/// clock's would cost tens, on a path every guest call takes.
+#[inline]
+fn ticks() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `rdtsc` reads the processor's counter into registers; it touches no memory and
+        // every x86-64 processor has it.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
+
 /// Where each import nothing implements was first called from: the return address of its first
 /// call, or zero. Allocated with [`COUNTS`]; written only on calls that land on a stub, so
 /// implemented calls never touch it.
@@ -1280,11 +1304,34 @@ pub struct RecordedCall {
 pub fn prepare_counters(count: usize) {
     let _ = COUNTS.set((0..count).map(|_| AtomicU64::new(0)).collect());
     let _ = FIRST_STUB_SITES.set((0..count).map(|_| AtomicU64::new(0)).collect());
+    let _ = INSIDE_TICKS.set((0..count).map(|_| AtomicU64::new(0)).collect());
+    let _ = INSIDE_SINCE.set((ticks(), std::time::Instant::now()));
     let _ = SHAPES.set(
         (0..count * SAVED_ARGUMENT_REGISTERS)
             .map(|_| AtomicU8::new(0))
             .collect(),
     );
+}
+
+/// The seconds each import's calls spent inside it so far, summed across threads, by index: the
+/// counter's ticks converted at the rate it ran since the counters were prepared. Empty before
+/// then, or where the counter did not advance.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // tick counts far below 2^52 matter only to a ratio
+pub fn inside_seconds() -> Vec<f64> {
+    let (Some(inside), Some(&(start, since))) = (INSIDE_TICKS.get(), INSIDE_SINCE.get()) else {
+        return Vec::new();
+    };
+    let elapsed = since.elapsed().as_secs_f64();
+    let counted = ticks().saturating_sub(start);
+    if counted == 0 || elapsed <= 0.0 {
+        return Vec::new();
+    }
+    let per_second = counted as f64 / elapsed;
+    inside
+        .iter()
+        .map(|ticks| ticks.load(Ordering::Relaxed) as f64 / per_second)
+        .collect()
 }
 
 /// Where import `index` was first called from, if it landed on a stub: the return address of its
@@ -1536,9 +1583,13 @@ unsafe extern "sysv64" fn on_guest_call(
     // SAFETY: the trampoline's contract: `args` points to the saved argument registers.
     let first = unsafe { args.read() };
     let outer = enter_import(index, (first, entry_rsp));
+    let entered = ticks();
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
+    if let Some(inside) = INSIDE_TICKS.get().and_then(|t| t.get(index as usize)) {
+        inside.fetch_add(ticks().wrapping_sub(entered), Ordering::Relaxed);
+    }
     leave_import(outer);
 
     // A named import's dumped calls are dumped again as they return, so an out-parameter shows

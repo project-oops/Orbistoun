@@ -3034,6 +3034,36 @@ fn on_budget_reached() {
     std::process::exit(CALL_BUDGET_EXIT);
 }
 
+/// How many imports [`inside_line`] names.
+const INSIDE_NAMED: usize = 8;
+
+/// The least time inside an import [`inside_line`] names: a millisecond, below which a cost is not
+/// where a frame's time goes.
+const INSIDE_LEAST_SECONDS: f64 = 0.001;
+
+/// The imports the guest spent longest inside, most first: each label with its seconds summed
+/// across threads (so the total can pass the run's length) and its calls, from `(label, seconds,
+/// calls)` rows. `None` when none reached [`INSIDE_LEAST_SECONDS`].
+fn inside_line(rows: &[(String, f64, u64)]) -> Option<String> {
+    let mut named: Vec<&(String, f64, u64)> = rows
+        .iter()
+        .filter(|(_, seconds, _)| *seconds >= INSIDE_LEAST_SECONDS)
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
+    named.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let parts: Vec<String> = named
+        .iter()
+        .take(INSIDE_NAMED)
+        .map(|(label, seconds, calls)| format!("{label} {seconds:.1} s ({calls} calls)"))
+        .collect();
+    Some(format!(
+        "time inside imports, summed across threads, most first: {}",
+        parts.join(", ")
+    ))
+}
+
 /// Writes what the guest called, most-used first.
 ///
 /// The counts are the work list: implementing the top of this list moves a guest further, and the
@@ -3055,6 +3085,21 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
         "\nits threads asked to sleep {:.1} s in all",
         orbistoun_hle::clocks::slept().as_secs_f64()
     );
+    // And where its threads spent their time inside the platform: a frame the host barely works
+    // on is waiting somewhere, and this names where.
+    let inside = orbistoun_thunk::inside_seconds();
+    let rows: Vec<(String, f64, u64)> = trace
+        .calls
+        .iter()
+        .filter_map(|call| {
+            inside
+                .get(call.index)
+                .map(|&seconds| (call.label.clone(), seconds, call.calls))
+        })
+        .collect();
+    if let Some(line) = inside_line(&rows) {
+        let _ = write!(said, "\n{line}");
+    }
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run past what an `f64`
         // holds exactly.
@@ -3083,6 +3128,30 @@ const MOST_CALLED_REPORTED: usize = 20;
 /// status, and a caller should say so rather than imply a fault report is coming.
 pub fn install() -> bool {
     imp::install()
+}
+
+#[cfg(test)]
+mod inside_tests {
+    /// The imports the guest spent longest inside are named, most first, with their seconds summed
+    /// across threads and their calls: where a frame the host barely works on spends its time.
+    /// Imports under a millisecond are left out, and a run with none says nothing.
+    #[test]
+    fn the_imports_spent_longest_inside_are_named() {
+        let rows = [
+            ("libkernel::sceKernelUsleep".to_owned(), 12.5, 100),
+            ("libkernel::sceKernelWaitSema".to_owned(), 30.25, 40),
+            ("libc::memcpy".to_owned(), 0.0004, 9000),
+        ];
+        assert_eq!(
+            super::inside_line(&rows).as_deref(),
+            Some(concat!(
+                "time inside imports, summed across threads, most first: ",
+                "libkernel::sceKernelWaitSema 30.2 s (40 calls), ",
+                "libkernel::sceKernelUsleep 12.5 s (100 calls)"
+            ))
+        );
+        assert_eq!(super::inside_line(&rows[2..]), None);
+    }
 }
 
 #[cfg(test)]
