@@ -209,6 +209,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceNpTrophy2.toml"),
     ),
     (
+        "libSceContentSearch",
+        include_str!("../data/knowledge/libSceContentSearch.toml"),
+    ),
+    (
         "libSceNpEntitlementAccess",
         include_str!("../data/knowledge/libSceNpEntitlementAccess.toml"),
     ),

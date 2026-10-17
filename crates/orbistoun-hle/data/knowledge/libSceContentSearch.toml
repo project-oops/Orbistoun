@@ -1,0 +1,45 @@
+library = "libSceContentSearch"
+
+[[function]]
+name = "sceContentSearchInit"
+arity = 1
+purpose = "(param): starts the content search library."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0; a null parameter answers the placeholder.",
+    "PPSA04263 passes { u64 0x400000 } after sceSysmoduleLoadModule(0xc7) and records the library as started only on 0 (image+0x3039381).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console with no captures, as the library's purpose implies; obSCEne has not probed it (REQ-20261012T1818Z-3426 asked, without rows)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceContentSearchTerm"
+arity = 0
+purpose = "(): ends the content search library."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0 after Init, and the placeholder before it or a second time.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console with no captures, as the library's purpose implies; obSCEne has not probed it (REQ-20261012T1818Z-3426 asked, without rows)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceContentSearchSearchContent"
+arity = 6
+purpose = "(nine arguments): searches the console's media; the seventh argument, the first on the stack, takes the hit count."
+returns = "status"
+edge_cases = [
+    "orbistoun keeps no captures: it writes 0 hits and answers 0. Before Init, or with no count, it answers the placeholder.",
+    "PPSA04263's video-file enumerator reads the count it passed as the seventh argument and goes to its finish path on 0 (image+0xd0e9f8); the metadata calls are reached only with hits.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console with no captures, as the library's purpose implies; obSCEne has not probed it (REQ-20261012T1818Z-3426 asked, without rows)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
