@@ -1916,10 +1916,16 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
             .map(|region| format!("{:#x}+{:#x}", region.base, region.len))
             .collect();
         tracing::warn!(
-            "a direct map of physical {physical:#x} at {:#x}+{:#x}, placed at {base:#x}+{len:#x}, \
-             could not be placed: {error}; it overlaps {}",
+            concat!(
+                "a direct map of physical {:#x} at {:#x}+{:#x}, placed at {:#x}+{:#x}, ",
+                "could not be placed: {}; it overlaps {}"
+            ),
+            physical,
             asked.0,
             asked.1,
+            base,
+            len,
+            error,
             overlapping.join(", "),
         );
         return u64::from(GuestError::NoMemory.as_raw());
