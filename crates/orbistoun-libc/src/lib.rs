@@ -3577,7 +3577,12 @@ fn fopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         .and_then(|b| std::str::from_utf8(b).ok())
         .unwrap_or("r");
     // Null rather than an error code: the caller reads this as a pointer (D125), and null
-    // faults nearest the cause.
+    // faults nearest the cause. A `memory:` path is refused before any lookup, as a console
+    // refuses it (`report-20261017-gt04.log` lines 47-49).
+    if orbistoun_fs::refused_scheme(&path) {
+        set_errno(i64::from(orbistoun_core::errno::INVALID));
+        return 0;
+    }
     if mode.contains('w') || mode.contains('a') {
         return orbistoun_fs::open::create(&path).unwrap_or(0);
     }

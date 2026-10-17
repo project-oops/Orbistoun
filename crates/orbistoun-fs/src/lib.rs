@@ -400,6 +400,18 @@ fn kernel_debug_out_text(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The path scheme the C library refuses outright: a console answered `stat`, `open` and `fopen` of
+/// `memory:x` and of a Scaleform movie's `memory:$0x...,0:name.gfx` with `EINVAL`, its buffer left
+/// as it was, and of `/app0/memory:x` - an ordinary path - with `ENOENT` (obSCEne REQ-gt04/gt08,
+/// `reports/hardware/report-20261017-gt04.log` lines 41-65).
+const REFUSED_SCHEME: &str = "memory:";
+
+/// Whether the C library refuses `guest` before looking it up: a `memory:` path, as measured.
+#[must_use]
+pub fn refused_scheme(guest: &str) -> bool {
+    guest.starts_with(REFUSED_SCHEME)
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
 /// Names rather than hashes: the hash is derived from the name, and names can be checked

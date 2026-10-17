@@ -300,6 +300,22 @@ fn a_path_under_no_mount_opens_nothing() {
     assert_eq!(call("fopen", &[0, 0]), 0, "a null path opens nothing");
 }
 
+/// A `memory:` path is refused with `EINVAL`, as a console refused `fopen` of `memory:x` and of a
+/// Scaleform movie's `memory:` path (obSCEne REQ-gt04/gt08, `report-20261017-gt04.log` lines
+/// 47-49 and 55-57).
+#[test]
+fn a_memory_scheme_path_is_refused_as_invalid() {
+    for guest in [
+        "memory:x",
+        "memory:$0x10c09f0000,9156,0:00005_initial_interactive_screen_ps5.gfx",
+    ] {
+        let path = Buf::text(guest);
+        orbistoun_core::errno::set(0);
+        assert_eq!(call("fopen", &[path.at(), 0]), 0, "{guest}");
+        assert_eq!(orbistoun_core::errno::get(), 22, "EINVAL for {guest}");
+    }
+}
+
 /// The whole file cycle over a real file, in one test.
 ///
 /// The mount table is process-wide, so this uses a prefix nothing else uses and never clears

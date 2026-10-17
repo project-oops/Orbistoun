@@ -1219,6 +1219,7 @@ returns = "pointer"
 edge_cases = [
     "**Undeclared, this returned `0x7FFF0001` and the guest used it as a `FILE*`** through fseek, ftell, fread and fclose, then sized a 2 GiB allocation from the nonsense ftell gave back and died dereferencing offset 4. A pointer-returning function must answer null when it has no answer (D125).",
     "The paths it asks for exist on disk - /app0/game.bin and /app0/Textures/*.gnf are all present in the title directory. The files are there; the filesystem is not.",
+    "MEASURED (obSCEne REQ-gt04/gt08, reports/hardware/report-20261017-gt04.log lines 47-49, 55-57, 63-65, SHA-256 9c840b8b...ffd66): a path beginning `memory:` - `memory:x`, or a Scaleform movie's `memory:$0x10c09f0000,9156,0:...gfx` - answers null with errno EINVAL (22); `/app0/memory:x`, an ordinary path, null with ENOENT (2). orbistoun refuses the `memory:` scheme the same way.",
 ]
 found_by = "published-standard"
 known_by = "published"
@@ -2711,6 +2712,7 @@ edge_cases = [
     "The mode's permission half is 0755 for a directory and 0644 for a file, which is what the mount model actually enforces at the only granularity it has: everything readable, and writable only under the storage the installation owns.",
     "The block count is derived from the size rather than asked of the host: what a host really allocated is about its filesystem, and a guest multiplying this by the block size expects it to cover the file.",
     "One link, because every path here names one file. Zero would say the file is unlinked and waiting to be reclaimed, which is a different thing.",
+    "MEASURED (obSCEne REQ-gt04/gt08, reports/hardware/report-20261017-gt04.log lines 41-43, 50-52, 58-60, SHA-256 9c840b8b...ffd66): a path beginning `memory:` answers -1 with errno EINVAL (22) and leaves every byte of the buffer as it was; `/app0/memory:x`, a missing ordinary path, -1 with ENOENT (2). orbistoun answers both so; PPSA04263 stats its five Scaleform movies by such paths.",
 ]
 known_by = "published"
 cites = "POSIX.1-2008 stat(2); struct stat and struct freebsd11_stat from sys/sys/stat.h; S_IFDIR and S_IFREG harvested from the same header."

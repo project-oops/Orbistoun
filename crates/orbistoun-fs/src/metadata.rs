@@ -203,13 +203,27 @@ fn stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return FAILED;
     };
+    // A `memory:` path is refused before any lookup, its buffer left as it was; a path nothing
+    // answers is missing (`report-20261017-gt04.log` lines 41-43, 58-60).
+    if crate::refused_scheme(&guest) {
+        set_errno(orbistoun_core::errno::INVALID);
+        return FAILED;
+    }
     let Some(facts) = facts_of(&guest) else {
+        set_errno(orbistoun_core::errno::NO_ENTRY);
         return FAILED;
     };
     if write_stat(args[1], facts) {
         OK
     } else {
         FAILED
+    }
+}
+
+/// Sets this thread's `errno` to `number`, one of `orbistoun_core::errno`'s, all far inside `i32`.
+fn set_errno(number: u32) {
+    if let Ok(number) = i32::try_from(number) {
+        orbistoun_core::errno::set(number);
     }
 }
 
@@ -679,6 +693,32 @@ mod tests {
             0
         );
         assert_eq!(buffer[0], 0xAA, "and nothing is written");
+    }
+
+    /// A path with the `memory:` scheme is refused with `EINVAL` and nothing written, and a missing
+    /// path under a mount with `ENOENT`, as a console answered both (obSCEne REQ-gt04/gt08,
+    /// `reports/hardware/report-20261017-gt04.log` lines 41-43 and 58-60).
+    #[test]
+    fn a_memory_scheme_path_is_invalid_and_a_missing_one_absent() {
+        let _guard = exclusively();
+        an_installation("statscheme");
+        let stat = |guest: &str| {
+            let name = path(guest);
+            let mut buffer = [0xA5_u8; 256];
+            orbistoun_core::errno::set(0);
+            let answer = call(
+                "stat",
+                [name.as_ptr() as u64, buffer.as_mut_ptr() as u64, 0, 0, 0, 0],
+            );
+            (answer, orbistoun_core::errno::get(), buffer[0])
+        };
+        let failed = u64::MAX;
+        assert_eq!(
+            stat("memory:$0x10c09f0000,9156,0:00005_initial_interactive_screen_ps5.gfx"),
+            (failed, 22, 0xA5)
+        );
+        assert_eq!(stat("memory:x"), (failed, 22, 0xA5));
+        assert_eq!(stat("/app0/memory:x"), (failed, 2, 0xA5));
     }
 
     /// A directory opens, walks with `.` and `..` included, and closes.
