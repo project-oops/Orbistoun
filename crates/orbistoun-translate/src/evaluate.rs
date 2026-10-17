@@ -1569,19 +1569,16 @@ impl<'a> Concrete<'a> {
             Some((_, count)) => count.parse().unwrap_or(16),
             None => 1,
         };
-        let [
-            Operand::Scalar(destination),
-            Operand::Scalar(base),
-            Operand::Immediate(offset),
-            ..,
-        ] = instruction.operands.as_slice()
+        // Whatever the destination is named - a register or a lane mask's half, as PPSA04263's
+        // `s_buffer_load_dword vcc_lo` is - its code is the word's `SDATA`, bits 12:6, and the
+        // scalar codes number `vcc` as they number a register.
+        let destination = (instruction.word >> 6 & 0x7f) as usize;
+        let [_, Operand::Scalar(base), Operand::Immediate(offset), ..] =
+            instruction.operands.as_slice()
         else {
-            // Whatever the destination is named - a register or a lane mask's half - its code is
-            // the word's `SDATA`, bits 12:6.
-            self.forget((instruction.word >> 6 & 0x7f) as usize, 16);
+            self.forget(destination, 16);
             return;
         };
-        let destination = usize::from(*destination);
         let soffset = match instruction.second_word.map(|second| (second >> 25) & 0x7f) {
             Some(SOFFSET_NULL) | None => Some(0),
             Some(code) => self.scalars.get(code as usize).copied().flatten(),
@@ -3214,6 +3211,41 @@ mod tests {
         .expect("a straight-line prefix");
         assert_eq!(scalars[4], Some(0xabcd), "within the records");
         assert_eq!(scalars[5], Some(0), "past them");
+    }
+
+    /// A scalar load into the condition mask's halves reads as one into any scalar register:
+    /// PPSA04263's fragment programs load `vcc_lo` with `s_buffer_load_dword` and offset a buffer
+    /// access by it, and its draw was refused while the load left `vcc` unknown.
+    #[test]
+    fn a_scalar_load_into_vcc_is_known() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_buffer_load_dword vcc_lo, s[8:11], 0x4; s_buffer_load_dword vcc_hi, s[8:11], 0x10;
+        // s_waitcnt; s_endpgm.
+        let bytes: Vec<u8> = [
+            0xf420_1a84_u32,
+            0xfa00_0004,
+            0xf420_1ac4,
+            0xfa00_0010,
+            0xbf8c_c07f,
+            0xbf81_0000,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let end = decode.instructions.last().expect("s_endpgm").offset;
+        let memory = BTreeMap::from([(0x1004_u64, 0xabcd), (0x1010, 0x1234)]);
+        let scalars = reached(
+            &decode,
+            &encodings,
+            end,
+            (8, &[0x1000, 0, 16, 0x0002_0fac]),
+            &mut |address| memory.get(&address).copied(),
+        )
+        .expect("a straight-line prefix");
+        assert_eq!(scalars[VCC], Some(0xabcd), "vcc_lo, within the records");
+        assert_eq!(scalars[VCC + 1], Some(0), "vcc_hi, past them");
     }
 
     /// A value the host cannot know stays unknown: the execution mask at entry, and so anything
