@@ -918,6 +918,8 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ),
     ("sceSaveDataPrepare", save_data::prepare),
     ("sceSaveDataCommit", save_data::commit),
+    ("sceSaveDataSetParam", save_data::set_param),
+    ("sceSaveDataSaveIconByPath", save_data::save_icon_by_path),
     (
         "sceSaveDataDeleteTransactionResource",
         save_data::delete_transaction_resource,

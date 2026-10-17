@@ -39,6 +39,10 @@ guest_module! {
         "sceSaveDataCommit" => 1,
         // (resource)
         "sceSaveDataDeleteTransactionResource" => 1,
+        // (mount point, type, buffer, size)
+        "sceSaveDataSetParam" => 4,
+        // (mount point, path)
+        "sceSaveDataSaveIconByPath" => 2,
     }
 }
 
@@ -660,7 +664,7 @@ pub(crate) fn dir_name_search(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let mut named = [0_u8; DIR_NAME_BYTES];
         named[..name.len()].copy_from_slice(name.as_bytes());
         let seconds = i64::try_from(since.as_secs()).unwrap_or(i64::MAX);
-        let mut param = [0_u8; SEARCH_PARAM_BYTES];
+        let mut param = kept_param(&format!("{SAVE_STORE}/{name}"));
         param[SEARCH_PARAM_MTIME..SEARCH_PARAM_MTIME + 8].copy_from_slice(&seconds.to_le_bytes());
         let slot = index as u64;
         // SAFETY: the guest's name array, `room` names of 32 bytes by the call's contract.
@@ -812,6 +816,114 @@ pub(crate) fn delete_transaction_resource(args: &[u64; GUEST_ARG_REGISTERS]) -> 
     }
 }
 
+/// Where a save keeps the parameter `sceSaveDataSetParam` set, inside the save: the platform's
+/// own `sce_sys` directory, which a search does not list as a save.
+const PARAM_FILE: &str = "sce_sys/param.bin";
+
+/// Where a save keeps the icon `sceSaveDataSaveIconByPath` saved.
+const ICON_FILE: &str = "sce_sys/icon0.png";
+
+/// The parameter kept in the save at `save` (a guest path), or a zeroed one when none was set.
+fn kept_param(save: &str) -> [u8; SEARCH_PARAM_BYTES] {
+    let mut param = [0_u8; SEARCH_PARAM_BYTES];
+    if let Some(kept) = orbistoun_fs::mount::resolve_existing(&format!("{save}/{PARAM_FILE}"))
+        .and_then(|host| std::fs::read(host).ok())
+    {
+        let n = kept.len().min(SEARCH_PARAM_BYTES);
+        param[..n].copy_from_slice(&kept[..n]);
+    }
+    param
+}
+
+/// Where `sceSaveDataSetParam`'s `type` puts its value in `SceSaveDataParam`, and how long it is:
+/// 0 the whole block, 1 the title, 2 the subtitle, 3 the detail, 4 the user parameter.
+const fn param_field(kind: u32) -> Option<(usize, usize)> {
+    match kind {
+        0 => Some((0, SEARCH_PARAM_BYTES)),
+        1 => Some((0, 0x80)),
+        2 => Some((0x80, 0x80)),
+        3 => Some((0x100, 0x400)),
+        4 => Some((0x500, 4)),
+        _ => None,
+    }
+}
+
+/// The host path of `file` inside the save mounted at `point`, made ready for writing, when
+/// `point` names the mounted save.
+fn mounted_file_for_write(point: u64, file: &str) -> Option<std::path::PathBuf> {
+    // SAFETY: the guest's mount point, a NUL-terminated string by the call's contract; read through
+    // the checked accessor.
+    let named = unsafe { guest::read_cstr(point, 16) };
+    if named.as_deref() != Some(SAVE_MOUNT_POINT.as_bytes()) || !MOUNTED.load(Ordering::Acquire) {
+        return None;
+    }
+    let host = orbistoun_fs::mount::resolve_existing(SAVE_MOUNT_POINT)?.join(file);
+    std::fs::create_dir_all(host.parent()?).ok()?;
+    Some(host)
+}
+
+/// `sceSaveDataSetParam(mount point, type, buffer, size)`: sets the mounted save's parameter -
+/// its title, subtitle, detail and user parameter, by [`param_field`] - from `size` bytes at
+/// `buffer`, keeping it in the save, where a search reads it back, and answers 0 (assumed, as the
+/// reference emulators keep it). PPSA04263 sets the whole 0x530-byte block (type 0) after writing
+/// its profile, and abandons the save on a negative answer (image+0x2b3dd3c). A mount point with
+/// no save, an unknown type, or a size other than the field's answers the placeholder.
+pub(crate) fn set_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let refuse = u64::from(GuestError::Unimplemented.as_raw());
+    let (kind, buffer, size) = (args[1] as u32, args[2], args[3]);
+    let Some((at, len)) = param_field(kind) else {
+        return refuse;
+    };
+    let fits = if kind == 0 {
+        size as usize == len
+    } else {
+        size as usize <= len
+    };
+    if !fits || buffer == 0 {
+        return refuse;
+    }
+    let Some(host) = mounted_file_for_write(args[0], PARAM_FILE) else {
+        return refuse;
+    };
+    let mut param = kept_param(SAVE_MOUNT_POINT);
+    let mut value = vec![0_u8; len];
+    // SAFETY: the guest's buffer, `size` bytes by the call's contract; read through the checked
+    // accessor.
+    if !unsafe { guest::read_into(buffer, &mut value[..size as usize]) } {
+        return refuse;
+    }
+    param[at..at + len].copy_from_slice(&value);
+    if std::fs::write(host, param).is_ok() {
+        0
+    } else {
+        refuse
+    }
+}
+
+/// `sceSaveDataSaveIconByPath(mount point, path)`: copies the PNG at `path` into the mounted save as
+/// its icon and answers 0 (assumed, as the reference emulators save it). PPSA04263 saves
+/// `/app0/sce_sys/save_data.png` into a save it has just created. A mount point with no save, or
+/// a path that names no file, answers the placeholder.
+pub(crate) fn save_icon_by_path(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let refuse = u64::from(GuestError::Unimplemented.as_raw());
+    // SAFETY: the guest's icon path, a NUL-terminated string by the call's contract; read through
+    // the checked accessor.
+    let Some(path) = (unsafe { guest::read_path(args[1]) }) else {
+        return refuse;
+    };
+    let Some(source) = orbistoun_fs::mount::resolve_existing(&path) else {
+        return refuse;
+    };
+    let Some(host) = mounted_file_for_write(args[0], ICON_FILE) else {
+        return refuse;
+    };
+    if std::fs::copy(source, host).is_ok() {
+        0
+    } else {
+        refuse
+    }
+}
+
 #[cfg(test)]
 mod transaction_tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
@@ -865,6 +977,47 @@ mod transaction_tests {
             orbistoun_fs::mount::is_writable("/savedata0/profile"),
             "prepared"
         );
+        let mut save_param = vec![0_u8; 0x530];
+        save_param[..7].copy_from_slice(b"Profile");
+        save_param[0x500..0x504].copy_from_slice(&9_u32.to_le_bytes());
+        let set = [
+            point.as_ptr() as u64,
+            0,
+            save_param.as_ptr() as u64,
+            0x530,
+            0,
+            0,
+        ];
+        assert_eq!(super::set_param(&set), 0);
+        let detail = b"Chapter 1\0";
+        let set_detail = [
+            point.as_ptr() as u64,
+            3,
+            detail.as_ptr() as u64,
+            detail.len() as u64,
+            0,
+            0,
+        ];
+        assert_eq!(super::set_param(&set_detail), 0);
+        let kept = super::kept_param("/data/savedata/SAVE0001");
+        assert_eq!(&kept[..8], b"Profile\0");
+        assert_eq!(&kept[0x100..0x10a], b"Chapter 1\0");
+        assert_eq!(kept[0x500..0x504], 9_u32.to_le_bytes());
+        assert_ne!(
+            super::set_param(&[point.as_ptr() as u64, 9, 0x1000, 4, 0, 0]),
+            0,
+            "no such type"
+        );
+
+        let icon = root.join("icon.png");
+        std::fs::write(&icon, b"\x89PNG").unwrap();
+        orbistoun_fs::mount::mount("/icons", root.clone());
+        let icon_path = b"/icons/icon.png\0";
+        let save_icon = [point.as_ptr() as u64, icon_path.as_ptr() as u64, 0, 0, 0, 0];
+        assert_eq!(super::save_icon_by_path(&save_icon), 0);
+        assert!(root.join("savedata/SAVE0001/sce_sys/icon0.png").exists());
+        orbistoun_fs::mount::unmount("/icons");
+
         assert_eq!(super::commit(&[param.as_ptr() as u64, 0, 0, 0, 0, 0]), 0);
         assert_eq!(
             super::delete_transaction_resource(&[resource, 0, 0, 0, 0, 0]),

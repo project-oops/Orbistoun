@@ -189,3 +189,33 @@ known_by = "assumed"
 assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataSetParam"
+arity = 4
+purpose = "(mount point, type, buffer, size): sets a mounted save's title, subtitle, detail or user parameter."
+returns = "status"
+edge_cases = [
+    "type 0 is the whole 0x530-byte SceSaveDataParam, 1 the title (128), 2 the subtitle (128), 3 the detail (1024), 4 the user parameter (u32). orbistoun keeps the block in the save's sce_sys/param.bin, where sceSaveDataDirNameSearch reads it back, and answers 0; a mount point with no save, an unknown type or a size other than the field's answers the placeholder.",
+    "PPSA04263 sets the whole block (type 0, size 0x530) after writing its profile, and abandons the save on a negative answer (image+0x2b3dd3c).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The parameter types and layout are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataSaveIconByPath"
+arity = 2
+purpose = "(mount point, path): saves a PNG as a mounted save's icon."
+returns = "status"
+edge_cases = [
+    "orbistoun copies the file into the save's sce_sys/icon0.png and answers 0; a mount point with no save, or a path naming no file, answers the placeholder.",
+    "PPSA04263 saves /app0/sce_sys/save_data.png into a save it has just created, before committing (image+0x2b3d978).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The parameter types and layout are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
