@@ -173,9 +173,10 @@ mod content_hash_tests {
 }
 
 pub use backend::{
-    BackendError, ColourOutput, DrawBuffer, IndexBuffer, RecordingBackend, Rect, RenderBackend,
-    RenderCommand, Resource, ResourceId, ShaderStage, TargetEncoding, TextureEncoding,
-    USER_DATA_BLOCK_OFFSETS, USER_DATA_BLOCK_WORDS, USER_DATA_WORDS,
+    BackendError, ByteLane, ColourOutput, DrawBuffer, IndexBuffer, RecordingBackend, Rect,
+    RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage, TargetEncoding,
+    TextureEncoding, USER_DATA_BLOCK_OFFSETS, USER_DATA_BLOCK_WORDS, USER_DATA_WORDS,
+    byte_lanes_as_rgba8,
 };
 pub use packet::{Packet, PacketKind, PacketWalk, walk};
 pub use registers::{

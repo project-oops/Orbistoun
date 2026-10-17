@@ -568,6 +568,10 @@ impl VulkanBackend {
             orbistoun_gpu::TextureEncoding::Bc1Srgb => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 2
             }
+            // One byte a texel, four to a word.
+            orbistoun_gpu::TextureEncoding::R8 { .. } => {
+                ((width as usize) * (height as usize)).div_ceil(4)
+            }
         };
         // A mip chain's levels follow the base, each its own extent (D833): four-byte texels of a
         // flat image only.

@@ -6850,12 +6850,14 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         crate::backend::TextureEncoding::Float11_11_10 => 1 << 22,
         crate::backend::TextureEncoding::Rgba8Srgb => 1 << 17,
         crate::backend::TextureEncoding::Rgb10A2 => 1 << 21,
-        // Block-compressed blocks carry their format's tag in their own cache keys.
+        // Block-compressed blocks carry their format's tag in their own cache keys; one-byte texels
+        // are packed at binding from texels read as `Rgba8`, so never read in `R8`.
         crate::backend::TextureEncoding::Rgba8
         | crate::backend::TextureEncoding::Bc3
         | crate::backend::TextureEncoding::Bc1Srgb
         | crate::backend::TextureEncoding::Bc3Srgb
-        | crate::backend::TextureEncoding::Bc6hUfloat => 0,
+        | crate::backend::TextureEncoding::Bc6hUfloat
+        | crate::backend::TextureEncoding::R8 { .. } => 0,
         // Never read from guest memory, so never in the cache (D817).
         crate::backend::TextureEncoding::DepthFloat
         | crate::backend::TextureEncoding::DepthCompare => 1 << 23,
@@ -6977,6 +6979,24 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         format.bytes(),
     ]);
     let hash = hash ^ moved.rotate_left(17);
+    // A one-byte texture of one level is bound as its bytes, its selects as the host's lanes:
+    // packed, not widened.
+    if format == TexelFormat::R8 && levels == 1 {
+        return packed_byte_texture(
+            RenderCommand::BindTexture {
+                slot,
+                hash,
+                texels,
+                width,
+                height,
+                sampling,
+                encoding: crate::backend::TextureEncoding::Rgba8,
+                faces: 1,
+                levels,
+            },
+            selects,
+        );
+    }
     // By extent as well: the levels of one chain are bound under one hash.
     let key = (hash, width, height);
     let kept = swizzled_kept()
@@ -7007,6 +7027,72 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         levels,
     }
 }
+
+/// A one-byte texture's binding as [`crate::backend::TextureEncoding::R8`]: its bytes, the low byte
+/// of each of `bound`'s words, packed four to a word, and each channel's source as its `selects`
+/// pick it - X the byte, select 1 and W one (a one-byte texel reads its W as one, as
+/// [`swizzle_texels`] has it), anything else zero. Kept by hash and extent as swizzled texels are.
+fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand {
+    use crate::backend::ByteLane;
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        faces,
+        levels,
+        ..
+    } = bound
+    else {
+        return bound;
+    };
+    let lanes = selects.map(|select| match select {
+        1 | 7 => ByteLane::One,
+        SELECT_X => ByteLane::Byte,
+        _ => ByteLane::Zero,
+    });
+    // Packed and widened bytes of one texture share a hash; the tag keeps them apart in the cache.
+    let key = (hash ^ PACKED_BYTES_TAG, width, height);
+    let kept = swizzled_kept()
+        .lock()
+        .ok()
+        .and_then(|kept| kept.get(&key).cloned());
+    let packed = kept.unwrap_or_else(|| {
+        crate::perf::span(crate::perf::Span::TextureSwizzle, || {
+            let packed: std::sync::Arc<[u32]> = texels
+                .chunks(4)
+                .map(|four| {
+                    (0..).zip(four).fold(0, |word, (lane, &texel)| {
+                        word | (texel & 0xFF) << (8 * lane)
+                    })
+                })
+                .collect();
+            if let Ok(mut kept) = swizzled_kept().lock() {
+                if kept.len() >= TEXEL_CACHE_ENTRIES {
+                    crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
+                }
+                kept.insert(key, std::sync::Arc::clone(&packed));
+            }
+            packed
+        })
+    });
+    RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels: packed,
+        width,
+        height,
+        sampling,
+        encoding: crate::backend::TextureEncoding::R8 { lanes },
+        faces,
+        levels,
+    }
+}
+
+/// What [`packed_byte_texture`] moves a hash by in the swizzled-texel cache.
+const PACKED_BYTES_TAG: u64 = 0x0b17_e5b1_7e5b_17e5;
 
 /// Swizzled texels by the hash they are bound under and their extent. The hash is the source
 /// texels' combined with the format and selects, but the levels of one chain share it, so the
@@ -8512,8 +8598,19 @@ mod tests {
             }
             read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
         };
+        // As the host samples it: a one-byte binding's packed bytes read through its lanes.
         let texels_of = |bound: Option<RenderCommand>| match bound {
-            Some(RenderCommand::BindTexture { texels, .. }) => texels.to_vec(),
+            Some(RenderCommand::BindTexture {
+                texels,
+                encoding: crate::backend::TextureEncoding::R8 { lanes },
+                width,
+                height,
+                ..
+            }) => crate::backend::byte_lanes_as_rgba8(
+                lanes,
+                &texels,
+                width as usize * height as usize,
+            ),
             other => panic!("a one-byte texture binds: {other:?}"),
         };
         // `SQ_SEL_XYZW01`: 0 and 1 the constants, 4 to 7 X to W; three bits a channel.
@@ -9971,6 +10068,47 @@ mod tests {
         }
     }
 
+    /// A one-byte texture binds as its bytes, four to a word, with each channel's source - the
+    /// byte, zero or one - as its selects pick it; read back through those lanes it is exactly the
+    /// words the swizzle gave, for every select. GTA V's intro video binds such planes every frame,
+    /// and widening each byte into a word to upload made the upload four times the texture.
+    #[test]
+    fn a_one_byte_texture_binds_its_bytes_with_its_lanes() {
+        use super::{RenderCommand, TexelFormat, swizzle_texels, swizzled_texture};
+        // Five texels: a short last word, and a stray high byte that must not reach the lanes.
+        let texels: std::sync::Arc<[u32]> = vec![0x01, 0x80, 0xff, 0x00, 0x1234_567f].into();
+        for x in [0, 1, 4, 5, 6, 7] {
+            for w in [0, 1, 4, 7] {
+                let selects = [4, x, 0, w];
+                let bind = RenderCommand::BindTexture {
+                    slot: 0,
+                    hash: 0x5eed_0000_0000_0002,
+                    texels: std::sync::Arc::clone(&texels),
+                    width: 5,
+                    height: 1,
+                    sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+                    encoding: crate::backend::TextureEncoding::Rgba8,
+                    faces: 1,
+                    levels: 1,
+                };
+                let RenderCommand::BindTexture {
+                    texels: packed,
+                    encoding: crate::backend::TextureEncoding::R8 { lanes },
+                    ..
+                } = swizzled_texture(bind, TexelFormat::R8, selects)
+                else {
+                    panic!("a one-byte binding for {selects:?}");
+                };
+                assert_eq!(&*packed, &[0x00ff_8001_u32, 0x7f], "{selects:?}");
+                assert_eq!(
+                    crate::backend::byte_lanes_as_rgba8(lanes, &packed, 5),
+                    *swizzle_texels(&texels, TexelFormat::R8, selects),
+                    "{selects:?}"
+                );
+            }
+        }
+    }
+
     /// A volume of one texel binds whatever its swizzle mode: every gfx10 equation forms each address
     /// bit as an exclusive-or of coordinate bits (`gfx10addrlib.cpp:4345`,
     /// `ComputeOffsetFromEquation`), so with no pipe and bank xor texel (0, 0, 0) is the surface's
@@ -10590,11 +10728,16 @@ mod tests {
                 bytes[0x1000 + y * 256 + x] = u8::try_from(y * 10 + x).expect("small");
             }
         }
-        let Some(RenderCommand::BindTexture { texels, .. }) =
-            read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
+        let Some(RenderCommand::BindTexture {
+            texels,
+            encoding: crate::backend::TextureEncoding::R8 { lanes },
+            ..
+        }) = read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
         else {
             panic!("a linear one-byte texture binds");
         };
+        // As the host samples it: the packed bytes read through the binding's lanes.
+        let texels = crate::backend::byte_lanes_as_rgba8(lanes, &texels, (width * height) as usize);
         assert_eq!(
             texels[(2 * width + 3) as usize],
             0xff00_0017,

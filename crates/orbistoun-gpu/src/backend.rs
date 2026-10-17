@@ -515,6 +515,45 @@ pub enum TextureEncoding {
     DepthFloat,
     /// [`Self::DepthFloat`] sampled through a compare by the sampler's function (D817).
     DepthCompare,
+    /// One byte a texel, four to a word in row-major order, the first in the low byte, which the
+    /// host samples as `R8_UNORM` with each channel read from the byte or a constant as `lanes`
+    /// says: a one-byte texture bound as its selects read it, at a quarter of the words a widened
+    /// `Rgba8` copy takes.
+    R8 {
+        /// Red, green, blue and alpha's source.
+        lanes: [ByteLane; 4],
+    },
+}
+
+/// Where a channel of an [`TextureEncoding::R8`] texel comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ByteLane {
+    /// The texel's byte.
+    Byte,
+    /// Zero.
+    Zero,
+    /// One: the byte's full scale.
+    One,
+}
+
+/// `count` texels of an [`TextureEncoding::R8`] texture, `packed` four bytes to a word, as the
+/// `Rgba8` words its `lanes` read them as: the bytes a widened copy of it holds, red lowest.
+#[must_use]
+pub fn byte_lanes_as_rgba8(lanes: [ByteLane; 4], packed: &[u32], count: usize) -> Vec<u32> {
+    let (mut constant, mut spread) = (0_u32, 0_u32);
+    for (lane, source) in (0..).zip(lanes) {
+        match source {
+            ByteLane::One => constant |= 0xFF << (8 * lane),
+            ByteLane::Byte => spread |= 1 << (8 * lane),
+            ByteLane::Zero => {}
+        }
+    }
+    packed
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .take(count)
+        .map(|byte| constant | (u32::from(byte) * spread))
+        .collect()
 }
 
 /// Something that can carry out [`RenderCommand`]s.

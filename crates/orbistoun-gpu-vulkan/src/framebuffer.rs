@@ -2883,7 +2883,25 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
         // A depth target's depths as the host attachment held them (D817).
         orbistoun_gpu::TextureEncoding::DepthFloat
         | orbistoun_gpu::TextureEncoding::DepthCompare => (vk::Format::D32_SFLOAT, as_they_are()),
+        // One byte a texel, tightly packed as the copy reads a one-byte format; its lanes are the
+        // view's (`texture_components`). Sampling and linear filtering of `R8_UNORM` with optimal
+        // tiling are required of every implementation (Vulkan's required format support table).
+        orbistoun_gpu::TextureEncoding::R8 { .. } => (vk::Format::R8_UNORM, as_they_are()),
     }
+}
+
+/// How a texture's view maps its channels: an `R8` texture's lanes each the byte (`R`), zero or
+/// one; every other as it is.
+fn texture_components(encoding: orbistoun_gpu::TextureEncoding) -> vk::ComponentMapping {
+    let orbistoun_gpu::TextureEncoding::R8 { lanes } = encoding else {
+        return vk::ComponentMapping::default();
+    };
+    let [r, g, b, a] = lanes.map(|lane| match lane {
+        orbistoun_gpu::ByteLane::Byte => vk::ComponentSwizzle::R,
+        orbistoun_gpu::ByteLane::Zero => vk::ComponentSwizzle::ZERO,
+        orbistoun_gpu::ByteLane::One => vk::ComponentSwizzle::ONE,
+    });
+    vk::ComponentMapping { r, g, b, a }
 }
 
 /// Creates a sampled image holding `texture`'s texels or blocks.
@@ -2968,6 +2986,7 @@ fn create_texture(
         .image(image)
         .view_type(view_type)
         .format(format)
+        .components(texture_components(texture.encoding))
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(aspect)

@@ -2582,6 +2582,10 @@ fn written_since_flip() -> &'static Mutex<Vec<u64>> {
     &EARLY
 }
 
+/// A texture a frame's draws bound, as it was bound: its slot, width, height, texels and what its
+/// words are.
+pub type HeldTexture = (u32, u32, u32, Arc<[u32]>, crate::TextureEncoding);
+
 /// The frame last drawn into a colour target: what a run's report names behind a flip of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawnBy {
@@ -2589,8 +2593,8 @@ pub struct DrawnBy {
     pub frame: u64,
     /// How many draws drew it.
     pub draws: usize,
-    /// Each texture those draws bound, once: its slot, width, height and texels.
-    pub textures: Vec<(u32, u32, u32, Arc<[u32]>)>,
+    /// Each texture those draws bound, once.
+    pub textures: Vec<HeldTexture>,
     /// Where each texture they sampled lies, with its width and height: what traces a sampled
     /// render target to the frame drawn into it.
     pub sampled: Vec<(u64, u32, u32)>,
@@ -2615,20 +2619,21 @@ pub fn note_drawn_by(
     commands: &[crate::RenderCommand],
     sampled: &[(u64, u32, u32)],
 ) {
-    let mut textures: Vec<(u32, u32, u32, Arc<[u32]>)> = Vec::new();
+    let mut textures: Vec<HeldTexture> = Vec::new();
     for command in commands {
         if let crate::RenderCommand::BindTexture {
             slot,
             texels,
             width,
             height,
+            encoding,
             ..
         } = command
             && !textures
                 .iter()
-                .any(|(bound, _, _, held)| bound == slot && Arc::ptr_eq(held, texels))
+                .any(|(bound, _, _, held, _)| bound == slot && Arc::ptr_eq(held, texels))
         {
-            textures.push((*slot, *width, *height, Arc::clone(texels)));
+            textures.push((*slot, *width, *height, Arc::clone(texels), *encoding));
         }
     }
     let mut store = drawn_by()

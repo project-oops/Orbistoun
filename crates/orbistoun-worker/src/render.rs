@@ -1266,20 +1266,34 @@ fn snapshot_frame(number: u64, frame: &Pixels) {
 }
 
 /// A texture the last flip's frame sampled, as a file: its name - order, slot and size - and its
-/// texels as `Rgba8` bytes in memory order, as they were bound.
+/// texels as `Rgba8` bytes in memory order, as they were bound; a one-byte texture's bytes as its
+/// lanes read them.
 fn sampled_dump(
     number: usize,
-    texture: &(u32, u32, u32, std::sync::Arc<[u32]>),
+    texture: &orbistoun_gpu::agc_driver::HeldTexture,
 ) -> (String, Vec<u8>) {
-    let (slot, width, height, texels) = texture;
+    let (slot, width, height, ..) = texture;
     let name = format!("sampled-{number:02}-slot{slot}-{width}x{height}.rgba");
     (
         name,
-        texels
+        as_rgba8(texture)
             .iter()
             .flat_map(|texel| texel.to_le_bytes())
             .collect(),
     )
+}
+
+/// A bound texture's texels as `Rgba8` words: as they are, or a one-byte texture's bytes as its
+/// lanes read them.
+fn as_rgba8(
+    (_, width, height, texels, encoding): &orbistoun_gpu::agc_driver::HeldTexture,
+) -> std::borrow::Cow<'_, [u32]> {
+    match *encoding {
+        orbistoun_gpu::TextureEncoding::R8 { lanes } => std::borrow::Cow::Owned(
+            orbistoun_gpu::byte_lanes_as_rgba8(lanes, texels, *width as usize * *height as usize),
+        ),
+        _ => std::borrow::Cow::Borrowed(&**texels),
+    }
 }
 
 /// Keeps every texture `by` sampled in the run's frames directory, so what a frame shows nothing of
@@ -1886,8 +1900,12 @@ fn drawn_by_line(
         .textures
         .iter()
         .take(MOST_DRAWN_TEXTURES)
-        .map(|(slot, width, height, texels)| {
-            format!("slot {slot} {width}x{height} ({})", texel_summary(texels))
+        .map(|texture| {
+            let (slot, width, height, ..) = texture;
+            format!(
+                "slot {slot} {width}x{height} ({})",
+                texel_summary(&as_rgba8(texture))
+            )
         })
         .collect();
     if by.textures.len() > MOST_DRAWN_TEXTURES {
@@ -2629,9 +2647,29 @@ mod tests {
     #[test]
     fn a_sampled_texture_is_kept_as_its_texels() {
         let texels: std::sync::Arc<[u32]> = vec![0xff00_00ff, 0x0000_ff00].into();
-        let (name, bytes) = super::sampled_dump(3, &(1, 2, 1, texels));
+        let (name, bytes) =
+            super::sampled_dump(3, &(1, 2, 1, texels, orbistoun_gpu::TextureEncoding::Rgba8));
         assert_eq!(name, "sampled-03-slot1-2x1.rgba");
         assert_eq!(bytes, [0xff, 0, 0, 0xff, 0, 0xff, 0, 0]);
+        // A one-byte texture's packed bytes, kept as its lanes read them: here (X, X, X, 1).
+        let packed: std::sync::Arc<[u32]> = vec![0x0000_8010].into();
+        let lanes = [
+            orbistoun_gpu::ByteLane::Byte,
+            orbistoun_gpu::ByteLane::Byte,
+            orbistoun_gpu::ByteLane::Byte,
+            orbistoun_gpu::ByteLane::One,
+        ];
+        let (_, bytes) = super::sampled_dump(
+            0,
+            &(
+                0,
+                2,
+                1,
+                packed,
+                orbistoun_gpu::TextureEncoding::R8 { lanes },
+            ),
+        );
+        assert_eq!(bytes, [0x10, 0x10, 0x10, 0xff, 0x80, 0x80, 0x80, 0xff]);
     }
 
     /// The frame a flip showed is named by what drew it: which frame drawn it was, its draws, each
@@ -2643,7 +2681,13 @@ mod tests {
         let by = orbistoun_gpu::agc_driver::DrawnBy {
             frame: 12,
             draws: 3,
-            textures: vec![(0, 2, 1, std::sync::Arc::from(vec![5_u32, 5]))],
+            textures: vec![(
+                0,
+                2,
+                1,
+                std::sync::Arc::from(vec![5_u32, 5]),
+                orbistoun_gpu::TextureEncoding::Rgba8,
+            )],
             sampled: vec![(0x2000, 2, 1), (0x3000, 4, 4)],
             read: Vec::new(),
         };
