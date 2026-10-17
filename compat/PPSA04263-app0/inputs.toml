@@ -1,645 +1,667 @@
-# PPSA04263 with a controller connected from its first flip, as the console has one: a pad
-# delivered with nothing held sets the record's connected flag (D713). Without it the title
-# never reaches its controller set-up (vibration, trigger effects, light bar). South is pressed
-# and released every forty flips from flip 400, so a press lands on whatever the title waits on.
+# PPSA04263 with a controller connected from the start, as the console has one: a pad delivered
+# with nothing held sets the record's connected flag (D713). South (Cross) is pressed for 150 ms
+# every 3 s from 20 s, by the host clock, so a press lands on whatever screen waits on one - the
+# title's "Continue", the first-launch language menu - whether or not the screen is still flipping:
+# the language menu draws once and waits, and a flip-keyed press after it never fires.
 # Written by hand, not captured.
 
 [[step]]
-at_flip = 1
+at_ms = 0
 
 [[step]]
-at_flip = 400
+at_ms = 20000
 buttons = ["south"]
 
 [[step]]
-at_flip = 403
+at_ms = 20150
 
 [[step]]
-at_flip = 440
+at_ms = 23000
 buttons = ["south"]
 
 [[step]]
-at_flip = 443
+at_ms = 23150
 
 [[step]]
-at_flip = 480
+at_ms = 26000
 buttons = ["south"]
 
 [[step]]
-at_flip = 483
+at_ms = 26150
 
 [[step]]
-at_flip = 520
+at_ms = 29000
 buttons = ["south"]
 
 [[step]]
-at_flip = 523
+at_ms = 29150
 
 [[step]]
-at_flip = 560
+at_ms = 32000
 buttons = ["south"]
 
 [[step]]
-at_flip = 563
+at_ms = 32150
 
 [[step]]
-at_flip = 600
+at_ms = 35000
 buttons = ["south"]
 
 [[step]]
-at_flip = 603
+at_ms = 35150
 
 [[step]]
-at_flip = 640
+at_ms = 38000
 buttons = ["south"]
 
 [[step]]
-at_flip = 643
+at_ms = 38150
 
 [[step]]
-at_flip = 680
+at_ms = 41000
 buttons = ["south"]
 
 [[step]]
-at_flip = 683
+at_ms = 41150
 
 [[step]]
-at_flip = 720
+at_ms = 44000
 buttons = ["south"]
 
 [[step]]
-at_flip = 723
+at_ms = 44150
 
 [[step]]
-at_flip = 760
+at_ms = 47000
 buttons = ["south"]
 
 [[step]]
-at_flip = 763
+at_ms = 47150
 
 [[step]]
-at_flip = 800
+at_ms = 50000
 buttons = ["south"]
 
 [[step]]
-at_flip = 803
+at_ms = 50150
 
 [[step]]
-at_flip = 840
+at_ms = 53000
 buttons = ["south"]
 
 [[step]]
-at_flip = 843
+at_ms = 53150
 
 [[step]]
-at_flip = 880
+at_ms = 56000
 buttons = ["south"]
 
 [[step]]
-at_flip = 883
+at_ms = 56150
 
 [[step]]
-at_flip = 920
+at_ms = 59000
 buttons = ["south"]
 
 [[step]]
-at_flip = 923
+at_ms = 59150
 
 [[step]]
-at_flip = 960
+at_ms = 62000
 buttons = ["south"]
 
 [[step]]
-at_flip = 963
+at_ms = 62150
 
 [[step]]
-at_flip = 1000
+at_ms = 65000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1003
+at_ms = 65150
 
 [[step]]
-at_flip = 1040
+at_ms = 68000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1043
+at_ms = 68150
 
 [[step]]
-at_flip = 1080
+at_ms = 71000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1083
+at_ms = 71150
 
 [[step]]
-at_flip = 1120
+at_ms = 74000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1123
+at_ms = 74150
 
 [[step]]
-at_flip = 1160
+at_ms = 77000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1163
+at_ms = 77150
 
 [[step]]
-at_flip = 1200
+at_ms = 80000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1203
+at_ms = 80150
 
 [[step]]
-at_flip = 1240
+at_ms = 83000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1243
+at_ms = 83150
 
 [[step]]
-at_flip = 1280
+at_ms = 86000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1283
+at_ms = 86150
 
 [[step]]
-at_flip = 1320
+at_ms = 89000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1323
+at_ms = 89150
 
 [[step]]
-at_flip = 1360
+at_ms = 92000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1363
+at_ms = 92150
 
 [[step]]
-at_flip = 1400
+at_ms = 95000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1403
+at_ms = 95150
 
 [[step]]
-at_flip = 1440
+at_ms = 98000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1443
+at_ms = 98150
 
 [[step]]
-at_flip = 1480
+at_ms = 101000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1483
+at_ms = 101150
 
 [[step]]
-at_flip = 1520
+at_ms = 104000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1523
+at_ms = 104150
 
 [[step]]
-at_flip = 1560
+at_ms = 107000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1563
+at_ms = 107150
 
 [[step]]
-at_flip = 1600
+at_ms = 110000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1603
+at_ms = 110150
 
 [[step]]
-at_flip = 1640
+at_ms = 113000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1643
+at_ms = 113150
 
 [[step]]
-at_flip = 1680
+at_ms = 116000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1683
+at_ms = 116150
 
 [[step]]
-at_flip = 1720
+at_ms = 119000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1723
+at_ms = 119150
 
 [[step]]
-at_flip = 1760
+at_ms = 122000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1763
+at_ms = 122150
 
 [[step]]
-at_flip = 1800
+at_ms = 125000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1803
+at_ms = 125150
 
 [[step]]
-at_flip = 1840
+at_ms = 128000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1843
+at_ms = 128150
 
 [[step]]
-at_flip = 1880
+at_ms = 131000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1883
+at_ms = 131150
 
 [[step]]
-at_flip = 1920
+at_ms = 134000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1923
+at_ms = 134150
 
 [[step]]
-at_flip = 1960
+at_ms = 137000
 buttons = ["south"]
 
 [[step]]
-at_flip = 1963
+at_ms = 137150
 
 [[step]]
-at_flip = 2000
+at_ms = 140000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2003
+at_ms = 140150
 
 [[step]]
-at_flip = 2040
+at_ms = 143000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2043
+at_ms = 143150
 
 [[step]]
-at_flip = 2080
+at_ms = 146000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2083
+at_ms = 146150
 
 [[step]]
-at_flip = 2120
+at_ms = 149000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2123
+at_ms = 149150
 
 [[step]]
-at_flip = 2160
+at_ms = 152000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2163
+at_ms = 152150
 
 [[step]]
-at_flip = 2200
+at_ms = 155000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2203
+at_ms = 155150
 
 [[step]]
-at_flip = 2240
+at_ms = 158000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2243
+at_ms = 158150
 
 [[step]]
-at_flip = 2280
+at_ms = 161000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2283
+at_ms = 161150
 
 [[step]]
-at_flip = 2320
+at_ms = 164000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2323
+at_ms = 164150
 
 [[step]]
-at_flip = 2360
+at_ms = 167000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2363
+at_ms = 167150
 
 [[step]]
-at_flip = 2400
+at_ms = 170000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2403
+at_ms = 170150
 
 [[step]]
-at_flip = 2440
+at_ms = 173000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2443
+at_ms = 173150
 
 [[step]]
-at_flip = 2480
+at_ms = 176000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2483
+at_ms = 176150
 
 [[step]]
-at_flip = 2520
+at_ms = 179000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2523
+at_ms = 179150
 
 [[step]]
-at_flip = 2560
+at_ms = 182000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2563
+at_ms = 182150
 
 [[step]]
-at_flip = 2600
+at_ms = 185000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2603
+at_ms = 185150
 
 [[step]]
-at_flip = 2640
+at_ms = 188000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2643
+at_ms = 188150
 
 [[step]]
-at_flip = 2680
+at_ms = 191000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2683
+at_ms = 191150
 
 [[step]]
-at_flip = 2720
+at_ms = 194000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2723
+at_ms = 194150
 
 [[step]]
-at_flip = 2760
+at_ms = 197000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2763
+at_ms = 197150
 
 [[step]]
-at_flip = 2800
+at_ms = 200000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2803
+at_ms = 200150
 
 [[step]]
-at_flip = 2840
+at_ms = 203000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2843
+at_ms = 203150
 
 [[step]]
-at_flip = 2880
+at_ms = 206000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2883
+at_ms = 206150
 
 [[step]]
-at_flip = 2920
+at_ms = 209000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2923
+at_ms = 209150
 
 [[step]]
-at_flip = 2960
+at_ms = 212000
 buttons = ["south"]
 
 [[step]]
-at_flip = 2963
+at_ms = 212150
 
 [[step]]
-at_flip = 3000
+at_ms = 215000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3003
+at_ms = 215150
 
 [[step]]
-at_flip = 3040
+at_ms = 218000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3043
+at_ms = 218150
 
 [[step]]
-at_flip = 3080
+at_ms = 221000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3083
+at_ms = 221150
 
 [[step]]
-at_flip = 3120
+at_ms = 224000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3123
+at_ms = 224150
 
 [[step]]
-at_flip = 3160
+at_ms = 227000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3163
+at_ms = 227150
 
 [[step]]
-at_flip = 3200
+at_ms = 230000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3203
+at_ms = 230150
 
 [[step]]
-at_flip = 3240
+at_ms = 233000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3243
+at_ms = 233150
 
 [[step]]
-at_flip = 3280
+at_ms = 236000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3283
+at_ms = 236150
 
 [[step]]
-at_flip = 3320
+at_ms = 239000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3323
+at_ms = 239150
 
 [[step]]
-at_flip = 3360
+at_ms = 242000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3363
+at_ms = 242150
 
 [[step]]
-at_flip = 3400
+at_ms = 245000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3403
+at_ms = 245150
 
 [[step]]
-at_flip = 3440
+at_ms = 248000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3443
+at_ms = 248150
 
 [[step]]
-at_flip = 3480
+at_ms = 251000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3483
+at_ms = 251150
 
 [[step]]
-at_flip = 3520
+at_ms = 254000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3523
+at_ms = 254150
 
 [[step]]
-at_flip = 3560
+at_ms = 257000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3563
+at_ms = 257150
 
 [[step]]
-at_flip = 3600
+at_ms = 260000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3603
+at_ms = 260150
 
 [[step]]
-at_flip = 3640
+at_ms = 263000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3643
+at_ms = 263150
 
 [[step]]
-at_flip = 3680
+at_ms = 266000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3683
+at_ms = 266150
 
 [[step]]
-at_flip = 3720
+at_ms = 269000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3723
+at_ms = 269150
 
 [[step]]
-at_flip = 3760
+at_ms = 272000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3763
+at_ms = 272150
 
 [[step]]
-at_flip = 3800
+at_ms = 275000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3803
+at_ms = 275150
 
 [[step]]
-at_flip = 3840
+at_ms = 278000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3843
+at_ms = 278150
 
 [[step]]
-at_flip = 3880
+at_ms = 281000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3883
+at_ms = 281150
 
 [[step]]
-at_flip = 3920
+at_ms = 284000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3923
+at_ms = 284150
 
 [[step]]
-at_flip = 3960
+at_ms = 287000
 buttons = ["south"]
 
 [[step]]
-at_flip = 3963
+at_ms = 287150
 
 [[step]]
-at_flip = 4000
+at_ms = 290000
 buttons = ["south"]
 
 [[step]]
-at_flip = 4003
+at_ms = 290150
+
+[[step]]
+at_ms = 293000
+buttons = ["south"]
+
+[[step]]
+at_ms = 293150
+
+[[step]]
+at_ms = 296000
+buttons = ["south"]
+
+[[step]]
+at_ms = 296150
+
+[[step]]
+at_ms = 299000
+buttons = ["south"]
+
+[[step]]
+at_ms = 299150
