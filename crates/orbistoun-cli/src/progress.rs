@@ -23,6 +23,7 @@ pub(crate) fn report_progress(
         );
         print_standing(after);
         print_leaned_on(after);
+        print_decided(after);
         print_quiet(after);
         print_threads(after);
         print_waits(after);
@@ -58,6 +59,7 @@ pub(crate) fn report_progress(
     }
     print_standing(after);
     print_leaned_on(after);
+    print_decided(after);
     print_quiet(after);
     print_threads(after);
     print_waits(after);
@@ -360,6 +362,32 @@ fn print_leaned_on(trace: &orbistoun_report::trace::CallTrace) {
     );
     for (label, calls, why) in leaned.iter().take(LEANED_ON_SHOWN) {
         println!("           {calls:>9} calls  {label} - {why}");
+    }
+}
+
+/// One line per placeholder answer the title branches on: the import, where it was first called,
+/// and the test and jump there.
+fn decided_lines(tested: &[orbistoun_report::trace::TestedAnswer]) -> Vec<String> {
+    tested
+        .iter()
+        .map(|t| format!("{} at {}: {}", t.label, t.site, t.test))
+        .collect()
+}
+
+/// Names every placeholder answer the title's own code branches on, however rarely it was called:
+/// the findings rank stubs by calls, and a one-call stub that sends a start-up down its failure path
+/// would otherwise go unprinted.
+fn print_decided(trace: &orbistoun_report::trace::CallTrace) {
+    let lines = decided_lines(&trace.tested_answers);
+    if lines.is_empty() {
+        return;
+    }
+    println!(
+        "  decides  {} placeholder answer(s) the title branches on where it first called them:",
+        lines.len()
+    );
+    for line in &lines {
+        println!("           {line}");
     }
 }
 
@@ -719,6 +747,35 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
 
 #[cfg(test)]
 mod tests {
+    /// Every placeholder answer the title branches on is listed whatever its call count: GTA V's
+    /// online start-up dies on two one-call stubs that the call-ranked findings never printed.
+    #[test]
+    fn every_placeholder_the_title_branches_on_is_listed() {
+        let tested = |label: &str, site: &str| orbistoun_report::trace::TestedAnswer {
+            label: label.to_owned(),
+            site: site.to_owned(),
+            test: "test eax,eax; js 0000400002D4EB5Fh".to_owned(),
+        };
+        let lines = super::decided_lines(&[
+            tested(
+                "libSceNpEntitlementAccess::sceNpEntitlementAccessInitialize",
+                "image+0x2d4e906",
+            ),
+            tested(
+                "libSceNpManager::sceNpRegisterStateCallbackA",
+                "image+0x2606636",
+            ),
+        ]);
+        assert_eq!(
+            lines,
+            [
+                "libSceNpEntitlementAccess::sceNpEntitlementAccessInitialize at image+0x2d4e906: test eax,eax; js 0000400002D4EB5Fh",
+                "libSceNpManager::sceNpRegisterStateCallbackA at image+0x2606636: test eax,eax; js 0000400002D4EB5Fh",
+            ]
+        );
+        assert!(super::decided_lines(&[]).is_empty());
+    }
+
     /// The implemented calls a run leans on whose answer is assumed or partly modelled are named,
     /// most-called first: GTA V called an interpolant builder 45584 times whose remap by the
     /// shaders' semantics is "not modelled", and the standing line counted it as answered.
