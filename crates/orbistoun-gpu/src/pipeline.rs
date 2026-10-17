@@ -7400,6 +7400,7 @@ fn read_tiled_base(
         let zeros = vec![0u32; width as usize * height as usize];
         (crate::content_hash(&zeros), zeros.into())
     } else {
+        let started = std::time::Instant::now();
         let bytes = memory.read(surface.base, span)?;
         let mut hasher = crate::ContentHasher::new(span / 4);
         hasher.bytes(bytes);
@@ -7407,13 +7408,25 @@ fn read_tiled_base(
         let shared = match texels.get(&key) {
             Some(cached) if cached.hash == hash => cached.texels.clone(),
             _ => {
-                let words: Vec<u32> = bytes
-                    .chunks_exact(4)
-                    .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
-                    .collect();
-                surface.detile_mapped(&words, |w| w).into()
+                // The guest's words read where they lie when they are aligned, as they are for any
+                // surface base; a copy only otherwise. Both are the little-endian words the host
+                // reads.
+                if let Ok(words) = <[u32] as zerocopy::FromBytes>::ref_from_bytes(bytes) {
+                    surface.detile_mapped(words, |w| w).into()
+                } else {
+                    let words: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+                        .collect();
+                    surface.detile_mapped(&words, |w| w).into()
+                }
             }
         };
+        crate::detiled::note(
+            &format!("{:?}", surface.layout),
+            span as u64,
+            started.elapsed(),
+        );
         (hash, shared)
     };
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {

@@ -1593,6 +1593,9 @@ fn log_flip_origins() {
     if let Some(line) = origins.describe() {
         tracing::info!("{line}");
     }
+    if let Some(line) = orbistoun_gpu::detiled::describe(&orbistoun_gpu::detiled::by_layout()) {
+        tracing::info!("{line}");
+    }
     let Some(shown) = origins.last else {
         return;
     };

@@ -14,6 +14,7 @@ pub mod colour_slots;
 pub mod cp;
 pub mod dcc;
 pub mod depth;
+pub mod detiled;
 pub mod dispatch;
 pub mod display;
 pub mod draw_buffers;
