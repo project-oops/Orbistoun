@@ -272,6 +272,45 @@ static COUNTS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new(
 /// index. Allocated with [`COUNTS`].
 static INSIDE_TICKS: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
+/// How many imports each published thread's time inside is kept for; ticks inside any further
+/// import are not kept per thread, though the run's per-import totals count them.
+pub const THREAD_IMPORTS_KEPT: usize = 16;
+
+/// Each published thread's imports, plus one (zero for an empty entry), that its time inside is
+/// kept for, by slot. Written only by the thread the slot belongs to.
+static THREAD_INSIDE_IMPORT: [[AtomicU64; THREAD_IMPORTS_KEPT]; PUBLISHED_THREADS] =
+    [const { [const { AtomicU64::new(0) }; THREAD_IMPORTS_KEPT] }; PUBLISHED_THREADS];
+/// The ticks each of those imports' calls spent inside, by slot.
+static THREAD_INSIDE_TICKS: [[AtomicU64; THREAD_IMPORTS_KEPT]; PUBLISHED_THREADS] =
+    [const { [const { AtomicU64::new(0) }; THREAD_IMPORTS_KEPT] }; PUBLISHED_THREADS];
+
+/// Adds `spent` ticks inside import `index` to this thread's table, in its entry for the import or
+/// the first empty one; dropped when all are taken by other imports. Only this thread writes its
+/// slot, so a load and a store suffice.
+fn note_thread_inside(index: u64, spent: u64) {
+    let slot = published_slot();
+    let (Some(imports), Some(ticks)) = (
+        THREAD_INSIDE_IMPORT.get(slot),
+        THREAD_INSIDE_TICKS.get(slot),
+    ) else {
+        return;
+    };
+    for (import, ticks) in imports.iter().zip(ticks) {
+        match import.load(Ordering::Relaxed) {
+            0 => {
+                ticks.store(spent, Ordering::Relaxed);
+                import.store(index + 1, Ordering::Relaxed);
+                return;
+            }
+            held if held == index + 1 => {
+                ticks.store(ticks.load(Ordering::Relaxed) + spent, Ordering::Relaxed);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The counter and the clock when the counters were prepared, which [`inside_seconds`] converts
 /// ticks to seconds against.
 static INSIDE_SINCE: std::sync::OnceLock<(u64, std::time::Instant)> = std::sync::OnceLock::new();
@@ -1334,6 +1373,41 @@ pub fn inside_seconds() -> Vec<f64> {
         .collect()
 }
 
+/// Each published host thread's time inside the imports its table kept, as `(host thread, [(import,
+/// seconds)])`, converted as [`inside_seconds`] converts.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // tick counts far below 2^52 matter only to a ratio
+pub fn inside_by_thread() -> Vec<(u64, Vec<(u32, f64)>)> {
+    let Some(&(start, since)) = INSIDE_SINCE.get() else {
+        return Vec::new();
+    };
+    let elapsed = since.elapsed().as_secs_f64();
+    let counted = ticks().saturating_sub(start);
+    if counted == 0 || elapsed <= 0.0 {
+        return Vec::new();
+    }
+    let per_second = counted as f64 / elapsed;
+    let claimed = PUBLISHED_CLAIMED
+        .load(Ordering::Relaxed)
+        .min(PUBLISHED_THREADS);
+    (0..claimed)
+        .map(|slot| {
+            let kept = THREAD_INSIDE_IMPORT[slot]
+                .iter()
+                .zip(&THREAD_INSIDE_TICKS[slot])
+                .filter_map(|(import, ticks)| {
+                    let index = import.load(Ordering::Relaxed).checked_sub(1)?;
+                    Some((
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                        ticks.load(Ordering::Relaxed) as f64 / per_second,
+                    ))
+                })
+                .collect();
+            (PUBLISHED_HOST[slot].load(Ordering::Relaxed), kept)
+        })
+        .collect()
+}
+
 /// Where import `index` was first called from, if it landed on a stub: the return address of its
 /// first call, the place the guest acts on the placeholder it was answered. Zero when it was never
 /// called on a stub, or the address could not be read.
@@ -1587,9 +1661,11 @@ unsafe extern "sysv64" fn on_guest_call(
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
+    let spent = ticks().wrapping_sub(entered);
     if let Some(inside) = INSIDE_TICKS.get().and_then(|t| t.get(index as usize)) {
-        inside.fetch_add(ticks().wrapping_sub(entered), Ordering::Relaxed);
+        inside.fetch_add(spent, Ordering::Relaxed);
     }
+    note_thread_inside(index, spent);
     leave_import(outer);
 
     // A named import's dumped calls are dumped again as they return, so an out-parameter shows

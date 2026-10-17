@@ -3064,6 +3064,64 @@ fn inside_line(rows: &[(String, f64, u64)]) -> Option<String> {
     ))
 }
 
+/// How many threads [`inside_by_thread_lines`] names, and how many imports for each.
+const INSIDE_THREADS_NAMED: usize = 8;
+const INSIDE_THREAD_IMPORTS_NAMED: usize = 3;
+
+/// One line per thread that spent at least [`INSIDE_LEAST_SECONDS`] inside imports, the most
+/// first: its name, its seconds inside, and its heaviest imports, from `(name, [(import,
+/// seconds)])` rows - which thread waits on what, where the sum across threads cannot say.
+fn inside_by_thread_lines(threads: &[(String, Vec<(String, f64)>)]) -> Vec<String> {
+    let mut named: Vec<_> = threads
+        .iter()
+        .map(|(name, inside)| {
+            let mut heaviest: Vec<&(String, f64)> = inside
+                .iter()
+                .filter(|(_, seconds)| *seconds >= INSIDE_LEAST_SECONDS)
+                .collect();
+            heaviest.sort_by(|a, b| b.1.total_cmp(&a.1));
+            (
+                name.as_str(),
+                inside.iter().map(|(_, seconds)| seconds).sum::<f64>(),
+                heaviest,
+            )
+        })
+        .filter(|(_, total, _)| *total >= INSIDE_LEAST_SECONDS)
+        .collect();
+    named.sort_by(|a, b| b.1.total_cmp(&a.1));
+    named
+        .into_iter()
+        .take(INSIDE_THREADS_NAMED)
+        .map(|(name, total, heaviest)| {
+            let parts: Vec<String> = heaviest
+                .iter()
+                .take(INSIDE_THREAD_IMPORTS_NAMED)
+                .map(|(label, seconds)| format!("{label} {seconds:.1} s"))
+                .collect();
+            format!("{name}: {total:.1} s inside imports - {}", parts.join(", "))
+        })
+        .collect()
+}
+
+/// Each guest thread's time inside the imports the thunk kept for it, by the thread's name.
+fn thread_inside() -> Vec<(String, Vec<(String, f64)>)> {
+    let by_host = orbistoun_thunk::inside_by_thread();
+    orbistoun_kernel::thread::all()
+        .into_iter()
+        .filter(|record| record.host != 0)
+        .filter_map(|record| {
+            let (_, inside) = by_host.iter().find(|(host, _)| *host == record.host)?;
+            Some((
+                record.name,
+                inside
+                    .iter()
+                    .map(|&(index, seconds)| (labelled(index as usize), seconds))
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
 /// Writes what the guest called, most-used first.
 ///
 /// The counts are the work list: implementing the top of this list moves a guest further, and the
@@ -3099,6 +3157,9 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
         .collect();
     if let Some(line) = inside_line(&rows) {
         let _ = write!(said, "\n{line}");
+    }
+    for line in inside_by_thread_lines(&thread_inside()) {
+        let _ = write!(said, "\n  {line}");
     }
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run past what an `f64`
@@ -3151,6 +3212,41 @@ mod inside_tests {
             ))
         );
         assert_eq!(super::inside_line(&rows[2..]), None);
+    }
+
+    /// Each thread's time inside imports is named with its heaviest imports, the threads with the
+    /// most first: which thread waits on what, where the sum across threads cannot say.
+    #[test]
+    fn each_thread_names_what_it_spent_its_time_inside() {
+        let thread = |name: &str, inside: &[(&str, f64)]| {
+            (
+                name.to_owned(),
+                inside
+                    .iter()
+                    .map(|&(label, seconds)| (label.to_owned(), seconds))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let lines = super::inside_by_thread_lines(&[
+            thread("audio", &[("Push", 3.0)]),
+            thread(
+                "render",
+                &[
+                    ("WaitSema", 40.0),
+                    ("SubmitDcb", 20.0),
+                    ("Lock", 1.0),
+                    ("Usleep", 0.5),
+                ],
+            ),
+            thread("idle", &[("Lock", 0.0004)]),
+        ]);
+        assert_eq!(
+            lines,
+            [
+                "render: 61.5 s inside imports - WaitSema 40.0 s, SubmitDcb 20.0 s, Lock 1.0 s",
+                "audio: 3.0 s inside imports - Push 3.0 s",
+            ]
+        );
     }
 }
 
