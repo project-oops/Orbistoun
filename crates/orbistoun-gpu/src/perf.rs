@@ -132,6 +132,9 @@ macro_rules! span_labels {
             Span::ReadBackBuffers => $as!("device: read back buffers"),
             Span::DeviceRelease => $as!("device: release"),
             Span::WriteBackChanges => $as!("write back: changes"),
+            Span::ChangesWindow => $as!("changes: window"),
+            Span::ChangesBuffers => $as!("changes: buffers"),
+            Span::ChangesImages => $as!("changes: images"),
             Span::WriteBackGuest => $as!("write back: guest"),
             Span::WriteBackRelease => $as!("write back: release guards"),
             Span::WriteBackCopy => $as!("write back: copy"),
@@ -600,6 +603,12 @@ pub enum Span {
     DeviceRelease,
     /// Within [`Self::DispatchWriteBack`]: what changed worked out, a stored image tiled back.
     WriteBackChanges,
+    /// Within [`Self::WriteBackChanges`]: the window's words compared, run by run.
+    ChangesWindow,
+    /// Within [`Self::WriteBackChanges`]: the buffers' writes worked out.
+    ChangesBuffers,
+    /// Within [`Self::WriteBackChanges`]: the stored images' texels tiled back into writes.
+    ChangesImages,
     /// Within [`Self::DispatchWriteBack`]: the changed bytes and fills written into guest memory.
     WriteBackGuest,
     /// Within [`Self::WriteBackGuest`]: the guards over a stretch written whole given back - a
@@ -644,7 +653,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 114] = [
+    pub const ALL: [Self; 117] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -743,6 +752,9 @@ impl Span {
         Self::ReadBackBuffers,
         Self::DeviceRelease,
         Self::WriteBackChanges,
+        Self::ChangesWindow,
+        Self::ChangesBuffers,
+        Self::ChangesImages,
         Self::WriteBackGuest,
         Self::WriteBackRelease,
         Self::WriteBackCopy,

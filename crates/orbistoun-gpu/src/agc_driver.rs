@@ -1266,6 +1266,7 @@ fn stored_image_writes(
             }
             return Ok(writes);
         }
+        let started = std::time::Instant::now();
         let mut spanned = spanned_before.clone();
         surface
             .tile(&texels, &mut spanned)
@@ -1276,6 +1277,11 @@ fn stored_image_writes(
                 &spanned[first..first + bytes],
             );
         }
+        crate::detiled::note(
+            &format!("{} tiled back", surface.layout_name()),
+            spanned.len() as u64,
+            started.elapsed(),
+        );
     }
     if let Some(expand) = images.stored_keys_to_expand {
         let (keys, bytes) = expand.keys;
@@ -1337,6 +1343,12 @@ fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> 
         .enumerate()
     {
         if start.is_none() && old == new {
+            continue;
+        }
+        // Inside a run, a chunk changed throughout extends it whole: one pass over it, which the
+        // compiler compares many elements at a time, rather than a branch an element. A stored
+        // image written back whole changes nearly every byte (GTA V's video planes, 8 MB each).
+        if start.is_some() && old.len() == new.len() && old.iter().zip(new).all(|(a, b)| a != b) {
             continue;
         }
         for (offset, (old, new)) in old.iter().zip(new).enumerate() {
@@ -2015,22 +2027,29 @@ impl GuestCp<'_> {
         let working_out = crate::perf::SpanGuard::start(Span::WriteBackChanges);
         let mut writes = GuestWrites::spare();
         if let Some(base) = base {
-            for (first, words) in changed_runs(&before, &after) {
-                writes.push_words(
-                    base + first as u64 * 4,
-                    &after[first..first + words],
-                    usize::MAX,
-                );
-            }
+            span(Span::ChangesWindow, || {
+                for (first, words) in changed_runs(&before, &after) {
+                    writes.push_words(
+                        base + first as u64 * 4,
+                        &after[first..first + words],
+                        usize::MAX,
+                    );
+                }
+            });
         }
         let mut scattered = Vec::new();
-        let buffer_fills = buffer_writes_into(
-            (&mut writes, &mut scattered),
-            &prepared.buffers,
-            &buffers_before,
-            &buffers_after,
-        )?;
-        writes.append(&stored_image_writes(&prepared.images, stored)?);
+        let buffer_fills = span(Span::ChangesBuffers, || {
+            buffer_writes_into(
+                (&mut writes, &mut scattered),
+                &prepared.buffers,
+                &buffers_before,
+                &buffers_after,
+            )
+        })?;
+        let images = span(Span::ChangesImages, || {
+            stored_image_writes(&prepared.images, stored)
+        })?;
+        writes.append(&images);
         drop(working_out);
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
@@ -5700,12 +5719,14 @@ mod tests {
         let chunk = super::UNCHANGED_CHUNK;
         for len in [0_usize, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 5] {
             let before: Vec<u32> = (0..len as u32).collect();
-            let changes: [Vec<usize>; 5] = [
+            let changes: [Vec<usize>; 6] = [
                 vec![],
                 vec![0, chunk - 1, chunk, chunk + 1],
                 vec![len.saturating_sub(1)],
                 vec![1, 2, 2 * chunk + 3],
                 (0..len).collect(),
+                // A run crossing whole chunks changed throughout, ending inside a later one.
+                (5..2 * chunk + 7).collect(),
             ];
             for changed in &changes {
                 let mut after = before.clone();

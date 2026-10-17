@@ -2920,6 +2920,18 @@ pub enum DispatchSurface {
 }
 
 impl DispatchSurface {
+    /// Its layout's name, as the run's tally of what each layout cost names it.
+    #[must_use]
+    pub fn layout_name(&self) -> String {
+        match self {
+            Self::Tiled(target) => format!("{:?}", target.layout),
+            Self::Volume { slice, .. } => format!("{:?} volume", slice.layout),
+            Self::Linear {
+                bytes_per_texel, ..
+            } => format!("Linear {bytes_per_texel}-byte"),
+        }
+    }
+
     /// Its first byte.
     #[must_use]
     pub const fn base(&self) -> u64 {
@@ -3071,6 +3083,18 @@ impl DispatchSurface {
             } => {
                 let size = *bytes_per_texel as usize;
                 let word = size.min(4);
+                // A one-byte texel is its word's low byte: each row written byte by byte, as the
+                // loop below would, in a form the compiler writes many bytes at a time.
+                if size == 1 {
+                    for (row, texels) in texels.chunks(width as usize).enumerate() {
+                        let start = row * *pitch as usize;
+                        for (byte, texel) in spanned[start..][..texels.len()].iter_mut().zip(texels)
+                        {
+                            *byte = texel.to_le_bytes()[0];
+                        }
+                    }
+                    return Ok(());
+                }
                 for (row, texels) in texels.chunks(width as usize * words).enumerate() {
                     let start = row * *pitch as usize * size;
                     for (bytes, texel) in spanned[start..].chunks_exact_mut(word).zip(texels) {

@@ -1,6 +1,8 @@
-//! Which tiled layouts a run's textures were detiled from, and what each cost: the measurement a
-//! faster detile is aimed by. A texture read afresh - not kept from an earlier read - is counted
-//! under its layout with its bytes and the time its read and detile took.
+//! Which tiled layouts a run's textures were detiled from and its dispatches' stored images tiled
+//! back into, and what each cost: the measurement a faster detile or tile is aimed by. A texture
+//! read afresh - not kept from an earlier read - is counted under its layout with its bytes and the
+//! time its read and detile took; a stored image tiled back whole, under its layout and "tiled
+//! back".
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -65,7 +67,7 @@ pub fn describe(rows: &[(String, Detiled)]) -> Option<String> {
         })
         .collect();
     Some(format!(
-        "textures detiled afresh, by layout, costliest first: {}",
+        "surfaces detiled afresh or tiled back, by layout, costliest first: {}",
         parts.join("; ")
     ))
 }
@@ -93,7 +95,7 @@ mod tests {
         assert_eq!(
             line.as_deref(),
             Some(concat!(
-                "textures detiled afresh, by layout, costliest first: ",
+                "surfaces detiled afresh or tiled back, by layout, costliest first: ",
                 "Rx64KbBpp1 800 read(s), 1600 MB, 7200 ms; S64Kb 10 read(s), 40 MB, 50 ms"
             ))
         );
