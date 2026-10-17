@@ -11,6 +11,8 @@ use orbistoun_mem::guest;
 guest_module! {
     "libSceRtc" {
         // A pointer to the 64-bit tick to fill.
+        "sceRtcGetCurrentNetworkTick" => 1,
+        // A pointer to the 64-bit tick to fill.
         "sceRtcGetCurrentTick" => 1,
     }
 }
@@ -42,10 +44,21 @@ fn rtc_get_current_tick(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceRtcGetCurrentNetworkTick(tick)`: the network clock's current tick. A console sets its
+/// clock from the network and keeps it offline, so the network tick is its own clock, as
+/// [`rtc_get_current_tick`] answers it (assumed: the reference emulators answer it so for an
+/// offline console; PPSA04263 takes a failure path on a negative answer, `jns` at its calls).
+fn rtc_get_current_network_tick(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    rtc_get_current_tick(args)
+}
+
 /// Everything here, by symbol name.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[("sceRtcGetCurrentTick", rtc_get_current_tick)]
+    &[
+        ("sceRtcGetCurrentTick", rtc_get_current_tick),
+        ("sceRtcGetCurrentNetworkTick", rtc_get_current_network_tick),
+    ]
 }
 
 #[cfg(test)]
@@ -78,5 +91,23 @@ mod tests {
         assert!(word >= first + 4_000, "{first} then {word}");
         args[0] = 0;
         assert_ne!(super::rtc_get_current_tick(&args), super::OK);
+    }
+
+    /// The network tick is the console's own clock, offline as online: written where the caller
+    /// asks, within the second of the current tick; a null destination is refused.
+    #[test]
+    fn the_network_tick_is_the_consoles_clock() {
+        let (mut network, mut current) = (0u64, 0u64);
+        let mut args = [0u64; orbistoun_core::GUEST_ARG_REGISTERS];
+        args[0] = std::ptr::from_mut(&mut network).expose_provenance() as u64;
+        assert_eq!(super::rtc_get_current_network_tick(&args), super::OK);
+        args[0] = std::ptr::from_mut(&mut current).expose_provenance() as u64;
+        assert_eq!(super::rtc_get_current_tick(&args), super::OK);
+        assert!(
+            current.abs_diff(network) < 1_000_000,
+            "{network} then {current}"
+        );
+        args[0] = 0;
+        assert_ne!(super::rtc_get_current_network_tick(&args), super::OK);
     }
 }

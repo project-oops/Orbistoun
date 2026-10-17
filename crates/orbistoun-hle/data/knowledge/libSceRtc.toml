@@ -16,3 +16,20 @@ assumptions = [
 ]
 found_in = ["PPSA03416"]
 found_on = "2026-10-08"
+
+[[function]]
+name = "sceRtcGetCurrentNetworkTick"
+arity = 1
+purpose = "The network clock's current tick, written to the caller's 64-bit word. A console sets its clock from the network and keeps it offline, so this is the clock sceRtcGetCurrentTick reads. sceRtcGetCurrentNetworkTick(tick)."
+returns = "status"
+edge_cases = [
+    "PPSA04263 takes a failure path on a negative answer (`jns` after its calls).",
+    "A null destination is refused with the reserved placeholder; what the console answers is not measured.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "An offline console answers its own clock, as the reference emulators give it; obSCEne has not measured the call.",
+]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
