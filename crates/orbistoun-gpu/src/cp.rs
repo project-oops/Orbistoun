@@ -65,8 +65,8 @@ const BYTE_COUNT_MASK: u32 = 0x03ff_ffff;
 /// (`no_increment`, `cp_pm4_table_data_gfx11.json`), so every destination dword is the same source
 /// dword.
 const SOURCE_HOLD: u32 = 1 << 28;
-/// `CP_DMA_ME_COMMAND` `DAIC` (bit 29): hold the destination address. Not reproduced; a packet
-/// asking for it stops execution.
+/// `CP_DMA_ME_COMMAND` `DAIC` (bit 29, `gfx103.json:12270`): hold the destination address, so
+/// every dword lands on the first destination dword and the last one stays.
 const DESTINATION_HOLD: u32 = 1 << 29;
 /// `CP_DMA_ME_COMMAND` `SAS` (bit 26): the source address is in register space - meaningful only
 /// with `SRC_SEL` 0 (`src_addr_using_sas`). Not reproduced there.
@@ -696,17 +696,27 @@ fn decode_dma_data(body: &[u32]) -> Result<DmaData, Stop> {
     let dst_sel = (control >> 20) & 0x3;
     let src_sel = (control >> 29) & 0x3;
     let register_source = src_sel == 0 && command & SOURCE_IN_REGISTERS != 0;
-    if !DST_SEL_ADDRESS.contains(&dst_sel) || command & DESTINATION_HOLD != 0 || register_source {
+    if !DST_SEL_ADDRESS.contains(&dst_sel) || register_source {
         return Err(Stop::NeedsGpu);
     }
-    Ok(DmaData {
+    let mut dma = DmaData {
         src_sel,
         src_low,
         src_high,
         destination: address(dst_low, dst_high),
         count: (command & BYTE_COUNT_MASK) as usize,
         source_held: command & SOURCE_HOLD != 0,
-    })
+    };
+    // A held destination keeps only the last dword written to it: a fill's pattern, or a copy's
+    // last source dword, which an incrementing source finds `count - 4` bytes on.
+    if command & DESTINATION_HOLD != 0 && dma.count > 4 {
+        if src_sel != SRC_SEL_DATA && !dma.source_held {
+            let last = address(src_low, src_high).wrapping_add(dma.count as u64 - 4);
+            (dma.src_low, dma.src_high) = (last as u32, (last >> 32) as u32);
+        }
+        dma.count = 4;
+    }
+    Ok(dma)
 }
 
 /// A `DMA_DATA` fill of memory with one repeated word.
@@ -1477,6 +1487,40 @@ mod tests {
         assert_eq!(super::dma_landed_at(copied + 16), None, "past its end");
     }
 
+    /// A held destination (`DAIC`) takes every dword at the one address, so the last stays: a fill
+    /// leaves its pattern in one dword, a copy the source's last dword. PPSA04263's
+    /// `sceAgcDcbDmaData` writes a word of 1 with `DAS | DAIC | RAW_WAIT` (`0x6800_0004`) to an
+    /// address through L2, where `DAS` - the destination in register space - applies only to a
+    /// `DST_SEL` of 0.
+    #[test]
+    fn a_held_destination_keeps_the_last_dword() {
+        const HELD: u32 = 1 << 29;
+        let mut gta = fill(0x2000, 1, 4);
+        gta[6] |= 0x6800_0000;
+        let mut stream = gta;
+        let mut held_fill = fill(0x3000, 0x2222_2222, 16);
+        held_fill[6] |= HELD;
+        stream.extend(held_fill);
+        let mut held_copy = copy(0x5000, 0x4000, 8);
+        held_copy[6] |= HELD;
+        stream.extend(held_copy);
+        let mut memory = Fake::default();
+        for (at, value) in [(0x5000_u64, 0xaaaa_aaaa_u32), (0x5004, 0xbbbb_bbbb)] {
+            for (offset, byte) in value.to_le_bytes().into_iter().enumerate() {
+                memory.bytes.insert(at + offset as u64, byte);
+            }
+        }
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x2000), 1, "GTA V's word");
+        assert_eq!(memory.word(0x3000), 0x2222_2222, "the pattern once");
+        assert_eq!(memory.word(0x3004), 0, "and nothing after it");
+        assert_eq!(memory.word(0x4000), 0xbbbb_bbbb, "the copy's last dword");
+        assert_eq!(memory.word(0x4004), 0, "and nothing after it");
+    }
+
     /// A draw before the fence stops execution, so no fence is written for work that did not run
     /// (D705). The fill before the draw is carried out; the `RELEASE_MEM` after it is never
     /// reached.
@@ -1856,10 +1900,14 @@ mod tests {
             "the same word, not the next"
         );
 
+        // A held destination takes each source dword in turn, and the last stays.
         let mut destination_held = held.clone();
         destination_held[6] = 0x2000_0008;
-        let done = execute(&bytes(&destination_held), &mut Fake::default());
-        assert_ne!(done.stopped, Stopped::Completed, "DAIC is not carried out");
+        let mut memory = Fake::default();
+        memory.write(0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let done = execute(&bytes(&destination_held), &mut memory);
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x3000), 0x0807_0605, "the source's last dword");
         let mut register_source = held;
         register_source[1] = 0x8000_0000;
         let done = execute(&bytes(&register_source), &mut Fake::default());
