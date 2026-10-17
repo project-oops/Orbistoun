@@ -25,7 +25,7 @@ const SECONDS_BEFORE_UNIX_EPOCH: u64 = 719_162 * 86_400;
 const TICKS_PER_SECOND: u64 = 1_000_000;
 
 /// The tick for a wall-clock reading of `seconds` since the Unix epoch and `nanos` beyond them.
-const fn tick_at(seconds: u64, nanos: u64) -> u64 {
+pub(crate) const fn tick_at(seconds: u64, nanos: u64) -> u64 {
     (seconds + SECONDS_BEFORE_UNIX_EPOCH) * TICKS_PER_SECOND + nanos / 1_000
 }
 

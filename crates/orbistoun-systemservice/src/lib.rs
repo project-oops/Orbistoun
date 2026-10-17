@@ -25,6 +25,7 @@ pub mod rtc;
 pub mod save_data;
 pub mod share;
 pub mod signin_dialog;
+pub mod trophy;
 pub mod web_browser_dialog;
 
 pub mod console;

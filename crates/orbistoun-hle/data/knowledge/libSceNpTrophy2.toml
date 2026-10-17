@@ -1,0 +1,141 @@
+library = "libSceNpTrophy2"
+
+[[function]]
+name = "sceNpTrophy2CreateContext"
+arity = 4
+purpose = "A context for one user's trophies in the set a service label names, its identifier written to the first argument. sceNpTrophy2CreateContext(context *, user, label, options)."
+returns = "status"
+edge_cases = [
+    "One per user and set: a second answers 0x80553910; past eight, 0x8055391b.",
+    "A null destination or non-zero options answer 0x80553904.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2CreateHandle"
+arity = 1
+purpose = "A handle for the calls that take one, its identifier written to the argument. sceNpTrophy2CreateHandle(handle *)."
+returns = "status"
+edge_cases = [
+    "Handles carry no state: an offline console has no request in flight to abort.",
+    "A null destination answers 0x80553904.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2RegisterContext"
+arity = 3
+purpose = "Opens a context's trophy set from the title's sce_sys/trophy2/trophyNN.ucp, with what the user earned in earlier runs. sceNpTrophy2RegisterContext(context, handle, options)."
+returns = "status"
+edge_cases = [
+    "A title with no pack for the label answers 0x8055391e (title configuration not installed).",
+    "An unknown context answers 0x80553909; a second registration 0x80553921.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2GetGameInfo"
+arity = 4
+purpose = "The set's group and trophy counts by grade and its title, and how much of it is earned. sceNpTrophy2GetGameInfo(context, handle, details *, data *)."
+returns = "status"
+edge_cases = [
+    "Either destination may be null, not both (0x80553904).",
+    "Before registration a query answers 0x80553920.",
+    "PPSA04263's own reader (image+0x2d68c80) zeroes 152 bytes of game details and 24 of game data, reads the trophy count at details+4, zeroes 0x520 bytes of trophy details and 32 of data, and reads the id at +0, the name at +0x20, the description at +0xa0 and the unlocked byte at data+4.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2GetTrophyInfo"
+arity = 5
+purpose = "One trophy's definition - grade, group, hidden, reward, target, name, description - and whether and when it was earned. sceNpTrophy2GetTrophyInfo(context, handle, trophy, details *, data *)."
+returns = "status"
+edge_cases = [
+    "A trophy the set does not hold answers 0x8055390a.",
+    "PPSA04263's own reader (image+0x2d68c80) zeroes 152 bytes of game details and 24 of game data, reads the trophy count at details+4, zeroes 0x520 bytes of trophy details and 32 of data, and reads the id at +0, the name at +0x20, the description at +0xa0 and the unlocked byte at data+4.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2GetTrophyInfoArray"
+arity = 6
+purpose = "At most limit trophies from the offset-th, in identifier order, and how many into the seventh argument, the first on the stack. sceNpTrophy2GetTrophyInfoArray(context, handle, offset, limit, details *, data *, count *)."
+returns = "status"
+edge_cases = [
+    "A null count, or both arrays null, answers 0x80553904.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2RegisterUnlockCallback"
+arity = 2
+purpose = "Keeps the callback a title asks to hear of earnings through. sceNpTrophy2RegisterUnlockCallback(callback, user data)."
+returns = "status"
+edge_cases = [
+    "The callback is kept, not yet called: its arguments are unmeasured.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2AbortHandle"
+arity = 1
+purpose = "Aborts what a handle has in flight - nothing, on an offline console. sceNpTrophy2AbortHandle(handle)."
+returns = "status"
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2DestroyHandle"
+arity = 1
+purpose = "Releases a handle. sceNpTrophy2DestroyHandle(handle)."
+returns = "status"
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpTrophy2DestroyContext"
+arity = 1
+purpose = "Ends a context; the user's record stays open for the next. sceNpTrophy2DestroyContext(context)."
+returns = "status"
+edge_cases = [
+    "An unknown context answers 0x80553909.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

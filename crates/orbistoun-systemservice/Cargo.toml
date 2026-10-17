@@ -22,6 +22,10 @@ orbistoun-shell = { workspace = true }
 # Guest calls, for the JSON library's allocator callbacks, and an anonymous mapping for its base
 # vtable.
 orbistoun-kernel = { workspace = true }
+# A trophy pack's set and a user's kept record of it.
+serde_json = { workspace = true }
+# The stack arguments of a call past the sixth.
+orbistoun-thunk = { workspace = true }
 
 [dev-dependencies]
 # Registering a module, to see which NID a declared name links to.

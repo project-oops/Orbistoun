@@ -3520,6 +3520,8 @@ dependencies = [
  "orbistoun-mem",
  "orbistoun-nid",
  "orbistoun-shell",
+ "orbistoun-thunk",
+ "serde_json",
 ]
 
 [[package]]
