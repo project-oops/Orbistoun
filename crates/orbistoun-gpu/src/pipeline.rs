@@ -2988,6 +2988,26 @@ impl DispatchSurface {
         }
     }
 
+    /// [`Self::detile`], made shared. A one-byte linear image whose rows lie one after another is
+    /// read straight into the shared texels, one allocation and no copy of a detiled vector: GTA
+    /// V's video pass reads an 8 MB plane a dispatch, and the copy was a 33 MB one.
+    #[must_use]
+    pub fn detile_shared(&self, spanned: &[u8]) -> std::sync::Arc<[u32]> {
+        if let Self::Linear {
+            width,
+            height,
+            pitch,
+            bytes_per_texel: 1,
+            ..
+        } = *self
+            && pitch == width
+            && let Some(bytes) = spanned.get(..width as usize * height as usize)
+        {
+            return bytes.iter().map(|&byte| u32::from(byte)).collect();
+        }
+        self.detile(spanned).into()
+    }
+
     /// Its texels, row-major, each its bits in the low bytes of a word, from the bytes it spans.
     #[must_use]
     pub fn detile(&self, spanned: &[u8]) -> Vec<u32> {
@@ -3385,7 +3405,7 @@ impl DetiledImages {
             return texels;
         }
         let started = std::time::Instant::now();
-        let texels: std::sync::Arc<[u32]> = surface.detile(spanned).into();
+        let texels = surface.detile_shared(spanned);
         crate::detiled::note(
             &format!("{} read by a dispatch", surface.layout_name()),
             spanned.len() as u64,
@@ -11277,6 +11297,28 @@ mod tests {
         let mut three_d = bytes;
         three_d[12..16].copy_from_slice(&((0xa_u32 << 28) | 0xfac).to_le_bytes());
         assert!(read_texture(table, 0, &Memory(three_d), &mut cache).is_none());
+    }
+
+    /// A dispatch image read straight into shared texels is the texels the detile gives, whether its
+    /// rows lie one after another or at a wider pitch.
+    #[test]
+    fn a_shared_detile_is_the_detile() {
+        use super::DispatchSurface;
+        let bytes: Vec<u8> = (0..=255).cycle().take(64 * 3).collect();
+        for pitch in [5, 64] {
+            let surface = DispatchSurface::Linear {
+                base: 0x1000,
+                width: 5,
+                height: 3,
+                pitch,
+                bytes_per_texel: 1,
+            };
+            assert_eq!(
+                *surface.detile_shared(&bytes),
+                *surface.detile(&bytes),
+                "pitch {pitch}"
+            );
+        }
     }
 
     /// A dispatch image detiled again from the same surface and bytes is the texels kept for them,
