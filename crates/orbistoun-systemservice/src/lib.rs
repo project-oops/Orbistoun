@@ -909,6 +909,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceSaveDataInitialize3", save_data::initialize3),
     ("sceSaveDataMount3", save_data::mount3),
     ("sceSaveDataUmount2", save_data::umount2),
+    ("sceSaveDataDirNameSearch", save_data::dir_name_search),
     (
         "sceSaveDataGetSaveDataMemory2",
         save_data::get_save_data_memory2,

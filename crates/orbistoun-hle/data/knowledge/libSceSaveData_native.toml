@@ -100,3 +100,19 @@ known_by = "assumed"
 assumptions = ["The shell's answer (D792), unmeasured."]
 found_in = ["PPSA03416-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceSaveDataDirNameSearch"
+arity = 2
+purpose = "(condition, result): the user's saves of this title whose names match a pattern, in an order, with their parameters."
+returns = "status"
+edge_cases = [
+    "PPSA04263 fills condition: +0x00 the user, +0x08 0 (no title id: its own), +0x10 a pointer to the name pattern, +0x18 key 3 (modification time) and +0x1c order 1 (descending); result: +0x08 a 32-byte-name array, +0x10 its room, +0x18 a 0x530-byte-parameter array; it reads +0x00 (the hits) and takes its failure path on a negative answer (`jns`).",
+    "orbistoun lists the directories sceSaveDataMount3 keeps under the title's /data/savedata, skipping sce_-prefixed ones: % in the pattern matches any run, _ any one character, either case; key 3 orders by modification time, any other by name. hits at +0x00 counts every match, +0x14 how many were set; each parameter is zero but for its modification time at +0x508.",
+    "Before sceSaveDataInitialize3, for another user or another title's saves, it answers the placeholder; a null block answers 0x809f0000.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The condition and result layouts and the order are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

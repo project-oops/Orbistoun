@@ -27,6 +27,8 @@ guest_module! {
         "sceSaveDataSyncSaveDataMemory" => 6,
         // (mode, mount point)
         "sceSaveDataUmount2" => 2,
+        // (condition, result)
+        "sceSaveDataDirNameSearch" => 2,
     }
 }
 
@@ -502,6 +504,262 @@ pub(crate) fn umount2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// What `sceSaveDataDirNameSearch` answers for a condition or result it cannot read: the parameter
+/// error `sceSaveDataInitialize3` was measured answering (assumed for this call).
+const SEARCH_PARAMETER: u64 = 0x809f_0000;
+
+/// Bytes of a save directory name in a search's result array.
+const DIR_NAME_BYTES: usize = 32;
+
+/// Bytes of `SceSaveDataParam`: title (128), subtitle (128), detail (1024), user parameter, padding
+/// and modification time - the stride PPSA04263 allocates its search's parameter array at.
+const SEARCH_PARAM_BYTES: usize = 0x530;
+
+/// Where `SceSaveDataParam` holds the modification time, seconds since the Unix epoch.
+const SEARCH_PARAM_MTIME: usize = 0x508;
+
+/// Whether `name` matches `pattern`, as a search condition spells one: `%` any run of characters,
+/// none included, `_` any one; letters match either case.
+fn name_matches(name: &[u8], pattern: &[u8]) -> bool {
+    match pattern.split_first() {
+        None => name.is_empty(),
+        Some((b'%', rest)) => (0..=name.len()).any(|skip| name_matches(&name[skip..], rest)),
+        Some((&first, rest)) => name.split_first().is_some_and(|(&head, tail)| {
+            (first == b'_' || head.eq_ignore_ascii_case(&first)) && name_matches(tail, rest)
+        }),
+    }
+}
+
+/// The saves under `store`, a host directory, whose names match `pattern` (every save when it is
+/// empty), each with its modification time since the Unix epoch, ordered by `key` - 3 by
+/// modification time, anything else by name - and reversed when `descending`. Directories the
+/// platform keeps for itself, `sce_`-prefixed, are not saves.
+fn matching_saves(
+    store: &std::path::Path,
+    pattern: &[u8],
+    key: u32,
+    descending: bool,
+) -> Vec<(String, std::time::Duration)> {
+    let mut saves: Vec<(String, std::time::Duration)> = std::fs::read_dir(store)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let since = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or_default();
+            Some((name, since))
+        })
+        .filter(|(name, _)| !name.starts_with("sce_") && save_name_is_valid(name))
+        .filter(|(name, _)| pattern.is_empty() || name_matches(name.as_bytes(), pattern))
+        .collect();
+    saves.sort_by(|a, b| a.0.cmp(&b.0));
+    if key == 3 {
+        saves.sort_by_key(|save| save.1);
+    }
+    if descending {
+        saves.reverse();
+    }
+    saves
+}
+
+/// Whether `name` is made of the characters a save directory name may hold, as
+/// [`save_directory_name`] requires.
+fn save_name_is_valid(name: &str) -> bool {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    !name.is_empty() && name.len() < DIR_NAME_BYTES && name.chars().all(allowed)
+}
+
+/// `sceSaveDataDirNameSearch(condition, result)`: the signed-in user's saves of this title, as
+/// [`mount3`] keeps them under `/data/savedata`, matching the condition's name pattern and in its
+/// order (assumed, as the reference emulators answer it for local saves).
+///
+/// `condition` is `{ user u32, _, title id *, name pattern *, key u32, order u32 }` and `result`
+/// `{ hits u32, _, names *, names room u32, set u32, params *, infos * }` - PPSA04263 fills the
+/// condition so (no title id: its own; key 3, modification time; order 1, descending) and reads
+/// `hits` and the arrays. Each name takes 32 bytes; each parameter 0x530, zero but for its
+/// modification time; each info 48, the save's blocks unknown and so zero. Another title's saves,
+/// a user other than the signed-in one, or a call before `sceSaveDataInitialize3` answer the
+/// placeholder.
+pub(crate) fn dir_name_search(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (condition, result) = (args[0], args[1]);
+    let refuse = u64::from(GuestError::Unimplemented.as_raw());
+    if condition == 0 || result == 0 {
+        return SEARCH_PARAMETER;
+    }
+    if !INITIALISED.load(Ordering::Acquire) {
+        return refuse;
+    }
+    // SAFETY: the guest's condition block, by the call's contract; read through checked accessors.
+    let user = unsafe { guest::read_u32(condition) };
+    // SAFETY: as above, its title-id pointer.
+    let title = unsafe { guest::read_u64(condition + 0x08) };
+    // SAFETY: as above, its name-pattern pointer.
+    let pattern_at = unsafe { guest::read_u64(condition + 0x10) };
+    // SAFETY: as above, its sort key and order.
+    let order = unsafe { guest::read_u64(condition + 0x18) };
+    // SAFETY: the guest's result block, by the call's contract: its arrays and their room.
+    let names_at = unsafe { guest::read_u64(result + 0x08) };
+    // SAFETY: as above.
+    let room = unsafe { guest::read_u32(result + 0x10) };
+    // SAFETY: as above.
+    let params_at = unsafe { guest::read_u64(result + 0x18) };
+    // SAFETY: as above.
+    let infos_at = unsafe { guest::read_u64(result + 0x20) };
+    let (
+        Some(user),
+        Some(title),
+        Some(pattern_at),
+        Some(order),
+        Some(names_at),
+        Some(room),
+        Some(params_at),
+        Some(infos_at),
+    ) = (
+        user, title, pattern_at, order, names_at, room, params_at, infos_at,
+    )
+    else {
+        return SEARCH_PARAMETER;
+    };
+    if user != crate::signed_in_user() || title != 0 {
+        return refuse;
+    }
+    if room != 0 && names_at == 0 {
+        return SEARCH_PARAMETER;
+    }
+    let pattern = if pattern_at == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: the guest's name pattern, a NUL-terminated string within a directory name's
+        // bytes; read through the checked accessor.
+        match unsafe { guest::read_cstr(pattern_at, DIR_NAME_BYTES) } {
+            Some(pattern) => pattern,
+            None => return SEARCH_PARAMETER,
+        }
+    };
+    let saves = orbistoun_fs::mount::resolve_existing(SAVE_STORE).map_or_else(Vec::new, |store| {
+        matching_saves(&store, &pattern, order as u32, (order >> 32) as u32 == 1)
+    });
+    let set = saves.len().min(room as usize);
+    for (index, (name, since)) in saves.iter().take(set).enumerate() {
+        let mut named = [0_u8; DIR_NAME_BYTES];
+        named[..name.len()].copy_from_slice(name.as_bytes());
+        let seconds = i64::try_from(since.as_secs()).unwrap_or(i64::MAX);
+        let mut param = [0_u8; SEARCH_PARAM_BYTES];
+        param[SEARCH_PARAM_MTIME..SEARCH_PARAM_MTIME + 8].copy_from_slice(&seconds.to_le_bytes());
+        let slot = index as u64;
+        // SAFETY: the guest's name array, `room` names of 32 bytes by the call's contract.
+        let named_ok =
+            unsafe { guest::write_bytes(names_at + slot * DIR_NAME_BYTES as u64, &named) };
+        // SAFETY: the guest's parameter array when it passed one, as many entries as names.
+        let param_ok = params_at == 0
+            || unsafe { guest::write_bytes(params_at + slot * SEARCH_PARAM_BYTES as u64, &param) };
+        // SAFETY: the guest's info array when it passed one, as many entries as names.
+        let info_ok =
+            infos_at == 0 || unsafe { guest::write_bytes(infos_at + slot * 48, &[0; 48]) };
+        if !(named_ok && param_ok && info_ok) {
+            return SEARCH_PARAMETER;
+        }
+    }
+    let hits = u32::try_from(saves.len()).unwrap_or(u32::MAX);
+    // SAFETY: the guest's result block: its hit count.
+    let hits_ok = unsafe { guest::write_u32(result, hits) };
+    // SAFETY: as above, how many entries were set.
+    let set_ok = unsafe { guest::write_u32(result + 0x14, set as u32) };
+    if hits_ok && set_ok {
+        0
+    } else {
+        SEARCH_PARAMETER
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// A pattern's `%` matches any run, none included, and `_` any one character, either case.
+    #[test]
+    fn a_name_pattern_matches_runs_and_single_characters() {
+        let matches =
+            |name: &str, pattern: &str| super::name_matches(name.as_bytes(), pattern.as_bytes());
+        assert!(matches("SAVE0001", "SAVE%"));
+        assert!(matches("SAVE", "SAVE%"));
+        assert!(matches("save0001", "SAVE____"));
+        assert!(!matches("SAVE01", "SAVE____"));
+        assert!(matches("AUTO_SAVE_12", "%SAVE%"));
+        assert!(!matches("PROFILE", "SAVE%"));
+    }
+
+    /// The signed-in user's saves are found by pattern and listed newest first, each name with its
+    /// parameter's modification time; the platform's own directories are not saves, and a result
+    /// with room for fewer than were found is filled as far as it goes.
+    #[test]
+    fn saves_are_found_by_pattern_newest_first() {
+        let root = std::env::temp_dir().join(format!("orbistoun-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Made oldest first, a moment apart, so each is newer than the last.
+        for name in ["SAVE0001", "PROFILE", "SAVE0002", "sce_sdmemory"] {
+            std::fs::create_dir_all(root.join("savedata").join(name)).expect("a save directory");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        orbistoun_fs::mount::mount_data(root.clone());
+        let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
+
+        let pattern = b"SAVE%\0";
+        let mut condition = [0_u8; 0x40];
+        condition[..4].copy_from_slice(&crate::signed_in_user().to_le_bytes());
+        condition[0x10..0x18].copy_from_slice(&(pattern.as_ptr() as u64).to_le_bytes());
+        condition[0x18..0x20].copy_from_slice(&0x1_0000_0003_u64.to_le_bytes());
+        let mut names = [0xcc_u8; 32 * 4];
+        let mut params = vec![0xcc_u8; 0x530 * 4];
+        let mut result = [0_u8; 0x40];
+        result[0x08..0x10].copy_from_slice(&(names.as_mut_ptr() as u64).to_le_bytes());
+        result[0x10..0x14].copy_from_slice(&4_u32.to_le_bytes());
+        result[0x18..0x20].copy_from_slice(&(params.as_mut_ptr() as u64).to_le_bytes());
+        let args = [
+            condition.as_ptr() as u64,
+            result.as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+
+        assert_eq!(super::dir_name_search(&args), 0);
+        assert_eq!(result[..4], 2_u32.to_le_bytes(), "two saves match");
+        assert_eq!(result[0x14..0x18], 2_u32.to_le_bytes(), "both set");
+        assert_eq!(&names[..9], b"SAVE0002\0", "the newest first");
+        assert_eq!(&names[32..41], b"SAVE0001\0");
+        let newest = i64::from_le_bytes(params[0x508..0x510].try_into().unwrap());
+        let older = i64::from_le_bytes(params[0x530 + 0x508..0x530 + 0x510].try_into().unwrap());
+        assert!(newest >= older, "{newest} after {older}");
+        assert_eq!(
+            params[..0x508],
+            [0; 0x508],
+            "nothing else is known of a save"
+        );
+
+        result[0x10..0x14].copy_from_slice(&1_u32.to_le_bytes());
+        assert_eq!(super::dir_name_search(&args), 0);
+        assert_eq!(result[..4], 2_u32.to_le_bytes(), "two found");
+        assert_eq!(result[0x14..0x18], 1_u32.to_le_bytes(), "one set");
+
+        assert_eq!(
+            super::dir_name_search(&[0; GUEST_ARG_REGISTERS]),
+            super::SEARCH_PARAMETER
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 #[cfg(test)]
 mod mount_tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
@@ -513,11 +771,12 @@ mod mount_tests {
     fn a_save_mounts_from_the_titles_own_storage() {
         let root = std::env::temp_dir().join(format!("orbistoun-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        orbistoun_fs::mount::mount_data(root.clone());
-        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+        // Held before `/data` is pointed anywhere: every test that mounts it holds this.
         let _alone = super::INITIALISING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        orbistoun_fs::mount::mount_data(root.clone());
+        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
         let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
 
         let name = b"SaveData0\0";
