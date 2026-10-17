@@ -1,0 +1,15 @@
+library = "libSceSharePlay"
+
+[[function]]
+name = "sceSharePlayInitialize"
+arity = 6
+purpose = "Share Play started."
+returns = "status"
+edge_cases = [
+    "Answers 0, as an offline console's does: the library starts, and only calls that would reach the network fail later. orbistoun implements no online service (crate offline.rs).",
+    "PPSA04263 takes its online start-up's failure path on a non-zero answer, shutting down the thread that delivers its user's sign-in state.",
+]
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne could not load the module unprivileged (census 20261007, module-load 0x80020002). REQ-gt05/gt09 ask the console to confirm."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

@@ -209,6 +209,22 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceNpTrophy2.toml"),
     ),
     (
+        "libSceNpEntitlementAccess",
+        include_str!("../data/knowledge/libSceNpEntitlementAccess.toml"),
+    ),
+    (
+        "libSceGameLiveStreaming",
+        include_str!("../data/knowledge/libSceGameLiveStreaming.toml"),
+    ),
+    (
+        "libSceSharePlay",
+        include_str!("../data/knowledge/libSceSharePlay.toml"),
+    ),
+    (
+        "libSceWebBrowserDialog",
+        include_str!("../data/knowledge/libSceWebBrowserDialog.toml"),
+    ),
+    (
         "libSceRtc",
         include_str!("../data/knowledge/libSceRtc.toml"),
     ),

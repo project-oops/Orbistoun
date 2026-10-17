@@ -20,7 +20,7 @@ purpose = "Runs the NP callbacks the caller registered, polled once a frame."
 returns = "status"
 edge_cases = [
     "MEASURED: 0 on each of ten calls on the main thread and on a call from a second thread; no state callback ran (none registered).",
-    "orbistoun registers no NP callback, so there is none to run, and answers 0.",
+    "Each state callback registered (sceNpRegisterStateCallbackA) is owed one delivery: it is called here, on the caller's thread, with (signed-in user, 1 = signed out, userdata) - an offline console's one state - and later calls deliver nothing, since nothing changes. Assumed; REQ-gt06 asks the console to confirm.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261010T0040Z-np01, reports/hardware/20261010-115300-eboot.log lines 3540-3558 (070-user/np-check-callback)."
@@ -71,3 +71,29 @@ known_by = "measured"
 cites = "obSCEne REQ-20261015T1234Z-gt01, reports/hardware/20261015-164000-eboot.log lines 4841-4846; REQ-20261014T0745Z-np05, reports/hardware/report-20261014-batch4.log line 2885."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceNpRegisterStateCallbackA"
+arity = 2
+purpose = "Registers a function the library calls with the user's sign-in state from sceNpCheckCallback: (function, userdata)."
+returns = "status"
+edge_cases = [
+    "Answers the callback's id, 1 to 8 - the lowest free of eight slots plus one. A null function is 0x80550003, a function already registered 0x80550008 (checked before fullness), every slot taken 0x8055001d.",
+    "PPSA04263 creates the thread that delivers its user's sign-in state only when this answers non-negative (`js` at image+0x2606636); a placeholder shut its online start-up down and Cross on its title screen did nothing.",
+]
+known_by = "assumed"
+assumptions = ["The reference emulators' reading of the shipped libSceNpManager module's slot table; an offline console's answer. obSCEne REQ-20261017T0230Z-gt06 asks the console to confirm."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpUnregisterStateCallbackA"
+arity = 1
+purpose = "Frees a state callback's slot: (id)."
+returns = "status"
+edge_cases = [
+    "0 for a registered id; an id outside 1 to 8 is 0x80550015, an empty slot 0x80550009.",
+]
+known_by = "assumed"
+assumptions = ["The reference emulators' reading of the shipped libSceNpManager module; obSCEne REQ-20261017T0230Z-gt06 asks the console to confirm."]
+found_on = "2026-10-17"

@@ -1,0 +1,15 @@
+library = "libSceWebBrowserDialog"
+
+[[function]]
+name = "sceWebBrowserDialogInitialize"
+arity = 6
+purpose = "The embedded browser dialog started."
+returns = "status"
+edge_cases = [
+    "Answers 0, as an offline console's does: the dialog starts, and only opening a page would reach the network.",
+    "PPSA04263 branches on the answer (`je` at image+0x260e96c) during its online start-up.",
+]
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne REQ-20261017T1135Z-gt09 asks the console to confirm."]
+found_in = ["PPSA04263-app0", "PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-17"

@@ -18,6 +18,7 @@ pub mod error_dialog;
 pub mod json2;
 pub mod launch;
 pub mod msg_dialog;
+pub mod offline;
 pub mod play_go;
 pub mod random;
 pub mod remoteplay;

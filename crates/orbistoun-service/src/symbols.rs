@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 61] {
+pub(crate) fn modules() -> [ModuleDesc; 64] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -84,6 +84,9 @@ pub(crate) fn modules() -> [ModuleDesc; 61] {
         orbistoun_systemservice::signin_dialog::MODULE,
         orbistoun_systemservice::trophy::MODULE,
         orbistoun_systemservice::web_browser_dialog::MODULE,
+        orbistoun_systemservice::offline::entitlement_access::MODULE,
+        orbistoun_systemservice::offline::live_streaming::MODULE,
+        orbistoun_systemservice::offline::share_play::MODULE,
         orbistoun_video::av_player::MODULE,
         orbistoun_video::font::MODULE,
         orbistoun_video::font::ft::MODULE,
@@ -157,6 +160,10 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_systemservice::signin_dialog::implementations());
     all.extend_from_slice(orbistoun_systemservice::share::implementations());
     all.extend_from_slice(orbistoun_systemservice::trophy::implementations());
+    // The online services a title starts at boot, as an offline console starts them: each answers
+    // 0, and the web browser dialog's initialiser with them.
+    all.extend_from_slice(orbistoun_systemservice::offline::implementations());
+    all.extend_from_slice(orbistoun_systemservice::web_browser_dialog::implementations());
     all.extend_from_slice(orbistoun_systemservice::remoteplay::implementations());
     all.extend_from_slice(orbistoun_systemservice::content_delete::implementations());
     all.extend_from_slice(orbistoun_systemservice::content_export::implementations());
@@ -542,10 +549,6 @@ mod knowledge_tests {
         (
             "libSceAudioIn",
             "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceWebBrowserDialog",
-            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceVideoRecording",

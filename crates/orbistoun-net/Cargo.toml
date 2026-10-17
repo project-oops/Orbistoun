@@ -19,8 +19,12 @@ orbistoun-core = { workspace = true }
 # thing the two spellings disagree about (D667).
 orbistoun-fs = { workspace = true }
 orbistoun-hle = { workspace = true }
+# Calling a title's NP state callback back on its own thread.
+orbistoun-kernel = { workspace = true }
 # Guest strings, out-parameters and buffers for the HTTP client.
 orbistoun-mem = { workspace = true }
+# The signed-in user a state callback is told about.
+orbistoun-systemservice = { workspace = true }
 # The HTTP client's transfers: blocking, over `rustls` (D727).
 reqwest = { workspace = true }
 tracing = { workspace = true }
