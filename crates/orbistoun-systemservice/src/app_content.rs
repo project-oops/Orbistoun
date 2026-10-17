@@ -32,18 +32,41 @@ fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceAppContentAppParamGetInt(param_id, out)` - an integer app parameter, into `*out`.
-///
-/// Writes `0` and answers success, as `sceSystemServiceParamGetInt` does: the identifiers are
-/// unmeasured, and zero reads as a first index, an unset flag or an empty count. The
-/// out-parameter is always written, because an unwritten one hands the guest stale stack.
+/// `sceAppContentAppParamGetInt(param_id, out)` - an integer app parameter, into `*out`: the
+/// title's own, as [`app_param`] reads them from its `param.json`. Answers success, and always
+/// writes the out-parameter, because an unwritten one hands the guest stale stack.
 fn app_param_get_int(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let out = args[1];
-    // Zero is the documented placeholder. The checked helper refuses address zero.
-    if !super::write_word(out, 0) {
+    let param = orbistoun_fs::mount::resolve_existing(PARAM_JSON)
+        .and_then(|host| std::fs::read_to_string(host).ok());
+    let value = app_param(args[0], param.as_deref());
+    // The checked helper refuses address zero.
+    if !super::write_word(args[1], u64::from(value)) {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
+}
+
+/// The SKU flag's id, which reads [`SKU_FULL`].
+const PARAM_SKU_FLAG: u64 = 0;
+/// A full game's SKU flag, as against a trial's 1.
+const SKU_FULL: u32 = 3;
+
+/// App parameter `id` of a title whose `param.json` reads `param`: the SKU flag (0) a full game's,
+/// and the four user-defined parameters (1-4) the title's `userDefinedParam1`-`4`, as the reference
+/// emulators read them (assumed). A parameter the title does not declare, and any other id, reads
+/// 0, which a flag reads as unset and a count as none.
+fn app_param(id: u64, param: Option<&str>) -> u32 {
+    if id == PARAM_SKU_FLAG {
+        return SKU_FULL;
+    }
+    if !(1..=4).contains(&id) {
+        return 0;
+    }
+    param
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|json| json.get(format!("userDefinedParam{id}"))?.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
 }
 
 /// `sceAppContentTemporaryDataMount2(option, mountPoint)` - mounts the title's temporary-data area.
@@ -133,6 +156,20 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 
 #[cfg(test)]
 mod tests {
+    /// The SKU flag reads as a full game, and the four user-defined parameters as `param.json`
+    /// declares them: PPSA04263 reads its first, 9, and tests it bit by bit around its Story Mode
+    /// entitlement. One the title does not declare, or any other id, reads 0.
+    #[test]
+    fn an_app_parameter_is_the_title_s_own() {
+        let param = r#"{"titleId":"PPSA04263","userDefinedParam1":9,"userDefinedParam2":0}"#;
+        assert_eq!(super::app_param(0, Some(param)), 3, "SKU flag: full");
+        assert_eq!(super::app_param(1, Some(param)), 9);
+        assert_eq!(super::app_param(2, Some(param)), 0);
+        assert_eq!(super::app_param(4, Some(param)), 0, "not declared");
+        assert_eq!(super::app_param(1, None), 0, "no param.json");
+        assert_eq!(super::app_param(7, Some(param)), 0);
+    }
+
     /// The area is the declared MiB, in KiB, less what it holds, rounded up to a whole KiB.
     #[test]
     fn download_space_is_the_declared_size_less_what_is_held() {

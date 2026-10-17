@@ -20,16 +20,16 @@ found_on = "2026-09-12"
 name = "sceAppContentAppParamGetInt"
 purpose = "Reads an integer app parameter (title metadata) into the caller's out-pointer."
 edge_cases = [
-    "Answers 0 and writes 0 to the out-parameter (arg1), the same documented placeholder as sceSystemServiceParamGetInt: nothing here has measured the app-param identifiers, and 0 is the value least likely to send a guest somewhere surprising (an index reads as the first entry, a flag as off, a count as none).",
-    "libil2cpp calls it right after sceAppContentInitialize and prints 'sceAppContentAppParamGetInt failed 0xf7ff0001' on the placeholder return, so answering it is the next step of the same startup sequence. Like Initialize, it clears the warning but does not move Terminator's int 0x41 wall (D680).",
-    "The out-parameter is written either way (reporting success while writing the value), so a guest that checks the return and one that reads the value are both left in a state they can handle - the failure sceSystemServiceParamGetInt documents.",
+    "Id 0, the SKU flag, reads 3, a full game's (a trial's is 1); ids 1-4 read the title's param.json userDefinedParam1-4, and one it does not declare, or any other id, reads 0. The out-parameter (arg1) is written either way, and the call answers 0.",
+    "PPSA04263 reads id 1 once at startup (image+0x197a286) into a word it tests bit by bit, bits 4 and 8, around its Story Mode entitlement (image+0x4df9f0-0x4dfbf0); its package declares 9. Answered 0, its landing menu offered Story Mode for sale.",
+    "libil2cpp calls it right after sceAppContentInitialize and prints 'sceAppContentAppParamGetInt failed 0xf7ff0001' on the placeholder return (PPSA25872).",
 ]
 known_by = "assumed"
 assumptions = [
-    "The written value (0) is a placeholder, not a measured app-param. A title that needs a specific parameter would read this wrong, but 0 is the least-surprising default.",
-    "That arg1 is the out-pointer, by analogy with sceSystemServiceParamGetInt(param, out). Unverified; the guest accepted the 0 return without faulting.",
+    "The ids and the SKU flag's values as the reference emulators read them: 0 the SKU flag, 1-4 the user-defined parameters. Not measured on the console.",
+    "That arg1 is the out-pointer, by analogy with sceSystemServiceParamGetInt(param, out); PPSA04263 passes the address it then reads.",
 ]
-found_in = ["PPSA25872-app0"]
+found_in = ["PPSA25872-app0", "PPSA04263-app0"]
 found_on = "2026-09-12"
 
 [[function]]
