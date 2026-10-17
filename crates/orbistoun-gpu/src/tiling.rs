@@ -56,6 +56,29 @@ pub fn tiled_byte_offset_64kb_rx_bpp4_surface(x: u32, y: u32, width: u32) -> usi
         + tiled_byte_offset_64kb_rx_bpp4(x % SINGLE_BLOCK_EXTENT, y % SINGLE_BLOCK_EXTENT) as usize
 }
 
+/// A one-byte linear surface's texels, `width` by `height`, packed four to a word in row-major
+/// order, the first texel lowest: each row's bytes from its pitch, one after another. The texels
+/// the one-byte linear detile gives one a word, read without widening - what a one-byte texture is
+/// bound as.
+///
+/// # Panics
+///
+/// When `bytes` is shorter than the surface: [`SurfaceLayout::words`] words of it.
+#[must_use]
+pub fn linear_bpp1_packed(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
+    let (width, pitch) = (
+        width as usize,
+        SurfaceLayout::LinearBpp1.linear_pitch(width) as usize,
+    );
+    let count = width * height as usize;
+    let mut packed = vec![0_u32; count.div_ceil(4)];
+    let out = zerocopy::IntoBytes::as_mut_bytes(packed.as_mut_slice());
+    for row in 0..height as usize {
+        out[row * width..][..width].copy_from_slice(&bytes[row * pitch..][..width]);
+    }
+    packed
+}
+
 /// Texels per side of an 8-bpp `64KB_R_X` block: 64 KiB of one-byte texels, 256 x 256.
 const RX_BPP1_BLOCK_EXTENT: u32 = 256;
 
@@ -2920,6 +2943,38 @@ mod tests {
             layout.detile_mapped(&tiled, width, height, 0, |w| w),
             linear
         );
+    }
+
+    /// A one-byte linear surface reads straight into its texels packed four to a word: each row's
+    /// bytes from the pitch, one after another, the first texel lowest - the bytes the detile gives
+    /// one a word, without the widening.
+    #[test]
+    fn a_one_byte_linear_surface_reads_packed() {
+        use super::SurfaceLayout;
+        let layout = SurfaceLayout::LinearBpp1;
+        let (width, height) = (5, 3);
+        let bytes: Vec<u8> = (0..layout.words(width, height) * 4)
+            .map(|at| u8::try_from(at % 251).expect("small"))
+            .collect();
+        let packed = super::linear_bpp1_packed(&bytes, width, height);
+        let widened = layout.detile_mapped(
+            &bytes
+                .chunks_exact(4)
+                .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                .collect::<Vec<_>>(),
+            width,
+            height,
+            0,
+            |w| w,
+        );
+        let unpacked: Vec<u32> = packed
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .take(15)
+            .map(u32::from)
+            .collect();
+        assert_eq!(unpacked, widened);
+        assert_eq!(packed.len(), 4, "fifteen bytes in four words");
     }
 
     /// A 128-bpp `64KB_D_X` surface lies as addrlib places it for this console: each coordinate

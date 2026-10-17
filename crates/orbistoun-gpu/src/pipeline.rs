@@ -6944,6 +6944,14 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
 /// the identity selects is returned as it is; any other's hash is moved by its selects, so the
 /// same bytes read another way are never taken for each other.
 fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]) -> RenderCommand {
+    // Read packed already: its selects are its lanes, nothing to rewrite.
+    if let RenderCommand::BindTexture {
+        encoding: crate::backend::TextureEncoding::R8 { .. },
+        ..
+    } = bound
+    {
+        return with_byte_lanes(bound, format, selects);
+    }
     let RenderCommand::BindTexture {
         slot,
         hash,
@@ -7028,12 +7036,9 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
     }
 }
 
-/// A one-byte texture's binding as [`crate::backend::TextureEncoding::R8`]: its bytes, the low byte
-/// of each of `bound`'s words, packed four to a word, and each channel's source as its `selects`
-/// pick it - X the byte, select 1 and W one (a one-byte texel reads its W as one, as
-/// [`swizzle_texels`] has it), anything else zero. Kept by hash and extent as swizzled texels are.
-fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand {
-    use crate::backend::ByteLane;
+/// A packed one-byte binding given the lanes its `selects` pick, its hash moved by them as a
+/// swizzled texture's is.
+fn with_byte_lanes(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]) -> RenderCommand {
     let RenderCommand::BindTexture {
         slot,
         hash,
@@ -7048,11 +7053,59 @@ fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand
     else {
         return bound;
     };
-    let lanes = selects.map(|select| match select {
+    let moved = crate::content_hash(&[
+        selects[0],
+        selects[1],
+        selects[2],
+        selects[3],
+        format.bytes(),
+    ]);
+    RenderCommand::BindTexture {
+        slot,
+        hash: hash ^ moved.rotate_left(17),
+        texels,
+        width,
+        height,
+        sampling,
+        encoding: crate::backend::TextureEncoding::R8 {
+            lanes: byte_lanes(selects),
+        },
+        faces,
+        levels,
+    }
+}
+
+/// Each channel's source as `selects` pick it from a one-byte texel: X the byte, select 1 and W
+/// one (a one-byte texel reads its W as one, as [`swizzle_texels`] has it), anything else zero.
+fn byte_lanes(selects: [u32; 4]) -> [crate::backend::ByteLane; 4] {
+    use crate::backend::ByteLane;
+    selects.map(|select| match select {
         1 | 7 => ByteLane::One,
         SELECT_X => ByteLane::Byte,
         _ => ByteLane::Zero,
-    });
+    })
+}
+
+/// A one-byte texture's binding as [`crate::backend::TextureEncoding::R8`]: its bytes, the low byte
+/// of each of `bound`'s words, packed four to a word, and each channel's source as its `selects`
+/// pick it - X the byte, select 1 and W one (a one-byte texel reads its W as one, as
+/// [`swizzle_texels`] has it), anything else zero. Kept by hash and extent as swizzled texels are.
+fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand {
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        faces,
+        levels,
+        ..
+    } = bound
+    else {
+        return bound;
+    };
+    let lanes = byte_lanes(selects);
     // Packed and widened bytes of one texture share a hash; the tag keeps them apart in the cache.
     let key = (hash ^ PACKED_BYTES_TAG, width, height);
     let kept = swizzled_kept()
@@ -7090,6 +7143,19 @@ fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand
         levels,
     }
 }
+
+/// The lanes a one-byte texel is read with before its selects: the byte, zeros, and the one its W
+/// reads as - what [`swizzle_texels`] makes of the identity selects.
+const BYTE_READ: [crate::backend::ByteLane; 4] = [
+    crate::backend::ByteLane::Byte,
+    crate::backend::ByteLane::Zero,
+    crate::backend::ByteLane::Zero,
+    crate::backend::ByteLane::One,
+];
+
+/// The cache tag of a one-byte linear surface read packed: a bit no whole surface's other tags
+/// use, the low ones being a mip tail's origin.
+const PACKED_READ_TAG: u32 = 1 << 13;
 
 /// What [`packed_byte_texture`] moves a hash by in the swizzled-texel cache.
 const PACKED_BYTES_TAG: u64 = 0x0b17_e5b1_7e5b_17e5;
@@ -7427,6 +7493,52 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
     }
 }
 
+/// How a base level is read and kept: whether it is read packed, the encoding it is bound in, the
+/// tag that encoding adds to its hash, and its cache key's tag.
+struct BaseRead {
+    packs: bool,
+    encoding: crate::backend::TextureEncoding,
+    float_tag: u32,
+    tag: u32,
+}
+
+/// [`BaseRead`] for `surface`, read as `format`, its keys `cleared` or not.
+fn base_read(surface: &ColourTarget, format: TexelFormat, cleared: bool) -> BaseRead {
+    let tail_tag = match surface.place {
+        crate::registers::Place::Whole => 0,
+        crate::registers::Place::Within { origin: (x, y), .. } => {
+            1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF)
+        }
+    };
+    // A whole one-byte linear surface is read straight into its bytes packed four to a word, the
+    // form it is bound in (`TextureEncoding::R8`), rather than widened a texel a word and packed
+    // again at binding: its own entry, so a read that widens the same bytes never shares it.
+    let packs = format == TexelFormat::R8
+        && surface.layout == crate::tiling::SurfaceLayout::LinearBpp1
+        && matches!(surface.place, crate::registers::Place::Whole)
+        && !cleared;
+    let encoding = if packs {
+        crate::backend::TextureEncoding::R8 { lanes: BYTE_READ }
+    } else {
+        texture_encoding(format)
+    };
+    // A packed-float or sRGB read is its own entry, so the same bytes bound as `Rgba8` are never
+    // reused for it.
+    let float_tag = encoding_tag(encoding);
+    let tag = layout_tag(surface.layout)
+        | tail_tag
+        | float_tag
+        | u32::from(cleared) << 29
+        | 1 << 28
+        | if packs { PACKED_READ_TAG } else { 0 };
+    BaseRead {
+        packs,
+        encoding,
+        float_tag,
+        tag,
+    }
+}
+
 /// [`read_tiled_texture`]'s base level, read and kept as every texture's was before chains (D833).
 fn read_tiled_base(
     descriptor: &ImageDescriptor,
@@ -7449,18 +7561,12 @@ fn read_tiled_base(
     let cleared = texture_keys_cleared(descriptor, surface.layout, memory)?;
     let (width, height) = (surface.width, surface.height);
     let span = surface.words() * 4;
-    let layout_tag = layout_tag(surface.layout);
-    let tail_tag = match surface.place {
-        crate::registers::Place::Whole => 0,
-        crate::registers::Place::Within { origin: (x, y), .. } => {
-            1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF)
-        }
-    };
-    let encoding = texture_encoding(format);
-    // A packed-float or sRGB read is its own entry, so the same bytes bound as `Rgba8` are never
-    // reused for it.
-    let float_tag = encoding_tag(encoding);
-    let tag = layout_tag | tail_tag | float_tag | u32::from(cleared) << 29 | 1 << 28;
+    let BaseRead {
+        packs,
+        encoding,
+        float_tag,
+        tag,
+    } = base_read(&surface, format, cleared);
     let key = (surface.base, width, height, tag);
     if let Some(cached) = texels.get(&key)
         && cached
@@ -7493,6 +7599,7 @@ fn read_tiled_base(
         let hash = hasher.finish() ^ u64::from(float_tag);
         let shared = match texels.get(&key) {
             Some(cached) if cached.hash == hash => cached.texels.clone(),
+            _ if packs => crate::tiling::linear_bpp1_packed(bytes, width, height).into(),
             _ => {
                 // The guest's words read where they lie when they are aligned, as they are for any
                 // surface base; a copy only otherwise. Both are the little-endian words the host
