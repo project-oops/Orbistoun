@@ -13,3 +13,33 @@ known_by = "assumed"
 assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne could not load the module unprivileged (census 20261007, module-load 0x80020002). REQ-gt05/gt09 ask the console to confirm."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpEntitlementAccessGetSkuFlag"
+arity = 1
+purpose = "(flag *): the installed application's SKU - 3 a full game, 1 a trial."
+returns = "status"
+edge_cases = [
+    "orbistoun writes 3 (full) and answers 0: the SKU is the console's local licence, which an offline console reads. A null destination answers the placeholder.",
+    "PPSA04263 seeds its flag with 1 (trial) at image+0x4dfc92, keeps it on a non-zero answer (`jne` at image+0x4dfca0), and treats anything but 1 as the full game.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The full-game value and the local answer are those the reference emulators give an installed full game; obSCEne could not load the module unprivileged (census 20261007)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpEntitlementAccessGetAddcontEntitlementInfoList"
+arity = 4
+purpose = "(label, list *, room, hits *): the add-on entitlements installed for the title."
+returns = "status"
+edge_cases = [
+    "orbistoun reports none - *hits 0, the list untouched - and answers 0; a null hit count answers the placeholder.",
+    "PPSA04263 asks with no list for the count (image+0x4dfcca) and marks its entitlement check done on 0 hits.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["No add-on is installed, as the reference emulators answer a title with no add-on inventory; obSCEne could not load the module unprivileged (census 20261007)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
