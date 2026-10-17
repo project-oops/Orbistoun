@@ -131,3 +131,61 @@ known_by = "assumed"
 assumptions = ["The parameter layout and the deletion are those the reference emulators give local saves (one answers 0 for an absent save; orbistoun keeps D792's not-found code); obSCEne has not measured the call."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataCreateTransactionResource"
+arity = 1
+purpose = "(size): a resource for a save write transaction, answered as its identifier."
+returns = "status"
+edge_cases = [
+    "PPSA04263 asks with 0xc0000 (image+0x2b3d631) and raises its error flag on a negative answer.",
+    "orbistoun answers identifiers counting from 1; writes reach the title's storage as they are made, so the resource holds nothing. Before Initialize3 it answers the placeholder.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataPrepare"
+arity = 2
+purpose = "(mount point, param): prepares a mounted save for the transaction param names."
+returns = "status"
+edge_cases = [
+    "param is { resource u32, mode u32, 32 reserved bytes }; PPSA04263 passes the mount point Mount3 gave and mode 0, then opens <mount point>/<file> for writing (image+0x2b3d678).",
+    "orbistoun answers 0 for the mounted save and a live resource, and the placeholder otherwise.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataCommit"
+arity = 1
+purpose = "(param): commits the transaction param names."
+returns = "status"
+edge_cases = [
+    "param is { resource u32, mode u32, ... }. orbistoun answers 0 for a live resource - what was written is already in the title's storage - and the placeholder otherwise.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
+
+[[function]]
+name = "sceSaveDataDeleteTransactionResource"
+arity = 1
+purpose = "(resource): releases a transaction resource."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0 for a live resource and the placeholder for one not made or released already.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

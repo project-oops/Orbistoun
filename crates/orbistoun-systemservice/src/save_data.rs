@@ -31,6 +31,14 @@ guest_module! {
         "sceSaveDataDirNameSearch" => 2,
         // (parameter)
         "sceSaveDataDelete" => 1,
+        // (memory size)
+        "sceSaveDataCreateTransactionResource" => 1,
+        // (mount point, parameter)
+        "sceSaveDataPrepare" => 2,
+        // (parameter)
+        "sceSaveDataCommit" => 1,
+        // (resource)
+        "sceSaveDataDeleteTransactionResource" => 1,
     }
 }
 
@@ -722,6 +730,145 @@ pub(crate) fn delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return refuse;
     }
     0
+}
+
+/// Each transaction resource `sceSaveDataCreateTransactionResource` has made and not deleted.
+static RESOURCES: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The identifier the next transaction resource takes.
+static NEXT_RESOURCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// The live transaction resources, held.
+fn resources() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<u32>> {
+    RESOURCES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `sceSaveDataCreateTransactionResource(size)`: a resource for a write transaction, answered as
+/// its non-negative identifier. Writes to a mounted save reach the title's storage as they are
+/// made, so the resource holds nothing; `size` is the memory a title lends it (PPSA04263: 0xc0000)
+/// and is not used (assumed, as the reference emulators answer it). Before
+/// `sceSaveDataInitialize3` it answers the placeholder.
+pub(crate) fn create_transaction_resource(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !INITIALISED.load(Ordering::Acquire) {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let resource = NEXT_RESOURCE.fetch_add(1, Ordering::Relaxed);
+    resources().insert(resource);
+    u64::from(resource)
+}
+
+/// Whether the parameter block at `param` names a live resource: its first word.
+fn names_live_resource(param: u64) -> bool {
+    // SAFETY: the guest's parameter block, by the call's contract; read through the checked
+    // accessor.
+    let resource = unsafe { guest::read_u32(param) };
+    resource.is_some_and(|resource| resources().contains(&resource))
+}
+
+/// `sceSaveDataPrepare(mount point, param)`: prepares the save mounted at `mount point` for the
+/// transaction `param` names - `{ resource u32, mode u32 }` - and answers 0; a title then writes
+/// into the save and commits. PPSA04263 prepares the save it mounted, then opens
+/// `<mount point>/<file>` for writing (image+0x2b3d678). A mount point no save is mounted at, or a
+/// resource not made, answers the placeholder (assumed, as the reference emulators answer it).
+pub(crate) fn prepare(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let refuse = u64::from(GuestError::Unimplemented.as_raw());
+    // SAFETY: the guest's mount point, a NUL-terminated string by the call's contract; read through
+    // the checked accessor.
+    let point = unsafe { guest::read_cstr(args[0], 16) };
+    let mounted =
+        point.as_deref() == Some(SAVE_MOUNT_POINT.as_bytes()) && MOUNTED.load(Ordering::Acquire);
+    if mounted && names_live_resource(args[1]) {
+        0
+    } else {
+        refuse
+    }
+}
+
+/// `sceSaveDataCommit(param)`: commits the transaction `param` names, `{ resource u32, mode u32 }`,
+/// and answers 0. What was written is already in the title's storage, so nothing is left to
+/// move (assumed, as the reference emulators answer it). A resource not made answers the
+/// placeholder.
+pub(crate) fn commit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if names_live_resource(args[0]) {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceSaveDataDeleteTransactionResource(resource)`: releases a resource and answers 0; one not
+/// made, or released already, answers the placeholder.
+pub(crate) fn delete_transaction_resource(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if resources().remove(&(args[0] as u32)) {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// A transaction makes a resource, prepares the mounted save, commits and releases it; a mount
+    /// point with nothing mounted, or a resource released, is refused.
+    #[test]
+    fn a_transaction_prepares_the_mounted_save_and_commits() {
+        let root = std::env::temp_dir().join(format!("orbistoun-txn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        orbistoun_fs::mount::mount_data(root.clone());
+        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+        let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
+
+        let resource = super::create_transaction_resource(&[0xc_0000, 0, 0, 0, 0, 0]);
+        assert!(
+            resource < 0x8000_0000,
+            "an identifier, not an error: {resource:#x}"
+        );
+        let mut param = [0_u8; 0x28];
+        param[..4].copy_from_slice(&(resource as u32).to_le_bytes());
+        let point = b"/savedata0\0";
+        let prepare = [point.as_ptr() as u64, param.as_ptr() as u64, 0, 0, 0, 0];
+        assert_ne!(super::prepare(&prepare), 0, "nothing is mounted");
+
+        let name = b"SAVE0001\0";
+        let mut mount = [0_u8; 0x40];
+        mount[..4].copy_from_slice(&crate::signed_in_user().to_le_bytes());
+        mount[8..16].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
+        mount[0x20..0x24].copy_from_slice(&(2_u32 | 4).to_le_bytes());
+        let mut result = [0_u8; 0x40];
+        let mount_args = [
+            mount.as_ptr() as u64,
+            result.as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(super::mount3(&mount_args), 0);
+        assert_eq!(super::prepare(&prepare), 0);
+        assert_eq!(super::commit(&[param.as_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            super::delete_transaction_resource(&[resource, 0, 0, 0, 0, 0]),
+            0
+        );
+        assert_ne!(
+            super::delete_transaction_resource(&[resource, 0, 0, 0, 0, 0]),
+            0
+        );
+        assert_ne!(super::commit(&[param.as_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+
+        let mut umount = [0_u64; GUEST_ARG_REGISTERS];
+        umount[1] = point.as_ptr() as u64;
+        assert_eq!(super::umount2(&umount), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

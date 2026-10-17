@@ -913,6 +913,16 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceSaveDataDirNameSearch", save_data::dir_name_search),
     ("sceSaveDataDelete", save_data::delete),
     (
+        "sceSaveDataCreateTransactionResource",
+        save_data::create_transaction_resource,
+    ),
+    ("sceSaveDataPrepare", save_data::prepare),
+    ("sceSaveDataCommit", save_data::commit),
+    (
+        "sceSaveDataDeleteTransactionResource",
+        save_data::delete_transaction_resource,
+    ),
+    (
         "sceSaveDataGetSaveDataMemory2",
         save_data::get_save_data_memory2,
     ),
