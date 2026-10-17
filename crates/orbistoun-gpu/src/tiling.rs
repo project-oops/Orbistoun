@@ -1486,13 +1486,21 @@ impl SurfaceLayout {
                     .map(map)
                     .collect()
             }
-            // Each texel is one byte of the little-endian words, its rows at the pitch.
+            // Each texel is one byte of the little-endian words, its rows at the pitch: each row
+            // copied from the bytes as they lie, which the host reads in the same order.
             Self::LinearBpp1 => {
                 let pitch = self.linear_pitch(width) as usize;
-                (0..height as usize)
-                    .flat_map(|row| (0..width as usize).map(move |x| row * pitch + x))
-                    .map(|at| map(tiled[at / 4] >> ((at % 4) * 8) & 0xFF))
-                    .collect()
+                let bytes = zerocopy::IntoBytes::as_bytes(tiled);
+                let mut linear = Vec::with_capacity(width as usize * height as usize);
+                for row in 0..height as usize {
+                    let start = row * pitch;
+                    linear.extend(
+                        bytes[start..start + width as usize]
+                            .iter()
+                            .map(|&texel| map(u32::from(texel))),
+                    );
+                }
+                linear
             }
             // Each texel is one half of the little-endian words.
             Self::Rx64KbBpp2 => (0..height)

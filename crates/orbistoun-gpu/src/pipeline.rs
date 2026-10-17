@@ -7020,8 +7020,35 @@ fn swizzled_kept() -> &'static std::sync::Mutex<SwizzledKept> {
 /// Swizzled texels by (hash, width, height).
 type SwizzledKept = std::collections::HashMap<(u64, u32, u32), std::sync::Arc<[u32]>>;
 
-/// Each texel's channels as `selects` pick them from `format`'s.
+/// Each texel's channels as `selects` pick them from `format`'s. A one-byte texel's are its X and
+/// constants, so each word is a constant and X multiplied into the lanes that select it - one
+/// multiply and one or a texel rather than a pick per channel.
 fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std::sync::Arc<[u32]> {
+    if !matches!(format, TexelFormat::R8 | TexelFormat::R8Uint) {
+        return swizzle_texels_by_channel(texels, format, selects);
+    }
+    // A one-byte texel reads as (X, 0, 0, 0xFF): select 1 is the constant one, X the byte, W the
+    // read's own one, and Y, Z and 0 zero - as `swizzle_texels_by_channel` picks them.
+    let (mut constant, mut lanes) = (0_u32, 0_u32);
+    for (lane, &select) in (0..).zip(&selects) {
+        match select {
+            1 | 7 => constant |= 0xFF << (8 * lane),
+            SELECT_X => lanes |= 1 << (8 * lane),
+            _ => {}
+        }
+    }
+    texels
+        .iter()
+        .map(|&texel| constant | ((texel & 0xFF) * lanes))
+        .collect()
+}
+
+/// [`swizzle_texels`] a channel at a time, for any format.
+fn swizzle_texels_by_channel(
+    texels: &[u32],
+    format: TexelFormat,
+    selects: [u32; 4],
+) -> std::sync::Arc<[u32]> {
     let pick = |channels: [u8; 4], select: u32| match select {
         1 => 0xFF,
         4..=7 => channels[(select - SELECT_X) as usize],
@@ -9907,6 +9934,28 @@ mod tests {
         let mut tiled = vec![0_u8; volume.bytes()];
         volume.tile(&texels, &mut tiled).expect("tiled back");
         assert!(tiled == spanned, "tiled back to the same bytes");
+    }
+
+    /// A one-byte texture's texels are swizzled by a multiply and an or, every select taking the
+    /// value the per-channel pick gives: X where it selects X, the constants where it selects
+    /// them. GTA V's intro video binds three such planes a frame, and the pick per texel took
+    /// seven milliseconds a plane.
+    #[test]
+    fn a_one_byte_texture_swizzles_as_the_per_channel_pick_does() {
+        use super::{TexelFormat, swizzle_texels, swizzle_texels_by_channel};
+        let texels: Vec<u32> = (0..=255).chain([0x1234_56ff]).collect();
+        for x in [0, 1, 4, 5, 6, 7] {
+            for y in [0, 1, 4] {
+                for w in [0, 1, 4] {
+                    let selects = [4, y, x, w];
+                    assert_eq!(
+                        swizzle_texels(&texels, TexelFormat::R8, selects),
+                        swizzle_texels_by_channel(&texels, TexelFormat::R8, selects),
+                        "{selects:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A volume of one texel binds whatever its swizzle mode: every gfx10 equation forms each address
