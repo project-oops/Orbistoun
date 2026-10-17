@@ -85,6 +85,7 @@ returns = "status"
 edge_cases = [
     "MEASURED (REQ-20261014T0430Z-ue01, with the context and handle the same process had just made): 0x80553104, and 0x80553104 again on a second call.",
     "Every commercial title in the corpus calls it.",
+    "The measuring probe ships no universal-data pack; a title that ships sce_sys/uds/uds00.ucp registers and orbistoun answers it 0 (assumed, as the reference emulators answer it).",
 ]
 found_by = "generated"
 known_by = "measured"
@@ -100,6 +101,7 @@ returns = "status"
 edge_cases = [
     "MEASURED (REQ-20261014T1110Z-rf05, ue01's set-up and an event CreateEvent made, signed out): 0x80553104, the answer RegisterContext gives on the same console.",
     "PPSA02664 posts an event every frame.",
+    "In a title that ships sce_sys/uds/uds00.ucp, orbistoun counts the event - its name from CreateEvent, its properties from the object it was made with - into the context user's statistics by the title's extraction rules, earning the trophies they meet, and answers 0 (assumed; a probe package with no pack measured the refusal). PPSA04263 earns each trophy by posting _UnlockTrophy with _trophy_id.",
 ]
 found_by = "static"
 known_by = "measured"
@@ -165,3 +167,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261015T0653Z-ud01, reports/hardware/report-20261015-batch1.log lines 2023-2030 (000-boot/ux01-calls)."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceNpUniversalDataSystemEventPropertyObjectSetInt32"
+arity = 3
+purpose = "(object, key, value): sets a 32-bit integer property on an event property object."
+returns = "status"
+edge_cases = [
+    "orbistoun keeps the value at $.key for the event made with the object and answers 0, as SetString answers a string; a null object or key answers the placeholder.",
+    "PPSA04263 sets _trophy_id with it on the _UnlockTrophy event its trophies are earned by.",
+]
+found_by = "affixed"
+known_by = "assumed"
+assumptions = ["The setter answers as its SetString sibling was measured to (REQ-ud01); obSCEne has not measured it."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

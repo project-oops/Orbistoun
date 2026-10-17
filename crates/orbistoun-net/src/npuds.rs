@@ -11,6 +11,7 @@
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
+use orbistoun_systemservice::uds_stats::{Event, Value};
 
 guest_module! {
     "libSceNpUniversalDataSystem" {
@@ -36,6 +37,8 @@ guest_module! {
         "sceNpUniversalDataSystemDestroyHandle" => 1,
         // (object, key, value)
         "sceNpUniversalDataSystemEventPropertyObjectSetString" => 3,
+        // (object, key, value)
+        "sceNpUniversalDataSystemEventPropertyObjectSetInt32" => 3,
     }
 }
 
@@ -63,7 +66,63 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceNpUniversalDataSystemEventPropertyObjectSetString",
             set_string,
         ),
+        (
+            "sceNpUniversalDataSystemEventPropertyObjectSetInt32",
+            set_int32,
+        ),
     ]
+}
+
+/// What the console keeps of a title's universal-data calls: whose each context is, each property
+/// object's values, and each event's name and object - what a posted event carries to the
+/// statistics that earn trophies.
+#[derive(Default)]
+struct Kept {
+    /// Each context, by number, with the user and service label it was made for.
+    contexts: std::collections::BTreeMap<u32, (u32, u32)>,
+    /// Each property object's values, by its address, keyed by path, `$.name`.
+    objects: std::collections::BTreeMap<u64, std::collections::BTreeMap<String, Value>>,
+    /// Each event, by its address, with its name and the property object it was made with.
+    events: std::collections::BTreeMap<u64, (String, u64)>,
+}
+
+/// The process's universal-data state.
+static KEPT: std::sync::LazyLock<std::sync::Mutex<Kept>> =
+    std::sync::LazyLock::new(std::sync::Mutex::default);
+
+/// The kept state, held.
+fn kept() -> std::sync::MutexGuard<'static, Kept> {
+    KEPT.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The guest path of the title's universal-data pack, whose rules a posted event is counted by.
+const UDS_PACK: &str = "/app0/sce_sys/uds/uds00.ucp";
+
+/// Whether the title ships a universal-data pack. The console's measured refusals of
+/// `RegisterContext` and `PostEvent` (`0x80553104`) came from a probe package that ships none; a
+/// title that does registers and posts (assumed, as the reference emulators answer it).
+fn title_has_rules() -> bool {
+    orbistoun_fs::mount::resolve_existing(UDS_PACK).is_some()
+}
+
+/// A property key the guest passed, as the path its rules name it by, `$.key`.
+fn property_path(key: u64) -> Option<String> {
+    // SAFETY: the guest's key, a NUL-terminated string by the call's contract; read through the
+    // checked accessor.
+    let bytes = unsafe { orbistoun_mem::guest::read_cstr(key, 256) }?;
+    Some(format!("$.{}", String::from_utf8(bytes).ok()?))
+}
+
+/// Keeps `value` at `key` of the property object `object`.
+fn keep_property(object: u64, key: u64, value: Value) {
+    if let Some(path) = property_path(key) {
+        kept()
+            .objects
+            .entry(object)
+            .or_default()
+            .insert(path, value);
+    }
 }
 
 /// `sceNpUniversalDataSystemInitialize(param)`: with `param` u64 0x10 (its size), u64 0x40000 (a
@@ -94,6 +153,9 @@ fn create_context(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's context slot, by the call's contract; written through the checked
     // accessor.
     if unsafe { orbistoun_mem::guest::write_u32(args[0], number) } {
+        kept()
+            .contexts
+            .insert(number, (args[1] as u32, args[2] as u32));
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
@@ -155,14 +217,36 @@ const INVALID_VALUE: u64 = 0x8055_3115;
 
 /// `sceNpUniversalDataSystemEventPropertyObjectSetString(object, key, value)`: 0 for a key and a
 /// value, again when the key is set over, and [`INVALID_VALUE`] for a null value (REQ-ud01,
-/// `000-boot/ux01-calls`, `report-20261015-batch1.log` 2028-2030). The property is not kept: the
-/// object is the console's own, and nothing a title was seen to read it back. A null object or key
-/// is unmeasured and answers the placeholder. PPSA28061 sets three.
+/// `000-boot/ux01-calls`, `report-20261015-batch1.log` 2028-2030). The value is kept for the event
+/// made with the object. A null object or key is unmeasured and answers the placeholder. PPSA28061
+/// sets three.
 fn set_string(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match args {
         [0, ..] | [_, 0, ..] => u64::from(GuestError::Unimplemented.as_raw()),
         [_, _, 0, ..] => INVALID_VALUE,
-        _ => 0,
+        [object, key, value, ..] => {
+            // SAFETY: the guest's value, a NUL-terminated string by the call's contract; read
+            // through the checked accessor.
+            if let Some(text) = unsafe { orbistoun_mem::guest::read_cstr(*value, 1024) } {
+                let text = String::from_utf8_lossy(&text).into_owned();
+                keep_property(*object, *key, Value::Text(text));
+            }
+            0
+        }
+    }
+}
+
+/// `sceNpUniversalDataSystemEventPropertyObjectSetInt32(object, key, value)`: keeps a 32-bit
+/// integer at `key` and answers 0, as `SetString` answers a string (assumed: the setter of the
+/// same family). PPSA04263 sets `_trophy_id` with it on the `_UnlockTrophy` event its trophies
+/// are earned by. A null object or key answers the placeholder.
+fn set_int32(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match args {
+        [0, ..] | [_, 0, ..] => u64::from(GuestError::Unimplemented.as_raw()),
+        [object, key, value, ..] => {
+            keep_property(*object, *key, Value::Int(i64::from(*value as u32 as i32)));
+            0
+        }
     }
 }
 
@@ -211,7 +295,19 @@ fn create_event_property_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// event (REQ-20261014T0430Z-ue01, `000-boot/uds-create-event`, `report-20261014-batch4.log`
 /// 2855-2863). PPSA02664 calls it once a frame.
 fn create_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    new_object(args[2])
+    let answer = new_object(args[2]);
+    if answer == 0 {
+        // SAFETY: the event slot `new_object` just wrote; read through the checked accessor.
+        let event = unsafe { orbistoun_mem::guest::read_u64(args[2]) };
+        // SAFETY: the guest's event name, a NUL-terminated string by the call's contract; read
+        // through the checked accessor.
+        let name = unsafe { orbistoun_mem::guest::read_cstr(args[0], 256) };
+        if let (Some(event), Some(name)) = (event, name) {
+            let name = String::from_utf8_lossy(&name).into_owned();
+            kept().events.insert(event, (name, args[1]));
+        }
+    }
+    answer
 }
 
 /// What `sceNpUniversalDataSystemRegisterContext` answered for a context and handle just made,
@@ -219,18 +315,43 @@ fn create_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 const REGISTER_CONTEXT_ANSWER: u64 = 0x8055_3104;
 
 /// `sceNpUniversalDataSystemRegisterContext(ctx, handle, 0)`: answers `0x80553104`, as the console
-/// did for the context and handle it had just made, a second time too. Every commercial title in
-/// the corpus calls it.
-const fn register_context(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    REGISTER_CONTEXT_ANSWER
+/// did for the context and handle it had just made in a probe package with no universal-data
+/// pack, a second time too; a title that ships one registers, and answers 0 (assumed). Every
+/// commercial title in the corpus calls it.
+fn register_context(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if title_has_rules() {
+        0
+    } else {
+        REGISTER_CONTEXT_ANSWER
+    }
 }
 
 /// `sceNpUniversalDataSystemPostEvent(ctx, handle, event, 0)`: answers `0x80553104` for an event
-/// `CreateEvent` made, as the console did - the answer `RegisterContext` gives on the same console
-/// (REQ-20261014T1110Z-rf05, `000-boot/uds-create-event`, `report-20261014-batch6.log` 2181).
-/// PPSA02664 posts an event every frame.
-const fn post_event(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    REGISTER_CONTEXT_ANSWER
+/// `CreateEvent` made, as the console did in a probe package with no universal-data pack - the
+/// answer `RegisterContext` gives on the same console (REQ-20261014T1110Z-rf05,
+/// `000-boot/uds-create-event`, `report-20261014-batch6.log` 2181). A title that ships one has
+/// the event counted into its statistics for the context's user, earning the trophies they meet,
+/// and answers 0 (assumed). PPSA02664 posts an event every frame.
+fn post_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if !title_has_rules() {
+        return REGISTER_CONTEXT_ANSWER;
+    }
+    let posted = {
+        let state = kept();
+        let owner = state.contexts.get(&(args[0] as u32)).copied();
+        let event = state.events.get(&args[2]).map(|(name, object)| Event {
+            name: name.clone(),
+            properties: state.objects.get(object).cloned().unwrap_or_default(),
+        });
+        owner.zip(event)
+    };
+    if let Some(((user, label), event)) = posted {
+        let earned = orbistoun_systemservice::trophy::post_event(user, label, &event);
+        if !earned.is_empty() {
+            tracing::info!(?earned, event = %event.name, "trophies earned");
+        }
+    }
+    0
 }
 
 /// `sceNpUniversalDataSystemDestroyEvent(event)`: answers 0 (REQ-rf05, batch6 2182). The event's
@@ -248,6 +369,106 @@ const fn destroy_event_property_object(_args: &[u64; GUEST_ARG_REGISTERS]) -> u6
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// Held by every test whose answer depends on what `/app0` holds: the mounts are the
+    /// process's.
+    static APP0: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `APP0`, held.
+    fn app0() -> std::sync::MutexGuard<'static, ()> {
+        APP0.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A trophy or universal-data pack holding `entries`, laid out as a title's is: a big-endian
+    /// header, then 0x40-byte entries from 0x60 of a 32-byte name, an offset and a size.
+    fn pack_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut pack = vec![0_u8; 0x60 + entries.len() * 0x40];
+        pack[..4].copy_from_slice(&0xb228_c60a_u32.to_be_bytes());
+        pack[0x10..0x14].copy_from_slice(&(entries.len() as u32).to_be_bytes());
+        pack[0x14..0x18].copy_from_slice(&0x40_u32.to_be_bytes());
+        for (index, (name, bytes)) in entries.iter().enumerate() {
+            let at = 0x60 + index * 0x40;
+            let offset = pack.len() as u64;
+            pack[at..at + name.len()].copy_from_slice(name.as_bytes());
+            pack[at + 0x20..at + 0x28].copy_from_slice(&offset.to_be_bytes());
+            pack[at + 0x28..at + 0x30].copy_from_slice(&(bytes.len() as u64).to_be_bytes());
+            pack.extend_from_slice(bytes);
+        }
+        pack
+    }
+
+    /// In a title that ships its trophy and universal-data packs, an `_UnlockTrophy` event whose
+    /// `_trophy_id` an `Int32` setter put on its property object registers, posts with 0, and earns
+    /// the trophy into the user's kept record.
+    #[test]
+    fn a_posted_unlock_event_earns_its_trophy() {
+        let _alone = app0();
+        let root = std::env::temp_dir().join(format!("orbistoun-uds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (app, data) = (root.join("app0"), root.join("data"));
+        std::fs::create_dir_all(app.join("sce_sys/trophy2")).unwrap();
+        std::fs::create_dir_all(app.join("sce_sys/uds")).unwrap();
+        let conf = br#"{"trophyNpCommId":"NPWR99999_00","defaultLanguage":"en-US",
+            "trophies":[{"id":"0001","grade":"B",
+              "unlockCondition":{"udsStatId":"19","comparator":"ge","targetValue":"1"}}]}"#;
+        let meta = br#"{"metadata":{"titleMetadata":{"name":"T"},"trophyMetadata":[]}}"#;
+        std::fs::write(
+            app.join("sce_sys/trophy2/trophy00.ucp"),
+            pack_of(&[("tropconf.json", conf), ("tropmeta_en-US.json", meta)]),
+        )
+        .unwrap();
+        let definitions =
+            br#"{"statDefinitionArray":[{"statId":19,"aggregation":"count","maxValue":"1"}]}"#;
+        let extraction =
+            br#"{"statsExtractionRuleArray":[{"condition":{"eventName":"_UnlockTrophy",
+            "property":{"path":"$._trophy_id","comparator":"==","value":"1"}},
+            "action":{"output":{"statId":19}}}]}"#;
+        std::fs::write(
+            app.join("sce_sys/uds/uds00.ucp"),
+            pack_of(&[
+                ("stats_definition.json", definitions),
+                ("stats_extraction.json", extraction),
+            ]),
+        )
+        .unwrap();
+        orbistoun_fs::mount::mount("/app0", app);
+        orbistoun_fs::mount::mount_data(data.clone());
+        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+
+        let user = orbistoun_systemservice::signed_in_user();
+        let (mut context, mut object, mut event) = (0_u64, 0_u64, [0_u64; 4]);
+        let at = |slot: &mut u64| std::ptr::from_mut(slot) as u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[..3].copy_from_slice(&[at(&mut context), u64::from(user), 0]);
+        assert_eq!(super::create_context(&args), 0);
+        assert_eq!(super::register_context(&[context, 0x2_0176, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            super::create_event_property_object(&[at(&mut object), 0, 0, 0, 0, 0]),
+            0
+        );
+        let key = c"_trophy_id";
+        assert_eq!(
+            super::set_int32(&[object, key.as_ptr() as u64, 1, 0, 0, 0]),
+            0
+        );
+        let name = c"_UnlockTrophy";
+        let event_at = event.as_mut_ptr() as u64;
+        assert_eq!(
+            super::create_event(&[name.as_ptr() as u64, object, event_at, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            super::post_event(&[context, 0x2_0176, event[0], 0, 0, 0]),
+            0
+        );
+
+        let record = data.join(format!("sce_trophy2/NPWR99999_00/user-{user}.json"));
+        let kept = std::fs::read_to_string(&record).expect("the earned trophy is kept");
+        assert!(kept.contains(r#""earned":{"1":"#), "{kept}");
+        orbistoun_fs::mount::unmount("/app0");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Handles count up from `0x20176` in the low four bytes, the rest of the slot as it was
     /// (REQ-pu01).
@@ -312,6 +533,7 @@ mod tests {
     /// the same console, and destroyed with 0, as is its property object (REQ-rf05).
     #[test]
     fn events_are_posted_and_destroyed_as_measured() {
+        let _alone = app0();
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = 0x4_007b;
         args[1] = 0x2_0098;
@@ -351,6 +573,7 @@ mod tests {
     /// (REQ-ue01).
     #[test]
     fn registering_a_context_answers_as_measured() {
+        let _alone = app0();
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = 0x4_007b;
         args[1] = 0x2_0098;
