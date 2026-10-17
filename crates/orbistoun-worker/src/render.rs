@@ -521,6 +521,9 @@ fn report_perf(sink: Option<fn(&Event)>) {
             .collect(),
         spans,
     };
+    if let Ok(mut run) = run_perf().lock() {
+        run.add(&report);
+    }
     if let Some(sink) = sink {
         sink(&Event::Perf(report));
     } else {
@@ -539,6 +542,68 @@ fn report_perf(sink: Option<fn(&Event)>) {
             phases.join(", ")
         );
     }
+}
+
+/// The run's perf windows that flipped, summed: their milliseconds, flips and each phase's time.
+#[derive(Debug, Default)]
+struct RunPerf {
+    window_ms: f64,
+    flips: u64,
+    phases: Vec<(String, f64)>,
+}
+
+impl RunPerf {
+    /// Adds a window, when it flipped: a window with no flip is not part of any frame's time.
+    fn add(&mut self, report: &orbistoun_proto::PerfReport) {
+        if report.flips == 0 {
+            return;
+        }
+        self.window_ms += report.window_ms;
+        self.flips += report.flips;
+        for (name, ms) in &report.phases {
+            match self.phases.iter_mut().find(|(kept, _)| kept == name) {
+                Some((_, total)) => *total += ms,
+                None => self.phases.push((name.clone(), *ms)),
+            }
+        }
+    }
+
+    /// The run's line: each phase's milliseconds a flip, costliest first, the flips and their rate,
+    /// and the flip's whole length - what of a frame the host spends where. `None` before a flip.
+    #[allow(clippy::cast_precision_loss)] // a run's flip count is far below 2^52
+    fn describe(&self) -> Option<String> {
+        if self.flips == 0 || self.window_ms <= 0.0 {
+            return None;
+        }
+        let flips = self.flips as f64;
+        let mut phases: Vec<(&str, f64)> = self
+            .phases
+            .iter()
+            .filter(|(_, ms)| *ms > 0.0)
+            .map(|(name, ms)| (name.as_str(), ms / flips))
+            .collect();
+        phases.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let parts: Vec<String> = phases
+            .iter()
+            .map(|(name, ms)| format!("{name} {ms:.2} ms"))
+            .collect();
+        Some(format!(
+            concat!(
+                "host time per flip over the windows that flipped: {} flips at {:.1} a second; {} - ",
+                "the rest of each {:.1} ms flip is the guest's own time and what nothing measures"
+            ),
+            self.flips,
+            flips * 1000.0 / self.window_ms,
+            parts.join(", "),
+            self.window_ms / flips
+        ))
+    }
+}
+
+/// The run's perf windows so far.
+fn run_perf() -> &'static Mutex<RunPerf> {
+    static RUN: OnceLock<Mutex<RunPerf>> = OnceLock::new();
+    RUN.get_or_init(Default::default)
 }
 
 /// The scanout format PPSA28061 registers, whose memory its draws write as R, G, B, A (`8_8_8_8`
@@ -1610,6 +1675,9 @@ fn log_flip_origins() {
     if let Some(line) = orbistoun_gpu::detiled::describe(&orbistoun_gpu::detiled::by_layout()) {
         tracing::info!("{line}");
     }
+    if let Some(line) = run_perf().lock().ok().and_then(|run| run.describe()) {
+        tracing::info!("{line}");
+    }
     let Some(shown) = origins.last else {
         return;
     };
@@ -2507,6 +2575,42 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// The run's host time per flip is each phase's milliseconds over its flips, costliest first,
+    /// with the flips and the rate they came at: what a frame-bound stretch spends where, read at the
+    /// run's end. Windows with no flip add nothing, and phases that took no time are left out.
+    #[test]
+    fn the_run_s_host_time_per_flip_is_each_phase_over_its_flips() {
+        let mut run = super::RunPerf::default();
+        let window = |ms: f64, flips: u64, phases: &[(&str, f64)]| orbistoun_proto::PerfReport {
+            window_ms: ms,
+            flips,
+            submissions: flips,
+            draws: 2 * flips,
+            phases: phases.iter().map(|&(n, v)| (n.to_owned(), v)).collect(),
+            spans: Vec::new(),
+        };
+        run.add(&window(
+            1000.0,
+            20,
+            &[("prepare", 120.0), ("build", 40.0), ("seed", 0.0)],
+        ));
+        run.add(&window(1000.0, 0, &[("prepare", 500.0)]));
+        run.add(&window(
+            1000.0,
+            20,
+            &[("prepare", 80.0), ("build", 40.0), ("seed", 0.0)],
+        ));
+        assert_eq!(
+            run.describe().as_deref(),
+            Some(concat!(
+                "host time per flip over the windows that flipped: 40 flips at 20.0 a second; ",
+                "prepare 5.00 ms, build 2.00 ms - the rest of each 50.0 ms flip is the guest's own ",
+                "time and what nothing measures"
+            ))
+        );
+        assert_eq!(super::RunPerf::default().describe(), None);
+    }
 
     /// A draw's capture reads as the counts it declared, then clip coordinates and where they land: a
     /// vertex outside -1..1 after the divide, or with w at or below zero, draws nothing there; a
