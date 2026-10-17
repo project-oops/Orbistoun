@@ -1,8 +1,9 @@
 //! Reading a formatted string, and writing a formatted time.
 //!
-//! `sscanf` receives its destinations in registers: six arguments, two spent on the string
-//! and the format, so four conversions can be assigned. A format that needs more is refused
-//! entirely, since a partial count tells a caller its first conversions are good when the
+//! `sscanf` receives its first four destinations in registers, after the string and the format,
+//! and the rest on the guest's stack above the return address, as the psABI passes them. Outside a
+//! guest call there is no stack to read, and a format that needs more than the registers carry is
+//! refused entirely, since a partial count tells a caller its first conversions are good when the
 //! arguments may be misaligned. `strftime` reads the nine leading `int`s of FreeBSD's
 //! `struct tm` (`include/time.h`), at offsets 0 to 32 in four-byte steps.
 
@@ -10,8 +11,9 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 
 use crate::{c_len, ptr};
 
-/// Conversions this can assign, being the argument registers less the two fixed ones.
-const ASSIGNABLE: usize = GUEST_ARG_REGISTERS - 2;
+/// The most destinations read from the guest's stack, past the registers: a bound on a format
+/// asking for more than any caller passes.
+const MOST_STACKED: u64 = 64;
 
 /// What `sscanf` answers when the input ended before anything matched.
 ///
@@ -83,8 +85,27 @@ fn sscanf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     scan(args, true)
 }
 
-/// The scanner behind both: `sized` is whether `%s` and `%c` take a size.
+/// The scanner behind both: `sized` is whether `%s` and `%c` take a size. Destinations past the
+/// registers are read from the stack of the guest call running now.
 fn scan(args: &[u64; GUEST_ARG_REGISTERS], sized: bool) -> u64 {
+    let area = orbistoun_thunk::stack_arguments();
+    let mut index = 0_u64;
+    scan_with(args, sized, &mut || {
+        // Zero outside a guest call: no stack to read.
+        if area == 0 || index >= MOST_STACKED {
+            return None;
+        }
+        let at = usize::try_from(area.saturating_add(index.saturating_mul(8))).ok()?;
+        index += 1;
+        // SAFETY: the guest's own stack under the identity mapping, inside the frame of the call
+        // running now, which the thunk published and has not returned from. Read unaligned, so
+        // nothing depends on the slot's alignment.
+        Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at)) })
+    })
+}
+
+/// [`scan`] with the destinations past the registers taken from `stacked`, in order.
+fn scan_with(args: &[u64], sized: bool, stacked: &mut dyn FnMut() -> Option<u64>) -> u64 {
     // SAFETY: guest-supplied strings under the identity mapping.
     let (Some(input), Some(format)) =
         (unsafe { guest_str(args[0]) }, unsafe { guest_str(args[1]) })
@@ -92,7 +113,7 @@ fn scan(args: &[u64; GUEST_ARG_REGISTERS], sized: bool) -> u64 {
         return NO_INPUT;
     };
 
-    let mut destinations = args[2..].iter().copied();
+    let mut destinations = args[2..].iter().copied().chain(std::iter::from_fn(stacked));
     let mut at = 0_usize;
     let mut assigned = 0_u64;
     let mut format = format.iter().copied().peekable();
@@ -143,9 +164,6 @@ fn scan(args: &[u64; GUEST_ARG_REGISTERS], sized: bool) -> u64 {
             let Some(destination) = destinations.next() else {
                 return 0;
             };
-            if assigned as usize >= ASSIGNABLE {
-                return 0;
-            }
             destination
         };
         let room = if sized && !suppress && matches!(wanted, Wanted::String | Wanted::Character) {
@@ -742,6 +760,30 @@ mod tests {
             ],
         );
         assert_eq!(matched, 0, "refused entirely");
+    }
+
+    /// Destinations past the four the registers carry come from the guest's stack, in order, as
+    /// the psABI passes them: a colour read as a name and four channels assigns all five. Refused
+    /// for want of the fifth, GTA V's text read its colours without them.
+    #[test]
+    fn destinations_past_the_registers_come_from_the_stack() {
+        let mut values = [0_i32; 5];
+        let fifth = std::ptr::addr_of_mut!(values[4]) as u64;
+        let mut stacked = [fifth].into_iter();
+        let matched = super::scan_with(
+            &[
+                c"1,2,3,4,5".as_ptr() as u64,
+                c"%d,%d,%d,%d,%d".as_ptr() as u64,
+                std::ptr::addr_of_mut!(values[0]) as u64,
+                std::ptr::addr_of_mut!(values[1]) as u64,
+                std::ptr::addr_of_mut!(values[2]) as u64,
+                std::ptr::addr_of_mut!(values[3]) as u64,
+            ],
+            false,
+            &mut || stacked.next(),
+        );
+        assert_eq!(matched, 5);
+        assert_eq!(values, [1, 2, 3, 4, 5]);
     }
 
     /// A suppressed conversion consumes input and assigns nothing.
