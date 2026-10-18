@@ -392,6 +392,81 @@ fn is_memory_inert(opcode: u8, body_dwords: usize) -> bool {
     ) || (opcode == measured::EVENT_WRITE && body_dwords == 1)
 }
 
+/// `INDIRECT_BUFFER` (Mesa `sid.h:97`): run another buffer's commands, then return - or, chained,
+/// run them instead of the rest of this one.
+const INDIRECT_BUFFER: u8 = 0x3F;
+/// `IB_CONTROL` (Mesa `registers/pkt3.json:273-279`): the buffer's size in dwords (19:0), whether
+/// it is a chain (20), and whether the packet is valid (23).
+const IB_SIZE_MASK: u32 = 0xF_FFFF;
+const IB_CHAIN: u32 = 1 << 20;
+const IB_VALID: u32 = 1 << 23;
+/// How deep buffers calling buffers are followed: a cycle is cut there rather than followed.
+const MAX_INDIRECT_DEPTH: u32 = 8;
+
+/// `stream` with each valid `INDIRECT_BUFFER` in it replaced by the commands of the buffer it names,
+/// read through `read` and expanded in turn: a call's where it stands, the stream going on after
+/// it; a chain's in place of the rest, which never runs (Mesa `ac_parse_ib.c:519-533`). A packet
+/// whose buffer cannot be read, one not marked valid, and a stream whose walk is not trusted are
+/// left as they are.
+#[must_use]
+pub fn expand_indirect_buffers(
+    stream: &[u8],
+    read: &dyn Fn(u64, usize) -> Option<Vec<u8>>,
+) -> Vec<u8> {
+    expand_at_depth(stream, read, 0)
+}
+
+/// [`expand_indirect_buffers`] at `depth` buffers in.
+fn expand_at_depth(
+    stream: &[u8],
+    read: &dyn Fn(u64, usize) -> Option<Vec<u8>>,
+    depth: u32,
+) -> Vec<u8> {
+    let walked = packet::walk(stream);
+    if depth >= MAX_INDIRECT_DEPTH || !walked.is_trustworthy() {
+        return stream.to_vec();
+    }
+    let mut expanded = Vec::with_capacity(stream.len());
+    let mut copied = 0;
+    for packet in &walked.packets {
+        if packet.kind
+            != (PacketKind::Command {
+                opcode: INDIRECT_BUFFER,
+            })
+        {
+            continue;
+        }
+        let start = packet.body_offset() as usize;
+        let Some(&[low, high, control]) = stream
+            .get(start..start + packet.body_length() as usize)
+            .map(|body| {
+                body.chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect::<Vec<_>>()
+            })
+            .as_deref()
+        else {
+            continue;
+        };
+        if control & IB_VALID == 0 {
+            continue;
+        }
+        let length = (control & IB_SIZE_MASK) as usize * 4;
+        let Some(target) = read(address(low, high), length) else {
+            continue;
+        };
+        let at = packet.offset as usize;
+        expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
+        expanded.extend(expand_at_depth(&target, read, depth + 1));
+        copied = at + packet.length as usize;
+        if control & IB_CHAIN != 0 {
+            return expanded;
+        }
+    }
+    expanded.extend_from_slice(stream.get(copied..).unwrap_or_default());
+    expanded
+}
+
 /// Carries out a stream's command-processor memory work, in order, stopping at the first packet it
 /// cannot carry out exactly.
 pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
@@ -1485,6 +1560,66 @@ mod tests {
             Some("copied there by a DMA_DATA from 0x8808")
         );
         assert_eq!(super::dma_landed_at(copied + 16), None, "past its end");
+    }
+
+    /// `INDIRECT_BUFFER` (`IB_SIZE` 19:0 in dwords, `CHAIN` 20, `VALID` 23, Mesa
+    /// `registers/pkt3.json:273-279`), as `ac_emit_cp_indirect_buffer` builds it.
+    fn indirect(target: u64, dwords: u32, chain: bool) -> Vec<u32> {
+        vec![
+            command_header(0x3F, 3),
+            target as u32,
+            (target >> 32) as u32,
+            dwords | u32::from(chain) << 20 | 1 << 23,
+        ]
+    }
+
+    /// A called buffer runs where the call stands and the stream goes on after it; a chained one
+    /// runs instead of the rest, which never runs (Mesa `ac_parse_ib.c:519-533`).
+    #[test]
+    fn an_indirect_buffer_runs_where_it_is_called_and_a_chain_ends_its_caller() {
+        let target = fill(0x3000, 0x2222_2222, 4);
+        let target_bytes = bytes(&target);
+        let dwords = u32::try_from(target.len()).expect("small");
+        let read = |at: u64, length: usize| {
+            (at == 0x9000 && length == target_bytes.len()).then(|| target_bytes.clone())
+        };
+
+        let mut called = fill(0x2000, 0x1111_1111, 4);
+        called.extend(indirect(0x9000, dwords, false));
+        called.extend(fill(0x4000, 0x4444_4444, 4));
+        let expanded = super::expand_indirect_buffers(&bytes(&called), &read);
+        let mut memory = Fake::default();
+        let done = execute(&expanded, &mut memory);
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(
+            [
+                memory.word(0x2000),
+                memory.word(0x3000),
+                memory.word(0x4000)
+            ],
+            [0x1111_1111, 0x2222_2222, 0x4444_4444],
+            "before, inside and after the call"
+        );
+
+        let mut chained = fill(0x2000, 0x1111_1111, 4);
+        chained.extend(indirect(0x9000, dwords, true));
+        chained.extend(fill(0x4000, 0x4444_4444, 4));
+        let expanded = super::expand_indirect_buffers(&bytes(&chained), &read);
+        let mut memory = Fake::default();
+        execute(&expanded, &mut memory);
+        assert_eq!(memory.word(0x3000), 0x2222_2222, "the chained buffer runs");
+        assert_eq!(
+            memory.word(0x4000),
+            0,
+            "and the rest of its caller does not"
+        );
+
+        // A target that cannot be read leaves the stream as it was.
+        let unreadable = bytes(&indirect(0xdead_0000, dwords, false));
+        assert_eq!(
+            super::expand_indirect_buffers(&unreadable, &read),
+            unreadable
+        );
     }
 
     /// A held destination (`DAIC`) takes every dword at the one address, so the last stays: a fill

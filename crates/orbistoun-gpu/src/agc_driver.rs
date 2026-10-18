@@ -5115,6 +5115,11 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
         return SUBMIT_OK;
     };
+    // The buffers it calls or chains to are part of what it carries out, so everything after this
+    // - preparation, the command processor, the queued writes - sees their commands in place.
+    let bytes = cp::expand_indirect_buffers(&bytes, &|at, length| {
+        memory.read(at, length).map(<[u8]>::to_vec)
+    });
     // Asynchronously, a preparation that read what a queued submission writes is made again once
     // the queue has drained, the live pipeline free meanwhile for the command processor (D876);
     // one that read only what a queued submission draws is drawn again as it is carried out (D882).
