@@ -87,10 +87,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1329 / 1230 |
+| Functions declared / implemented | 1337 / 1238 |
 | Declared in a library that serves nothing | 14 across 3 libraries - names written down, no implementation |
-| Recorded behaviours | 1252 - 428 published, 328 measured, 123 guest-observed, 360 assumed |
-| Open questions a hardware probe could settle | 939 |
+| Recorded behaviours | 1260 - 428 published, 328 measured, 123 guest-observed, 368 assumed |
+| Open questions a hardware probe could settle | 947 |
 | Symbol database | 30205 names - 732 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
