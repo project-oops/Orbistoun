@@ -96,12 +96,17 @@ struct BoundTexture {
     sampler: Option<u32>,
     /// Which of the module's textures this is, and where its descriptor came from.
     source: TextureSource,
-    /// Set when a scalar write lands inside either group.
+    /// Set when a scalar write lands inside the image group.
     ///
     /// Register numbers alone would let a shader load a second descriptor into the same registers
     /// and sample two textures while naming one; a write into the group makes the next sample
     /// refuse.
     disturbed: bool,
+    /// Set when a scalar write lands inside the sampler group: the next sample refuses unless the
+    /// same table load reached its sampler as reached the first one's, [`Self::sampler_load`].
+    sampler_disturbed: bool,
+    /// The table load that filled the sampler registers for the first sample, where it is known.
+    sampler_load: Option<(Option<TableBase>, u32)>,
 }
 
 /// Words of local data share a translated module provides when its stage declares none
@@ -2172,9 +2177,14 @@ pub struct Wavefront<'a> {
     /// Empty for a module that does not sample, so its pipeline layout carries no image binding.
     textures: Vec<BoundTexture>,
     /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`]:
-    /// the image descriptors', the sampler descriptors', and the image load reaching each image
-    /// instruction.
-    descriptor_loads: (DescriptorLoads, DescriptorLoads, ReachingLoads),
+    /// the image descriptors', the sampler descriptors', and the image load and the sampler load
+    /// reaching each image instruction.
+    descriptor_loads: (
+        DescriptorLoads,
+        DescriptorLoads,
+        ReachingLoads,
+        ReachingLoads,
+    ),
     /// Where a compute module's image descriptors come from, and what it did to their registers.
     images: ImageTrace,
     bool_type: Id,
@@ -2337,6 +2347,23 @@ impl Wavefront<'_> {
                 ..bound.source
             })
             .collect()
+    }
+
+    /// Settles each texture's sampler before an access whose sampler registers `reaching` filled:
+    /// a sampler reloaded from where the first access's came from is the same sampler, and any
+    /// other write into its registers makes the texture another one (D690).
+    fn settle_samplers(&mut self, reaching: Option<(Option<TableBase>, u32)>) {
+        for bound in &mut self.textures {
+            if bound.sampler_disturbed
+                && bound.sampler_load.is_some()
+                && bound.sampler_load == reaching
+            {
+                bound.sampler_disturbed = false;
+            }
+            if bound.sampler_disturbed {
+                bound.disturbed = true;
+            }
+        }
     }
 
     /// The one table a sampler descriptor starting at scalar register `sampler` was loaded from.
@@ -5206,8 +5233,11 @@ impl Model for Wavefront<'_> {
             let sampler_disturbed = bound
                 .sampler
                 .is_some_and(|first| within(first, model::SAMPLER_DESCRIPTOR_REGISTERS));
-            if within(bound.descriptor, model::IMAGE_DESCRIPTOR_REGISTERS) || sampler_disturbed {
+            if within(bound.descriptor, model::IMAGE_DESCRIPTOR_REGISTERS) {
                 bound.disturbed = true;
+            }
+            if sampler_disturbed {
+                bound.sampler_disturbed = true;
             }
         }
         Self::store_scalar(self, register, value);
@@ -5386,6 +5416,10 @@ impl Model for Wavefront<'_> {
         // The load that filled the descriptor registers for this sample, where it is known: a shader
         // that reuses the registers for a second texture names a different one there.
         let reaching = self.descriptor_loads.2.get(&at).copied();
+        // A sampler reloaded from where the first sample's came from is the same sampler: only a
+        // load from elsewhere, or one not traced, makes it another.
+        let sampler_reaching = self.descriptor_loads.3.get(&at).copied();
+        self.settle_samplers(sampler_reaching);
         let loaded_by = |bound: &BoundTexture| {
             reaching.is_some_and(|(table, offset)| {
                 table == Some(bound.source.table) && bound.source.table_offset == Some(offset)
@@ -5485,6 +5519,8 @@ impl Model for Wavefront<'_> {
             sampler,
             source,
             disturbed: false,
+            sampler_disturbed: false,
+            sampler_load: sampler.and(sampler_reaching),
         });
         Ok(texture)
     }
@@ -6062,13 +6098,19 @@ fn descriptor_table_loads(
     decode: &Decode,
     encodings: &EncodingTable,
     first_register: u32,
-) -> (DescriptorLoads, DescriptorLoads, ReachingLoads) {
+) -> (
+    DescriptorLoads,
+    DescriptorLoads,
+    ReachingLoads,
+    ReachingLoads,
+) {
     let mut loads: DescriptorLoads = BTreeMap::new();
     let mut sampler_loads: DescriptorLoads = BTreeMap::new();
-    // The image descriptor load that last filled each register group on every path here, and the
-    // one reaching each image instruction.
+    // The descriptor load that last filled each register group on every path here, and the image
+    // and sampler loads reaching each image instruction.
     let mut live = LiveLoads::new(decode, encodings);
     let mut reaching: ReachingLoads = BTreeMap::new();
+    let mut sampler_reaching: ReachingLoads = BTreeMap::new();
     // What each scalar register holds, in program order: a user-data word from where the hardware
     // loads the stage's, or a constant a move put there. Anything else written is untraced.
     let mut held: Vec<Option<TableWord>> = vec![None; model::SCALAR_REGISTERS as usize];
@@ -6096,11 +6138,7 @@ fn descriptor_table_loads(
             .mnemonic_for(family, instruction.opcode)
             .unwrap_or("");
         live.leave(instruction, name);
-        if let Some(load) =
-            image_descriptor(instruction, name).and_then(|first| live.loads.get(&first))
-        {
-            reaching.insert(instruction.offset, *load);
-        }
+        live.reach(instruction, name, (&mut reaching, &mut sampler_reaching));
         match (name, instruction.operands.as_slice()) {
             ("s_mov_b32", [Operand::Scalar(destination), source]) => {
                 forget_live(&mut live.loads, *destination, 1);
@@ -6130,7 +6168,10 @@ fn descriptor_table_loads(
                 };
                 let width = scalar_load_width(name);
                 forget_live(&mut live.loads, *destination, width);
-                let image = matches!(name, "s_load_dwordx8" | "s_load_dwordx16");
+                let width_of_one = match name {
+                    "s_load_dwordx4" => model::SAMPLER_DESCRIPTOR_REGISTERS,
+                    _ => model::IMAGE_DESCRIPTOR_REGISTERS,
+                };
                 if let Some(into) = into
                     && let Ok(offset) = u32::try_from(offset)
                 {
@@ -6142,9 +6183,7 @@ fn descriptor_table_loads(
                         let load = (table, offset + descriptor * 32);
                         let group = u32::from(*destination) + descriptor * 8;
                         into.entry(group).or_default().insert(load);
-                        if image {
-                            live.loads.insert(group, load);
-                        }
+                        live.loads.insert(group, (load, width_of_one));
                     }
                 }
                 forget(&mut held, *destination, width as usize);
@@ -6170,7 +6209,7 @@ fn descriptor_table_loads(
             _ => {}
         }
     }
-    (loads, sampler_loads, reaching)
+    (loads, sampler_loads, reaching, sampler_reaching)
 }
 
 /// The first register of the image descriptor an image instruction names: its first scalar
@@ -6186,6 +6225,22 @@ fn image_descriptor(instruction: &Instruction, name: &str) -> Option<u32> {
             Operand::Scalar(first) => Some(u32::from(*first)),
             _ => None,
         })
+}
+
+/// The first register of the sampler descriptor an image instruction names: its second scalar
+/// operand. `None` for a fetch, which names none, and for any other instruction.
+fn image_sampler(instruction: &Instruction, name: &str) -> Option<u32> {
+    if !name.starts_with("image_") {
+        return None;
+    }
+    instruction
+        .operands
+        .iter()
+        .filter_map(|operand| match operand {
+            Operand::Scalar(first) => Some(u32::from(*first)),
+            _ => None,
+        })
+        .nth(1)
 }
 
 /// How many registers a scalar load names in its mnemonic fills.
@@ -6211,7 +6266,7 @@ fn moved_word(held: &[Option<TableWord>], source: &Operand) -> Option<TableWord>
     }
 }
 
-/// The image descriptor loads that fill each register group on every path to the instruction being
+/// The descriptor loads that fill each register group on every path to the instruction being
 /// traced, carried in program order: a branch target keeps what every path arriving there agrees
 /// on - the forward branches to it and the fall-through into it - and a loop's head, which a later
 /// branch reaches with what is not yet known, keeps nothing.
@@ -6284,10 +6339,37 @@ impl LiveLoads {
         }
         self.falls_through = !matches!(name, "s_branch" | "s_endpgm");
     }
+
+    /// Records the image and sampler loads reaching `instruction`, where it is an image
+    /// instruction and a load of the matching width last filled the group it names.
+    fn reach(
+        &self,
+        instruction: &Instruction,
+        name: &str,
+        (images, samplers): (&mut ReachingLoads, &mut ReachingLoads),
+    ) {
+        let filled = |first: u32, width: u32| {
+            self.loads
+                .get(&first)
+                .filter(|(_, filled)| *filled == width)
+                .map(|(load, _)| *load)
+        };
+        if let Some(load) = image_descriptor(instruction, name)
+            .and_then(|first| filled(first, model::IMAGE_DESCRIPTOR_REGISTERS))
+        {
+            images.insert(instruction.offset, load);
+        }
+        if let Some(load) = image_sampler(instruction, name)
+            .and_then(|first| filled(first, model::SAMPLER_DESCRIPTOR_REGISTERS))
+        {
+            samplers.insert(instruction.offset, load);
+        }
+    }
 }
 
-/// The image descriptor load filling each register group, by its first register.
-type Loads = BTreeMap<u32, (Option<TableBase>, u32)>;
+/// The descriptor load filling each register group, by its first register, with how many registers
+/// it filled: eight for an image descriptor, four for a sampler's.
+type Loads = BTreeMap<u32, ((Option<TableBase>, u32), u32)>;
 
 /// Whether `instruction` is a branch.
 fn is_branch(instruction: &Instruction, encodings: &EncodingTable) -> bool {
@@ -6298,11 +6380,10 @@ fn is_branch(instruction: &Instruction, encodings: &EncodingTable) -> bool {
         .is_some_and(|name| name == "s_branch" || name.starts_with("s_cbranch_"))
 }
 
-/// Forgets the image descriptor loads whose register groups overlap `count` registers from
-/// `register`.
-fn forget_live(live: &mut BTreeMap<u32, (Option<TableBase>, u32)>, register: u16, count: u32) {
+/// Forgets the descriptor loads whose register groups overlap `count` registers from `register`.
+fn forget_live(live: &mut Loads, register: u16, count: u32) {
     let (first, end) = (u32::from(register), u32::from(register) + count);
-    live.retain(|group, _| group + model::IMAGE_DESCRIPTOR_REGISTERS <= first || *group >= end);
+    live.retain(|group, (_, width)| group + *width <= first || *group >= end);
 }
 
 /// The image descriptor load reaching each image instruction, by the instruction's offset: the one

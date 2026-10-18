@@ -1438,6 +1438,62 @@ fn a_descriptor_rewritten_between_samples_is_refused() {
     );
 }
 
+/// A sampler reloaded from the offset it was first loaded from is the same sampler, so both samples
+/// read one texture: Grand Theft Auto V's scene pixel shader loads `s[32:35]` from `+0x20` before
+/// its first sample and again inside the loop that samples a second time (D690).
+#[test]
+fn a_sampler_reloaded_from_its_own_offset_is_the_same_texture() {
+    use orbistoun_translate::wavefront::{MeshPrimitive, UserData};
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load = |name: &str, dst: u32, offset: u32| {
+        let (family, opcode) = encodings.find_by_name(name).expect("the target has it");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    // The image descriptor is the stage's own user data, loaded by nothing, as GTA V's is.
+    let words = image_sample_words(39);
+    for word in s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20)
+        .into_iter()
+        .chain(words)
+        .chain(s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20))
+        .chain(words)
+        .chain([0xBF81_0000])
+    {
+        bytes.extend(word.to_le_bytes());
+    }
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("a sampler reloaded from its own offset is the same sampler");
+    assert_eq!(translated.textures.len(), 1, "one texture, sampled twice");
+    assert_eq!(translated.textures[0].sampler_offset, Some(0x20));
+}
+
 /// A sampler loaded from the descriptor table is reported with its offset, beside the image's, so a
 /// pipeline reads the guest's own wrap and filter modes: here the image at 0x00 and the sampler at
 /// 0x20 of the table at the stage's first two user-data words, the layout the SDK's GL layer packs
