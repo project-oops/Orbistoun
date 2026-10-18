@@ -34,9 +34,6 @@ guest_module! {
         "sceAgcAcbEventWriteGetSize" => 6,
         "sceAgcAcbJumpGetSize" => 6,
         "sceAgcDcbJumpGetSize" => 6,
-        "sceAgcDcbJump" => 6,
-        "sceAgcDcbRewind" => 6,
-        "sceAgcRewindPatchSetRewindState" => 6,
         "sceAgcCbBranchGetSize" => 6,
         "sceAgcCbQueueEndOfPipeActionGetSize" => 6,
         "sceAgcDcbCondExecGetSize" => 6,
@@ -1254,63 +1251,6 @@ fn cb_dispatch(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcDcbJump(dcb, chain, policy, target, dwords)`: an `INDIRECT_BUFFER` to `target`,
-/// `dwords` long, as the console writes it (obSCEne `report-20261018-gt-census.log` 2843-2851):
-/// header `0xc0023f00`, the target's halves, then the size, `chain` in bit 20, `policy` in bits
-/// 29:28, and `0x0f20_0000` set besides. A jump made before its target is known is written with a
-/// zero target and size, and filled in before the `REWIND` ahead of it is released.
-fn dcb_jump(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let target = args[3];
-    let control = (args[4] as u32 & 0xF_FFFF)
-        | (args[1] as u32 & 1) << 20
-        | (args[2] as u32 & 3) << 28
-        | 0x0f20_0000;
-    dcb_append(
-        args[0],
-        &[
-            packet::build::command_header(0x3F, 3),
-            target as u32,
-            (target >> 32) as u32,
-            control,
-        ],
-    )
-}
-
-/// `sceAgcDcbRewind(dcb, ..)`: a `REWIND` not yet released, `0xc0005900 0x00000000`, as the console
-/// writes it with its arguments zero (obSCEne `report-20261018-gt-census.log` 2864-2866); it
-/// answers the packet's address, which the title hands to
-/// [`rewind_patch_set_rewind_state`]. PPSA04263 makes it with its second argument zero; the
-/// census's sentinel arm sets the valid bit, through which argument is not measured.
-fn dcb_rewind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &[packet::build::command_header(0x59, 1), 0])
-}
-
-/// `sceAgcRewindPatchSetRewindState(rewind, state)`: sets the valid bit of the `REWIND` at `rewind`
-/// to `state`, as PPSA04263 calls it with `state` 1 once it has filled in the jump after it. A
-/// `REWIND` released carries out what follows it ([`crate::agc_driver::release_rewind`]).
-/// Answers 0; the library could not be bound to measure it (census `bound 0`).
-fn rewind_patch_set_rewind_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (rewind, released) = (args[0], args[1] & 1 != 0);
-    let body = rewind.wrapping_add(4);
-    // SAFETY: the address the title's own REWIND builder answered, its body dword four bytes in.
-    let Some(word) = (unsafe { guest::read_u32(body) }) else {
-        return BAD_ARGUMENT;
-    };
-    let word = if released {
-        word | crate::cp::REWIND_RELEASED
-    } else {
-        word & !crate::cp::REWIND_RELEASED
-    };
-    // SAFETY: as above; the dword just read.
-    if !unsafe { guest::write_u32(body, word) } {
-        return BAD_ARGUMENT;
-    }
-    if released {
-        crate::agc_driver::release_rewind(rewind.wrapping_add(8));
-    }
-    0
-}
-
 /// `sceAgcDcbDispatchIndirect(dcb, ...)`. Header `0xc0011600`, 12 bytes.
 fn dcb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
@@ -1732,12 +1672,6 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAgcAcbEventWriteGetSize", acb_event_write_get_size),
     ("sceAgcAcbJumpGetSize", acb_jump_get_size),
     ("sceAgcDcbJumpGetSize", dcb_jump_get_size),
-    ("sceAgcDcbJump", dcb_jump),
-    ("sceAgcDcbRewind", dcb_rewind),
-    (
-        "sceAgcRewindPatchSetRewindState",
-        rewind_patch_set_rewind_state,
-    ),
     ("sceAgcCbBranchGetSize", cb_branch_get_size),
     (
         "sceAgcCbQueueEndOfPipeActionGetSize",
