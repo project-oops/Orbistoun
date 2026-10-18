@@ -195,6 +195,11 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
     "v_cmp_ngt_f32_e32",
+    "v_cmp_nlt_f32_e32",
+    "v_cmp_lg_f32_e32",
+    "v_cmp_nge_f32_e32",
+    "v_cmp_nlg_f32_e32",
+    "v_cmp_nle_f32_e32",
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_lt_i32_e32",
@@ -212,6 +217,12 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_gt_f32_e64",
     "v_cmp_ge_f32_e64",
     "v_cmp_neq_f32_e64",
+    "v_cmp_nlt_f32_e64",
+    "v_cmp_lg_f32_e64",
+    "v_cmp_nge_f32_e64",
+    "v_cmp_nlg_f32_e64",
+    "v_cmp_nle_f32_e64",
+    "v_cmp_ngt_f32_e64",
     "v_cmp_ne_i32_e64",
     "v_cmp_lt_i32_e64",
     "v_cmp_eq_i32_e64",
@@ -252,6 +263,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_mul_lo_u32",
     "v_mul_hi_u32",
     "v_and_or_b32",
+    "v_or3_b32",
     "v_max3_f32",
     "v_min3_f32",
     "v_med3_f32",
@@ -2504,10 +2516,11 @@ fn further_position<M: Model + ?Sized>(
 /// - A module with no colour output: a compute dispatch has nowhere to export to
 ///   ([`Model::colour_output`]).
 /// - A target past `mrt7` that is no other kind of export; see [`MRT0`].
-/// - A compressed export that enables fewer than all four channels. The mask and the compressed
-///   bit are read from the instruction's first word. A compressed export is unpacked from its two
-///   half-packed sources. An uncompressed one that enables some channels stores those, and keeps
-///   the others as the output held them: the colour target takes only the channels its format
+///
+/// The mask and the compressed bit are read from the instruction's first word. A compressed export
+/// is unpacked from its two half-packed sources, red and green from the first and blue and alpha
+/// from the second. An export, compressed or not, that enables some channels stores those, and
+/// keeps the others as the output held them: the colour target takes only the channels its format
 ///   holds, and a draw that writes one the shader did not export is refused where the draw is
 ///   prepared. With `vm` set a pixel whose lane is inactive is discarded ([`EXPORT_VALID_MASK`]);
 ///   `done` changes nothing a single-export translation does.
@@ -2571,17 +2584,12 @@ fn export<M: Model + ?Sized>(
     let integer = u32::try_from(*target).is_ok_and(|target| model.colour_is_integer(target));
 
     // The channels written (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No channel is an export that
-    // writes nothing, such as one raised only to end the wave, so nothing is stored. A compressed
-    // export's channels come in pairs from its two sources, so only all of them is translated.
+    // writes nothing, such as one raised only to end the wave, so nothing is stored. Each bit is
+    // one channel in a compressed export too: Grand Theft Auto V's enables red and green alone,
+    // the halves of its first source.
     let enabled = instruction.word & EXPORT_ENABLE_MASK;
     if enabled == 0 {
         return Ok(());
-    }
-    if enabled != EXPORT_ENABLE_MASK && instruction.word & EXPORT_COMPRESSED != 0 {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a compressed colour export that enables fewer than all four channels is not translated",
-        });
     }
 
     discard_inactive(model, instruction);
@@ -2925,8 +2933,8 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_lshl_or_b32" => shift_or(model, instruction),
         _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
-        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_mul_hi_u32"
-        | "v_msad_u8" => integer_long_form(model, instruction, name),
+        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_or3_b32" | "v_mul_lo_u32"
+        | "v_mul_hi_u32" | "v_msad_u8" => integer_long_form(model, instruction, name),
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
@@ -3427,25 +3435,32 @@ fn scalar_add_with_carry<M: Model + ?Sized>(
     (result, Some(model.either(first, second)))
 }
 
-/// `s_brev_b32`: a scalar register's bits in reverse order. The condition code is untouched.
+/// `s_brev_b32`: a scalar's bits in reverse order, into a scalar register or a lane mask's half used
+/// as one (`s_brev_b32 vcc_hi, -3`). The condition code is untouched.
 fn scalar_bit_reverse<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let (destination, source) = two_operands(instruction)?;
-    let Operand::Scalar(register) = destination else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "s_brev_b32 destination is not a scalar register",
-        });
-    };
-    let register = u32::from(*register);
     let value = model.read_source(instruction, source, 0)?;
     let u32_type = model.u32_type();
     let b = model.builder();
     let reversed = b.id();
     b.function(op::BIT_REVERSE, &[u32_type.0, reversed.0, value.0]);
-    model.write_scalar(register, reversed);
+    if let Operand::Scalar(register) = destination {
+        model.write_scalar(u32::from(*register), reversed);
+    } else if let Some(mask) = mask_destination(destination) {
+        write_mask_low(model, mask, reversed)?;
+    } else if let Operand::Named(name) = destination
+        && let Some(mask) = lane_mask_high_name(name)
+    {
+        write_mask_high(model, mask, reversed)?;
+    } else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_brev_b32 destination is neither a scalar register nor a lane mask's half",
+        });
+    }
     model.count();
     Ok(())
 }
@@ -7223,6 +7238,7 @@ pub const SDWA_FLOAT_UNARY: &[&str] = &[
     "v_log_f32_e32",
     "v_rsq_f32_e32",
     "v_rndne_f32_e32",
+    "v_sqrt_f32_e32",
 ];
 
 /// The short-form carry arithmetic translated in its SDWA form over whole registers: there the
@@ -7246,6 +7262,11 @@ pub const SDWA_COMPARE: &[&str] = &[
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
     "v_cmp_ngt_f32_e32",
+    "v_cmp_nlt_f32_e32",
+    "v_cmp_lg_f32_e32",
+    "v_cmp_nge_f32_e32",
+    "v_cmp_nlg_f32_e32",
+    "v_cmp_nle_f32_e32",
     // The forms whose answer narrows the execution mask.
     "v_cmpx_lt_f32_e32",
     "v_cmpx_eq_f32_e32",
@@ -7913,8 +7934,9 @@ fn sdwa_place<M: Model + ?Sized>(
 
 /// An `SDWA_INTEGER` instruction in its SDWA form (`aco_assembler.cpp:1183-1225` for the fields):
 /// each source's selected part, the operation over them, and the result placed into the
-/// destination's selected part. Clamp, output modifier, negate and absolute value - float
-/// modifiers - are refused.
+/// destination's selected part. Clamp and output modifier - float modifiers - are refused, and so
+/// are negate and absolute value except on a select, where they are the sign bit of the word it
+/// picks, cleared and then flipped, as on any float source.
 fn sdwa_integer<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7923,7 +7945,14 @@ fn sdwa_integer<M: Model + ?Sized>(
 ) -> Result<(), TranslateError> {
     // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
     const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
-    if word & FLOAT_MODIFIERS != 0 {
+    const SOURCE_MODIFIERS: u32 = (0x3 << 20) | (0x3 << 28);
+    let select = name == "v_cndmask_b32_e32";
+    let refused = if select {
+        FLOAT_MODIFIERS & !SOURCE_MODIFIERS
+    } else {
+        FLOAT_MODIFIERS
+    };
+    if word & refused != 0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "an SDWA float modifier on integer arithmetic, which is not translated",
@@ -7963,10 +7992,12 @@ fn sdwa_integer<M: Model + ?Sized>(
     for lane in running_lanes(model) {
         let a = model.read_source(instruction, &first, lane)?;
         let a = sdwa_select(model, instruction, a, fields.select[0])?;
+        let a = sign_modifiers(model, a, (word >> 20) & 0x3);
         let b = match &second {
             Some(second) => {
                 let b = model.read_source(instruction, second, lane)?;
-                sdwa_select(model, instruction, b, fields.select[1])?
+                let b = sdwa_select(model, instruction, b, fields.select[1])?;
+                sign_modifiers(model, b, (word >> 28) & 0x3)
             }
             None => a,
         };
@@ -7988,6 +8019,23 @@ fn sdwa_integer<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// A source's negate (bit 0 of `flags`) and absolute value (bit 1) as operations on its sign bit:
+/// cleared for the absolute value, then flipped for the negate. Nothing when neither is set.
+fn sign_modifiers<M: Model + ?Sized>(model: &mut M, value: Id, flags: u32) -> Id {
+    let value = if flags & 0b10 == 0 {
+        value
+    } else {
+        let magnitude = model.constant(0x7fff_ffff);
+        model.binary(op::BITWISE_AND, value, magnitude)
+    };
+    if flags & 0b01 == 0 {
+        value
+    } else {
+        let sign = model.constant(0x8000_0000);
+        model.binary(op::BITWISE_XOR, value, sign)
+    }
 }
 
 /// The operation of an `SDWA_INTEGER` instruction other than a select, over its two sources'
@@ -8874,6 +8922,7 @@ fn multiply_add_constant<M: Model + ?Sized>(
 /// - `v_mad_i32_i24 d, a, b, c`: the sign-extended low 24 bits multiplied, plus `c`.
 /// - `v_mul_lo_u32 d, a, b`: the product's low 32 bits.
 /// - `v_and_or_b32 d, a, b, c`: `(a & b) | c`.
+/// - `v_or3_b32 d, a, b, c`: `a | b | c`.
 /// - `v_msad_u8 d, a, b, c`: `c` plus, for each byte of `b` that is not zero, its absolute
 ///   difference from `a`'s - NIR's `msad_4x8` (`nir_constant_expressions.py:413`) with its
 ///   reference as the second source, as ACO emits it (`aco_select_nir_alu.cpp:3303`).
@@ -8949,6 +8998,10 @@ fn integer_long_form<M: Model + ?Sized>(
                 let both = model.binary(op::BITWISE_AND, a, b);
                 model.binary(op::BITWISE_OR, both, c)
             }
+            "v_or3_b32" => {
+                let either = model.binary(op::BITWISE_OR, a, b);
+                model.binary(op::BITWISE_OR, either, c)
+            }
             // The hardware's second source is the reference whose zero bytes are skipped: ACO
             // hands NIR's `msad_4x8` reference over as `b` (`swap_srcs`,
             // aco_select_nir_alu.cpp:3303), and radeonsi's culling sums packed counts as
@@ -8999,12 +9052,8 @@ fn float_min_max_of_three<M: Model + ?Sized>(
     name: &str,
 ) -> Result<(), TranslateError> {
     let modifiers = Modifiers::read_allowing_clamp(instruction, false)?;
-    if output_scale(modifiers.output_multiplier).is_some() {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a three-way min/max scales its result by an output multiplier, which is not translated",
-        });
-    }
+    // The output multiplier, before the clamp, as the long form applies it.
+    let scale = output_scale(modifiers.output_multiplier);
     let clamp = if modifiers.clamp {
         let Some(nan_to_zero) = model.dx10_clamp() else {
             return Err(TranslateError::Unsupported {
@@ -9045,6 +9094,13 @@ fn float_min_max_of_three<M: Model + ?Sized>(
         } else {
             let pair = model.f32_ext_binary(extended, values[0], values[1]);
             model.f32_ext_binary(extended, pair, values[2])
+        };
+        let value = match scale {
+            Some(bits) => {
+                let factor = model.constant(bits);
+                model.f32_binary(op::FMUL, value, factor)
+            }
+            None => value,
         };
         let value = match clamp {
             Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),

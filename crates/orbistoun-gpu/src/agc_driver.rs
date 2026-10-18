@@ -5607,6 +5607,7 @@ fn run_submission(bytes: &[u8], submission: Submission) {
                 bytes: bytes.to_vec(),
                 submission,
                 from: 0,
+                stopped: None,
             });
         resume_aside();
         return;
@@ -5670,6 +5671,8 @@ struct Aside {
     bytes: Vec<u8>,
     submission: Submission,
     from: u32,
+    /// Where it stopped, once it has been carried out as far as a wait.
+    stopped: Option<cp::Stopped>,
 }
 
 /// The asynchronous compute streams stepped aside, oldest first: the first waits, and the rest wait
@@ -5678,6 +5681,19 @@ fn aside() -> &'static Mutex<std::collections::VecDeque<Aside>> {
     static ASIDE: Mutex<std::collections::VecDeque<Aside>> =
         Mutex::new(std::collections::VecDeque::new());
     &ASIDE
+}
+
+/// The asynchronous compute streams stepped aside as the run stands, oldest first, each as where it
+/// stopped - `None` for one waiting behind the first and not yet carried out (D891): a compute stream
+/// left waiting holds back everything its ring was handed after it.
+#[must_use]
+pub fn stepped_aside() -> Vec<Option<cp::Stopped>> {
+    aside()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|aside| aside.stopped)
+        .collect()
 }
 
 /// Carries the compute streams stepped aside on as far as they go, each in turn from where it
@@ -5690,6 +5706,7 @@ fn resume_aside() -> bool {
             bytes,
             submission,
             from,
+            ..
         }) = aside()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5710,6 +5727,7 @@ fn resume_aside() -> bool {
                     bytes,
                     submission,
                     from: offset,
+                    stopped: Some(executed.stopped),
                 });
             return moved;
         }

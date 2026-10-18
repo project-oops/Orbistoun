@@ -2635,6 +2635,34 @@ fn log_execution() {
     {
         report_unsatisfied_wait(address);
     }
+    report_stepped_aside();
+}
+
+/// Says which asynchronous compute streams the run left stepped aside (D891), and what the first
+/// waits on: what its ring was handed after it never ran.
+fn report_stepped_aside() {
+    let aside = orbistoun_gpu::agc_driver::stepped_aside();
+    let Some(&first) = aside.first() else {
+        return;
+    };
+    let waits = match first {
+        Some(orbistoun_gpu::cp::Stopped::WaitNeverSatisfied {
+            offset,
+            address,
+            reference,
+            observed,
+        }) => format!(
+            "the first stopped at byte {offset:#x} waiting for {address:#x} to read {reference:#x}, and it reads {observed:#x}"
+        ),
+        other => format!("the first stopped at {other:?}"),
+    };
+    tracing::info!(
+        "{} asynchronous compute stream(s) were left stepped aside at a wait; {waits}",
+        aside.len()
+    );
+    if let Some(orbistoun_gpu::cp::Stopped::WaitNeverSatisfied { address, .. }) = first {
+        report_unsatisfied_wait(address);
+    }
 }
 
 /// Says what last filled the word a queue stopped waiting on, where something orbistoun tracks

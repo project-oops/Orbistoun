@@ -932,6 +932,21 @@ fn the_first_running_lane_is_read_after_an_unsigned_comparison() {
     assert_eq!(scalar(&registers, 4), 5, "through vcc_hi");
 }
 
+/// `s_brev_b32` may write a lane mask's half used as a scalar: Grand Theft Auto V's pixel shaders do
+/// `s_brev_b32 vcc_hi, -3` (word 0xbeeb0bc3). -3's bits reversed are 0xbfffffff.
+#[test]
+fn a_bit_reverse_into_vcc_hi_writes_the_mask_s_high_half() {
+    if !device_or_skip("a_bit_reverse_into_vcc_hi_writes_the_mask_s_high_half") {
+        return;
+    }
+    // -3 is inline constant 195; vcc_hi is scalar code 107, read back through s4.
+    let brev = sop1("s_brev_b32", 107, 195);
+    assert_eq!(brev, 0xbeeb_0bc3, "Grand Theft Auto V's word");
+    let program = [brev, sop1("s_mov_b32", 4, 107), s_endpgm()];
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 4), 0xbfff_ffff);
+}
+
 /// The sub-word loads read the byte or half at their address and widen it - zero-extended
 /// unsigned, sign-extended signed (AMD's published RDNA instruction set): from a word holding
 /// `0x80ff7f81` at 16, the bytes at 16, 17 and 19 and the half at 18. Grand Theft Auto V's compute
@@ -2712,6 +2727,36 @@ fn a_clamped_median_of_three_holds_to_the_unit_range() {
     assert_eq!(vector(&registers, 5), BITS_1);
     assert_eq!(vector(&registers, 6), 0);
     assert_eq!(vector(&registers, 7), 0x3F00_0000);
+}
+
+/// A three-way median scales its result by the output multiplier, as the long form does: Grand Theft
+/// Auto V's pixel shader runs `v_med3_f32 v73, 1.0, v73, 0 mul:2` (`d5570049 0a0292f2`). The
+/// median of (1.0, 0.25, 0) is 0.25, times two 0.5; of (1.0, 3.0, 0) 1.0, times two 2.0.
+#[test]
+fn a_scaled_median_of_three_doubles_its_result() {
+    const MUL_2: u32 = 1 << 27;
+    if !device_or_skip("a_scaled_median_of_three_doubles_its_result") {
+        return;
+    }
+    let scaled_median = |dst: u32, sources: [u32; 3]| {
+        let mut encoded = vop3("v_med3_f32", dst, sources, 0, 0);
+        encoded[1] |= MUL_2;
+        encoded
+    };
+    assert_eq!(
+        scaled_median(73, [F_1, vgpr_code(73), 0x80]),
+        [0xd557_0049, 0x0a02_92f2],
+        "Grand Theft Auto V's words"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0.25f32.to_bits()));
+    program.extend(v_mov_literal(1, 3.0f32.to_bits()));
+    program.extend(scaled_median(2, [F_1, vgpr_code(0), 0x80]));
+    program.extend(scaled_median(3, [F_1, vgpr_code(1), 0x80]));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0.5f32.to_bits());
+    assert_eq!(vector(&registers, 3), 2.0f32.to_bits());
 }
 
 /// The output multiplier scales a float result by two, four or a half, before the clamp: the RDNA
@@ -6292,6 +6337,59 @@ fn an_sdwa_select_picks_by_vcc() {
     );
 }
 
+/// An SDWA select takes its sources' negate and absolute value as sign-bit operations on the word
+/// it picks: Grand Theft Auto V's pixel shaders do `v_cndmask_b32_sdwa v9, v16, -v9, vcc` (words
+/// 0x021212f9 0x16060610). A set bit picks -v9, 2.0 to -2.0; a clear one picks v16 unchanged.
+#[test]
+fn an_sdwa_select_negates_the_source_it_picks() {
+    const NEGATE_SECOND: u32 = 1 << 28;
+    if !device_or_skip("an_sdwa_select_negates_the_source_it_picks") {
+        return;
+    }
+    let whole = Sdwa {
+        src0: 16,
+        src0_scalar: false,
+        src0_sel: SEL_DWORD,
+        src0_sext: false,
+        src1_sel: SEL_DWORD,
+        src1_sext: false,
+        dst_sel: SEL_DWORD,
+        dst_unused: 0,
+    };
+    let select = |dst: u32| {
+        let mut words = vop2_sdwa("v_cndmask_b32_e32", dst, 9, whole);
+        words[1] |= NEGATE_SECOND;
+        words
+    };
+    assert_eq!(
+        select(9),
+        [0x0212_12f9, 0x1606_0610],
+        "Grand Theft Auto V's words"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(9, 2.0f32.to_bits()));
+    program.extend(v_mov_literal(16, 3.0f32.to_bits()));
+    program.push(v_mov_inline(5, 1));
+    // v_cmp_ne_i32_e32 vcc, 2, v5: set.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 2));
+    program.extend(select(3));
+    // v_cmp_ne_i32_e32 vcc, 1, v5: clear.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 1));
+    program.extend(select(4));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        (-2.0f32).to_bits(),
+        "a set bit picks -v9"
+    );
+    assert_eq!(
+        vector(&registers, 4),
+        3.0f32.to_bits(),
+        "a clear bit picks v16"
+    );
+}
+
 /// `v_ashrrev_i32_e32` shifts its second source right by the low five bits of its first, the sign
 /// carried in (VOP2 opcode 24, as PPSA03416's fragment shaders use it): `0x80000010` by 4 is
 /// `0xf8000001`, by 36 the same, and a positive word shifts in zeros.
@@ -6944,6 +7042,142 @@ fn not_greater_than_is_true_for_a_nan() {
     assert_eq!(lanes_written(one, two), 63, "1.0 is not greater than 2.0");
     assert_eq!(lanes_written(one, one), 63, "1.0 is not greater than 1.0");
     assert_eq!(lanes_written(BITS_QUIET_NAN, one), 63, "NaN is unordered");
+}
+
+/// `v_cmp_nlt_f32` is not-less-than-or-unordered: false only where the first is less, and true
+/// whenever either is a NaN. Grand Theft Auto V's scene shaders test with it, plain and through
+/// SDWA (`v_cmp_nlt_f32_sdwa`, words 0x7c1d00f9 0x86860003, which reads as its short form here).
+#[test]
+fn not_less_than_is_true_for_a_nan() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("not_less_than_is_true_for_a_nan") {
+        return;
+    }
+    let lanes_written = |left: u32, right: u32, sdwa: bool| -> u32 {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, left));
+        program.extend(v_mov_literal(1, right));
+        if sdwa {
+            // src0 v0, both selects DWORD, the answer into vcc.
+            program.extend([
+                head("v_cmp_nlt_f32_e32") | (1 << 9) | SDWA_MARKER,
+                SEL_DWORD << 16 | SEL_DWORD << 24,
+            ]);
+        } else {
+            program.push(v_cmp_f32("v_cmp_nlt_f32_e32", vgpr_code(0), 1));
+        }
+        program.extend([
+            s_logic_b64("s_and_b64", 126, 126, 106),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    let (one, two) = (1.0_f32.to_bits(), 2.0_f32.to_bits());
+    for sdwa in [false, true] {
+        assert_eq!(lanes_written(one, two, sdwa), 0, "1.0 < 2.0, sdwa {sdwa}");
+        assert_eq!(
+            lanes_written(two, one, sdwa),
+            63,
+            "2.0 is not less, sdwa {sdwa}"
+        );
+        assert_eq!(
+            lanes_written(one, one, sdwa),
+            63,
+            "1.0 is not less, sdwa {sdwa}"
+        );
+        assert_eq!(
+            lanes_written(BITS_QUIET_NAN, one, sdwa),
+            63,
+            "NaN is unordered, sdwa {sdwa}"
+        );
+    }
+}
+
+/// The ordered not-equal and the negated orderings: `lg` is false for a NaN, and `nge`, `nlg` and
+/// `nle` are the negations of ordered tests, so true for one. Grand Theft Auto V's scene shaders
+/// test with `v_cmp_nge_f32` through SDWA (words 0x7c1212f9 0x2686a0f2), here over whole registers.
+#[test]
+fn the_negated_float_orderings_are_true_for_a_nan() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("the_negated_float_orderings_are_true_for_a_nan") {
+        return;
+    }
+    let lanes_written = |name: &str, left: u32, right: u32, sdwa: bool| -> u32 {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, left));
+        program.extend(v_mov_literal(1, right));
+        if sdwa {
+            program.extend([
+                head(name) | (1 << 9) | SDWA_MARKER,
+                SEL_DWORD << 16 | SEL_DWORD << 24,
+            ]);
+        } else {
+            program.push(v_cmp_f32(name, vgpr_code(0), 1));
+        }
+        program.extend([
+            s_logic_b64("s_and_b64", 126, 126, 106),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    let (one, two, nan) = (1.0_f32.to_bits(), 2.0_f32.to_bits(), BITS_QUIET_NAN);
+    // (left, right) pairs: less, greater, equal, unordered.
+    for (name, expected) in [
+        ("v_cmp_lg_f32_e32", [63, 63, 0, 0]),
+        ("v_cmp_nge_f32_e32", [63, 0, 0, 63]),
+        ("v_cmp_nlg_f32_e32", [0, 0, 63, 63]),
+        ("v_cmp_nle_f32_e32", [0, 63, 0, 63]),
+    ] {
+        for sdwa in [false, true] {
+            let got = [(one, two), (two, one), (one, one), (nan, one)]
+                .map(|(left, right)| lanes_written(name, left, right, sdwa));
+            assert_eq!(got, expected, "{name}, sdwa {sdwa}");
+        }
+    }
+}
+
+/// `v_or3_b32 d, a, b, c` ors three sources: Grand Theft Auto V's scene shaders combine masks with
+/// it (VOP3 opcode 882, words 0xd7720013 ...).
+#[test]
+fn or3_ors_three_sources() {
+    if !device_or_skip("or3_ors_three_sources") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0000_00f0));
+    program.extend(v_mov_literal(1, 0x0f00_0000));
+    program.extend(v_mov_literal(2, 0x8000_0001));
+    program.extend(vop3("v_or3_b32", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 0x8f00_00f1);
+}
+
+/// Grand Theft Auto V's pixel shaders take a square root of an absolute value through SDWA
+/// (`v_sqrt_f32_sdwa v10, |v10|`, words 0x7e1466f9 0x0026060a): sqrt |-4.0| is 2.0.
+#[test]
+fn an_sdwa_square_root_takes_an_absolute_value() {
+    const ABSOLUTE: u32 = 1 << 21;
+    const WHOLE: u32 = SEL_DWORD << 8 | SEL_DWORD << 16;
+    if !device_or_skip("an_sdwa_square_root_takes_an_absolute_value") {
+        return;
+    }
+    let sqrt = head("v_sqrt_f32_e32") | SDWA_MARKER;
+    assert_eq!(
+        sqrt | (10 << 17),
+        0x7e14_66f9,
+        "Grand Theft Auto V's first word"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(3, (-4.0f32).to_bits()));
+    program.extend([sqrt | (1 << 17), 3 | WHOLE | ABSOLUTE]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 2.0f32.to_bits(), "sqrt |-4.0|");
 }
 
 /// `v_cmp_eq_u32` compares the words whole: equal ones, the top bit set included, and nothing

@@ -403,3 +403,63 @@ v_add_lshl_u32 v200, s7, v9, v130
 v_add_lshl_u32 v255, v12, s30, v44
 v_add_lshl_u32 v9, -1, v77, s101
 v_add_lshl_u32 v130, v88, 4, v240
+v_or3_b32 v19, v0, v1, v2
+v_or3_b32 v200, s7, v9, v130
+v_or3_b32 v255, v12, s30, v44
+v_or3_b32 v9, -1, v77, s101
+v_or3_b32 v130, v88, 4, v240
+v_cmp_nlt_f32_e32 vcc, v3, v4
+v_cmp_nlt_f32_e32 vcc, v255, v150
+v_cmp_nlt_f32_e32 vcc, 0.5, v61
+v_cmp_nlt_f32_e32 vcc, s99, v222
+v_cmp_nlt_f32_e32 vcc, v130, v12
+v_cmp_nlt_f32_e64 s[2:3], v4, v5
+v_cmp_nlt_f32_e64 s[100:101], s5, v190
+v_cmp_nlt_f32_e64 s[40:41], v255, -1
+v_cmp_nlt_f32_e64 vcc, 4, v77
+v_cmp_nlt_f32_e64 s[70:71], v130, s101
+v_cmp_lg_f32_e32 vcc, v3, v4
+v_cmp_lg_f32_e32 vcc, v255, v150
+v_cmp_lg_f32_e32 vcc, 0.5, v61
+v_cmp_lg_f32_e32 vcc, s99, v222
+v_cmp_lg_f32_e32 vcc, v130, v12
+v_cmp_lg_f32_e64 s[2:3], v4, v5
+v_cmp_lg_f32_e64 s[100:101], s5, v190
+v_cmp_lg_f32_e64 s[40:41], v255, -1
+v_cmp_lg_f32_e64 vcc, 4, v77
+v_cmp_lg_f32_e64 s[70:71], v130, s101
+v_cmp_nge_f32_e32 vcc, v3, v4
+v_cmp_nge_f32_e32 vcc, v255, v150
+v_cmp_nge_f32_e32 vcc, 0.5, v61
+v_cmp_nge_f32_e32 vcc, s99, v222
+v_cmp_nge_f32_e32 vcc, v130, v12
+v_cmp_nge_f32_e64 s[2:3], v4, v5
+v_cmp_nge_f32_e64 s[100:101], s5, v190
+v_cmp_nge_f32_e64 s[40:41], v255, -1
+v_cmp_nge_f32_e64 vcc, 4, v77
+v_cmp_nge_f32_e64 s[70:71], v130, s101
+v_cmp_nlg_f32_e32 vcc, v3, v4
+v_cmp_nlg_f32_e32 vcc, v255, v150
+v_cmp_nlg_f32_e32 vcc, 0.5, v61
+v_cmp_nlg_f32_e32 vcc, s99, v222
+v_cmp_nlg_f32_e32 vcc, v130, v12
+v_cmp_nlg_f32_e64 s[2:3], v4, v5
+v_cmp_nlg_f32_e64 s[100:101], s5, v190
+v_cmp_nlg_f32_e64 s[40:41], v255, -1
+v_cmp_nlg_f32_e64 vcc, 4, v77
+v_cmp_nlg_f32_e64 s[70:71], v130, s101
+v_cmp_nle_f32_e32 vcc, v3, v4
+v_cmp_nle_f32_e32 vcc, v255, v150
+v_cmp_nle_f32_e32 vcc, 0.5, v61
+v_cmp_nle_f32_e32 vcc, s99, v222
+v_cmp_nle_f32_e32 vcc, v130, v12
+v_cmp_nle_f32_e64 s[2:3], v4, v5
+v_cmp_nle_f32_e64 s[100:101], s5, v190
+v_cmp_nle_f32_e64 s[40:41], v255, -1
+v_cmp_nle_f32_e64 vcc, 4, v77
+v_cmp_nle_f32_e64 s[70:71], v130, s101
+v_cmp_ngt_f32_e64 s[2:3], v4, v5
+v_cmp_ngt_f32_e64 s[100:101], s5, v190
+v_cmp_ngt_f32_e64 s[40:41], v255, -1
+v_cmp_ngt_f32_e64 vcc, 4, v77
+v_cmp_ngt_f32_e64 s[70:71], v130, s101

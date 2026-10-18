@@ -6734,9 +6734,9 @@ pub fn draw_buffers_for(
         (stage == Stage::Compute, stage == Stage::Mesh),
     );
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
-        return Err(TranslateError::Unsupported {
-            offset: 0,
-            detail: "the shader reads through more buffers than a stage of a draw binds (D733)",
+        return Err(TranslateError::TooManyBuffers {
+            traced: buffers.sources.len(),
+            most: orbistoun_spirv::DRAW_BUFFERS_PER_STAGE,
         });
     }
     let mut buffers = buffers;

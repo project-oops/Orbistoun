@@ -159,6 +159,14 @@ const FIXTURES: &[(&str, &str)] = &[
         "the three-source unsigned add a streamout pass addresses its store with",
     ),
     (
+        "vector-compare-float",
+        "the ordered not-equal and the negated float orderings, which no compiled fixture produces",
+    ),
+    (
+        "vector-or3",
+        "the three-source or and the float not-less-than compare, which no compiled fixture produces",
+    ),
+    (
         "vector-convert",
         "the integer and float conversions in their long form",
     ),

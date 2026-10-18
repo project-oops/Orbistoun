@@ -1177,6 +1177,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { wo
 
 [[opcode_operands]]
 family = "VOP3"
+opcode = 5
+mnemonic = "v_cmp_lg_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
 opcode = 6
 mnemonic = "v_cmp_ge_f32_e64"
 samples = 5
@@ -1184,8 +1191,43 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { wo
 
 [[opcode_operands]]
 family = "VOP3"
+opcode = 9
+mnemonic = "v_cmp_nge_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 10
+mnemonic = "v_cmp_nlg_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 11
+mnemonic = "v_cmp_ngt_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 12
+mnemonic = "v_cmp_nle_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
 opcode = 13
 mnemonic = "v_cmp_neq_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 14
+mnemonic = "v_cmp_nlt_f32_e64"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
 
@@ -1583,6 +1625,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "VOP3"
+opcode = 882
+mnemonic = "v_or3_b32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
 opcode = 883
 mnemonic = "v_mad_u32_u16"
 samples = 5
@@ -1674,8 +1723,29 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 
 [[opcode_operands]]
 family = "VOPC"
+opcode = 5
+mnemonic = "v_cmp_lg_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
 opcode = 6
 mnemonic = "v_cmp_ge_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 9
+mnemonic = "v_cmp_nge_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 10
+mnemonic = "v_cmp_nlg_f32_e32"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
 
@@ -1688,9 +1758,23 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 
 [[opcode_operands]]
 family = "VOPC"
+opcode = 12
+mnemonic = "v_cmp_nle_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
 opcode = 13
 mnemonic = "v_cmp_neq_f32_e32"
 samples = 4
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 14
+mnemonic = "v_cmp_nlt_f32_e32"
+samples = 5
 operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
 
 [[opcode_operands]]

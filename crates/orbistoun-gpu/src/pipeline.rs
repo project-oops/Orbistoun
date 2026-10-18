@@ -6469,11 +6469,12 @@ fn read_texture(
 
 /// The swizzle modes a texture is read in through [`read_tiled_texture`], as their layouts place a
 /// chain ([`crate::tiling::SurfaceLayout`]).
-const SAMPLED_AS_RENDERED: [SwizzleMode; 5] = [
+const SAMPLED_AS_RENDERED: [SwizzleMode; 6] = [
     SwizzleMode::Tiled64KbRX,
     SwizzleMode::Tiled4KbDX,
     SwizzleMode::Tiled4KbS,
     SwizzleMode::Tiled64KbS,
+    SwizzleMode::Tiled256BS,
     SwizzleMode::Linear,
 ];
 
@@ -7616,6 +7617,8 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
         crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
         crate::tiling::SurfaceLayout::S256BBpp16 => 1 << 19 | 1 << 15,
+        crate::tiling::SurfaceLayout::S256B => 1 << 20 | 1 << 15,
+        crate::tiling::SurfaceLayout::S256BBpp8 => 1 << 21 | 1 << 15,
         crate::tiling::SurfaceLayout::Rx64KbBpp8 => 1 << 28,
         crate::tiling::SurfaceLayout::Rx64KbBpp2 => 1 << 29,
         crate::tiling::SurfaceLayout::Rx64KbBpp16 => 1 << 30,

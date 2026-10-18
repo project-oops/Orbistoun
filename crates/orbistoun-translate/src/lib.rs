@@ -195,6 +195,16 @@ pub enum TranslateError {
         local_share: bool,
     },
 
+    /// A shader reads through more buffers than a stage binds (D733): how many it traced, so a
+    /// report says how far past the binding it is.
+    #[error("the shader reads through {traced} buffers, more than the {most} a stage binds (D733)")]
+    TooManyBuffers {
+        /// The buffers its accesses were traced to.
+        traced: usize,
+        /// The most a stage binds.
+        most: u32,
+    },
+
     /// An instruction this translator does not handle yet.
     ///
     /// Never silently skipped: a shader missing one instruction computes the wrong thing
@@ -1481,6 +1491,31 @@ mod tests {
         words.extend(load_and_fetch);
         let refused = fragment(&words).expect_err("refused").to_string();
         assert!(refused.contains("not traced"), "{refused}");
+    }
+
+    /// A compressed colour export may enable only some channels: Grand Theft Auto V's pixel shaders
+    /// export `exp mrt4, v3, v0, v0, v0` compressed with only red and green enabled (words
+    /// 0xf8000c43 0x00000003), the first packed register's two halves. Each enable bit is one
+    /// channel, as in an uncompressed export, so it translates; here into `mrt0`.
+    #[test]
+    fn a_compressed_export_of_two_channels_translates() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        // exp mrt0 v3, v0 compr done vm, enabling red and green; s_endpgm.
+        let words = [0xf800_1c03, 0x0000_0003, 0xbf81_0000];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData::default(),
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
     }
 
     /// A pixel shader reading up to sixteen textures from its descriptor table translates, each at
