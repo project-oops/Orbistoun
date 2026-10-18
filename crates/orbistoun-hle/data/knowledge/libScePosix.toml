@@ -3113,16 +3113,31 @@ found_in = ["ftpsrv"]
 found_on = "2026-08-29"
 
 [[function]]
+name = "getsockopt"
+arity = 5
+purpose = "Reads a socket option, answering the ones this can report and refusing the rest by name."
+returns = "status"
+edge_cases = [
+    "A wrong read is worse than a refusal, since the caller acts on the value: SO_ERROR and IP_TTL are answered from the host socket, and anything else is refused by name.",
+    "MEASURED (REQ-gt15, 000-boot/gt15-udp-sockopt): on a UDP socket, SO_SNDBUF (0x1001) answers 0 with 0x2400 (9,216) and SO_RCVBUF (0x1002) with 0xa460 (42,080), each writing a 4-byte length, until a setsockopt changes the size - then it reads that size back. orbistoun answers its own UDP socket's remembered size; only a UDP socket was measured, so any other socket is refused.",
+]
+known_by = "measured"
+cites = "POSIX.1-2008 getsockopt(2). SOL_SOCKET from sys/sys/socket.h, harvested. SO_SNDBUF/SO_RCVBUF defaults and readback: obSCEne REQ-20261018T1520Z-gt15, reports/hardware/report-20261018-gt15-census.log (SHA-256 d93ba4ae56e3e06b...) lines 2957-3022."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
 name = "setsockopt"
 arity = 5
 purpose = "Accepted, and recorded as not applied."
 returns = "status"
 edge_cases = [
     "Accepting is the part that matters. A server's first act after socket is setsockopt(SO_REUSEADDR), and failing it stops the server: a correct program checks, reports and exits. Refusing outright would end every payload measured before it reached bind.",
-    "Nothing is applied. SO_REUSEADDR is what the host's listener does by default on the platforms this runs on, so honouring it would change nothing; the rest - timeouts, buffer sizes, keepalive - would need a per-option mapping nothing here can verify, and a wrong one is a socket behaving differently from what the guest asked for with nothing saying so.",
+    "Nothing is applied for most options. SO_REUSEADDR is what the host's listener does by default on the platforms this runs on, so honouring it would change nothing; timeouts and keepalive would need a per-option mapping nothing here can verify, and a wrong one is a socket behaving differently from what the guest asked for with nothing saying so.",
+    "MEASURED (REQ-gt15, 000-boot/gt15-udp-sockopt): on a UDP socket, SO_SNDBUF (0x1001) and SO_RCVBUF (0x1002) at SOL_SOCKET answer 0 for sizes 0x2400, 0xa460, 0x10000 and 0x40000, and getsockopt then reads that size back. orbistoun remembers the size on its own UDP socket so the readback matches; it is not applied to the host socket, since the console's buffer is not the host's. Only a UDP socket was measured; on any other, these options keep the accepted-without-effect behaviour above.",
 ]
 known_by = "published"
-cites = "POSIX.1-2008 setsockopt(2). SOL_SOCKET and SO_REUSEADDR from sys/sys/socket.h, harvested."
+cites = "POSIX.1-2008 setsockopt(2). SOL_SOCKET and SO_REUSEADDR from sys/sys/socket.h, harvested. SO_SNDBUF/SO_RCVBUF sizes: obSCEne REQ-20261018T1520Z-gt15, reports/hardware/report-20261018-gt15-census.log (SHA-256 d93ba4ae56e3e06b...) lines 2957-3022."
 assumptions = ["That no payload measured depends on an option actually taking effect. They set SO_REUSEADDR and check the return value; none reads an option back."]
 found_in = [
     "klogsrv",

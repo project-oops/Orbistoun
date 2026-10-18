@@ -170,8 +170,31 @@ pub(crate) enum Socket {
         socket: std::net::UdpSocket,
         /// Whether non-blocking mode is enabled.
         nonblocking: bool,
+        /// The send-buffer size this socket reports, [`DEFAULT_SEND_BUFFER`] until set
+        /// (REQ-gt15). Remembered rather than applied to the host socket, since the console's
+        /// sizes are not the host's.
+        send_buffer: u32,
+        /// The receive-buffer size this socket reports, [`DEFAULT_RECV_BUFFER`] until set
+        /// (REQ-gt15).
+        recv_buffer: u32,
     },
 }
+
+/// The send-buffer option, as this platform numbers it.
+///
+/// Measured, not derived: `0x1001` is what PPSA04263 passes `getsockopt`/`setsockopt`
+/// (obSCEne `000-boot/gt15-udp-sockopt`), and it is FreeBSD's `SO_SNDBUF`.
+const SO_SNDBUF: u64 = 0x1001;
+
+/// The receive-buffer option, as this platform numbers it (REQ-gt15; FreeBSD's `SO_RCVBUF`).
+const SO_RCVBUF: u64 = 0x1002;
+
+/// The send-buffer size a fresh UDP socket reports: 9,216 bytes, measured (REQ-gt15, both a
+/// socket bound to a port and one bound to port 0).
+pub(crate) const DEFAULT_SEND_BUFFER: u32 = 0x2400;
+
+/// The receive-buffer size a fresh UDP socket reports: 42,080 bytes, measured (REQ-gt15).
+pub(crate) const DEFAULT_RECV_BUFFER: u32 = 0xa460;
 
 /// Binds a UDP socket with address reuse enabled across platforms.
 pub(crate) fn bind_udp(wanted: SocketAddr, nonblocking: bool) -> Result<std::net::UdpSocket, u32> {
@@ -388,6 +411,8 @@ pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
                 *socket = Socket::Datagram {
                     socket: udp,
                     nonblocking: *nonblocking,
+                    send_buffer: DEFAULT_SEND_BUFFER,
+                    recv_buffer: DEFAULT_RECV_BUFFER,
                 };
                 Ok(OK)
             } else {
@@ -544,6 +569,8 @@ pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
             *socket = Socket::Datagram {
                 socket: udp,
                 nonblocking,
+                send_buffer: DEFAULT_SEND_BUFFER,
+                recv_buffer: DEFAULT_RECV_BUFFER,
             };
             Ok(OK)
         })
@@ -590,6 +617,34 @@ pub fn setsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         } else {
             Err(UNNAMED)
         };
+    }
+    // The buffer sizes, remembered on a UDP socket so `getsockopt` reads back what was set, as
+    // measured (REQ-gt15). The size is not applied to the host socket - the console's buffer
+    // is not the host's - so only its own `getsockopt` sees it.
+    if level == SOL_SOCKET
+        && (optname == SO_SNDBUF || optname == SO_RCVBUF)
+        && let Some(size) = read_option_int(optval, optlen)
+    {
+        let kept = crate::descriptor::with_socket(fd, |socket| {
+            if let Socket::Datagram {
+                send_buffer,
+                recv_buffer,
+                ..
+            } = socket
+            {
+                *(if optname == SO_SNDBUF {
+                    send_buffer
+                } else {
+                    recv_buffer
+                }) = size;
+                true
+            } else {
+                false
+            }
+        });
+        if kept == Some(true) {
+            return Ok(OK);
+        }
     }
     // The kernel read/write interface: `setsockopt(fd, IPPROTO_IPV6=0x29, IPV6_PKTINFO=0x2e, buf,
     // 0x14)` carries the kernel address to read or write next, or writes bytes through victim socket.
@@ -1100,6 +1155,19 @@ fn read_option_flag(value_at: u64, length: u64) -> bool {
     value != 0
 }
 
+/// The `u32` behind a `setsockopt` value pointer, for an option whose value is a size.
+///
+/// `None` when the guest passed no buffer or too short a one, which a size option cannot act on.
+fn read_option_int(value_at: u64, length: u64) -> Option<u32> {
+    if value_at == 0 || length < 4 {
+        return None;
+    }
+    let base = usize::try_from(value_at).ok()?;
+    // SAFETY: a guest-supplied option buffer under the identity mapping, of at least the four
+    // bytes an `int` option occupies, as the length check above established.
+    Some(unsafe { std::ptr::read_unaligned(base as *const u32) })
+}
+
 /// `getsockopt(fd, level, option, value, length)`: POSIX.1-2008 `getsockopt(2)`.
 ///
 /// Answers the options the host socket can report and refuses the rest by name (see
@@ -1107,6 +1175,29 @@ fn read_option_flag(value_at: u64, length: u64) -> bool {
 /// caller acts on the value.
 pub fn getsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let (fd, level, option, value, length) = (args[0], args[1], args[2], args[3], args[4]);
+    // The buffer sizes, answered from what the UDP socket remembers: its default until set,
+    // and the set value after (REQ-gt15). Only a UDP socket was measured; any other refuses.
+    if level == SOL_SOCKET && (option == SO_SNDBUF || option == SO_RCVBUF) {
+        let kept = crate::descriptor::with_socket(fd, |socket| match socket {
+            Socket::Datagram {
+                send_buffer,
+                recv_buffer,
+                ..
+            } => Some(if option == SO_SNDBUF {
+                *send_buffer
+            } else {
+                *recv_buffer
+            }),
+            _ => None,
+        });
+        let Some(Some(size)) = kept else {
+            return refuse_option(level, option);
+        };
+        return match i32::try_from(size) {
+            Ok(size) if write_option(value, length, size) => Ok(OK),
+            _ => Err(UNNAMED),
+        };
+    }
     let Some(name) = option_name(option) else {
         return refuse_option(level, option);
     };
@@ -1331,6 +1422,72 @@ mod tests {
         let bytes = sockaddr(1, [0; 4]);
         // SAFETY: the pointer is valid; the length is what is being tested.
         assert!(unsafe { super::read_sockaddr(bytes.as_ptr() as u64, 4) }.is_none());
+    }
+
+    /// A UDP socket reports the console's default send and receive buffer sizes, and reads
+    /// back whatever size is set (REQ-gt15, `000-boot/gt15-udp-sockopt`).
+    #[test]
+    fn a_udp_socket_reports_and_keeps_its_buffer_sizes() {
+        let _guard = crate::exclusively();
+        let fd = call("socket", [af_inet(), super::sock_dgram(), 0x11, 0, 0, 0]);
+        assert_ne!(fd, super::FAILED, "a UDP socket");
+        let wanted = sockaddr(0, [127, 0, 0, 1]);
+        assert_eq!(
+            call(
+                "bind",
+                [fd, wanted.as_ptr() as u64, SOCKADDR_IN_LEN, 0, 0, 0]
+            ),
+            0
+        );
+
+        let mut value = [0xcc_u8; 4];
+        let mut len = 4_u32;
+        let get = |option: u64, value: &mut [u8; 4], len: &mut u32| {
+            *value = [0xcc; 4];
+            *len = 4;
+            let rc = call(
+                "getsockopt",
+                [
+                    fd,
+                    super::SOL_SOCKET,
+                    option,
+                    value.as_mut_ptr() as u64,
+                    std::ptr::from_mut(len) as u64,
+                    0,
+                ],
+            );
+            (rc, u32::from_le_bytes(*value), *len)
+        };
+        assert_eq!(
+            get(super::SO_SNDBUF, &mut value, &mut len),
+            (0, 0x2400, 4),
+            "the default send buffer"
+        );
+        assert_eq!(
+            get(super::SO_RCVBUF, &mut value, &mut len),
+            (0, 0xa460, 4),
+            "the default receive buffer"
+        );
+
+        let set = |option: u64, size: u32| {
+            let bytes = size.to_le_bytes();
+            call(
+                "setsockopt",
+                [fd, super::SOL_SOCKET, option, bytes.as_ptr() as u64, 4, 0],
+            )
+        };
+        assert_eq!(set(super::SO_SNDBUF, 0x10000), 0);
+        assert_eq!(
+            get(super::SO_SNDBUF, &mut value, &mut len).1,
+            0x10000,
+            "read back"
+        );
+        assert_eq!(set(super::SO_RCVBUF, 0x40000), 0);
+        assert_eq!(
+            get(super::SO_RCVBUF, &mut value, &mut len).1,
+            0x40000,
+            "read back"
+        );
     }
 
     /// A guest's `socket`, `setsockopt`, `bind`, `listen` opens a port a host connect reaches,

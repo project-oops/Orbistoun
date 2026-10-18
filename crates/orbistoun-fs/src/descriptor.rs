@@ -355,6 +355,7 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
         Some(Target::Socket(crate::socket::Socket::Datagram {
             socket,
             nonblocking,
+            ..
         })) => {
             let restore = wait.forced_on_udp(socket, *nonblocking);
             let answered = receive_datagram(into, |scratch| socket.recv(scratch).map(|n| (n, ())))
@@ -444,6 +445,7 @@ pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
         Some(Target::Socket(crate::socket::Socket::Datagram {
             socket,
             nonblocking,
+            ..
         })) => {
             // A datagram socket with no peer has nowhere to send without an address:
             // `EDESTADDRREQ` on a console (obSCEne `REQ-20261012T1816Z-c901`, `sendto-to-null`).
@@ -483,6 +485,7 @@ pub fn socket_sendto(
             crate::socket::Socket::Datagram {
                 socket,
                 nonblocking,
+                ..
             } => {
                 let restore = wait.forced_on_udp(socket, *nonblocking);
                 let answered = match socket.send_to(bytes, target) {
@@ -518,6 +521,8 @@ pub fn socket_sendto(
                     *socket = crate::socket::Socket::Datagram {
                         socket: udp,
                         nonblocking: nonblock,
+                        send_buffer: crate::socket::DEFAULT_SEND_BUFFER,
+                        recv_buffer: crate::socket::DEFAULT_RECV_BUFFER,
                     };
                     answered
                 } else {
@@ -561,6 +566,7 @@ pub fn socket_recvfrom(
             crate::socket::Socket::Datagram {
                 socket,
                 nonblocking,
+                ..
             } => {
                 let restore = wait.forced_on_udp(socket, *nonblocking);
                 let answered = receive_datagram(into, |scratch| socket.recv_from(scratch));
@@ -811,9 +817,13 @@ fn duplicate_socket(socket: &crate::socket::Socket) -> Option<Target> {
         crate::socket::Socket::Datagram {
             socket,
             nonblocking,
+            send_buffer,
+            recv_buffer,
         } => crate::socket::Socket::Datagram {
             socket: socket.try_clone().ok()?,
             nonblocking: *nonblocking,
+            send_buffer: *send_buffer,
+            recv_buffer: *recv_buffer,
         },
         // Nothing to duplicate yet; a second pending socket would later bind the same address.
         crate::socket::Socket::Pending { .. } => return None,
@@ -894,6 +904,7 @@ pub fn readable(fd: u64) -> bool {
             crate::socket::Socket::Datagram {
                 socket,
                 nonblocking,
+                ..
             } => {
                 if socket.set_nonblocking(true).is_err() {
                     return false;
@@ -989,6 +1000,7 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
             crate::socket::Socket::Datagram {
                 socket,
                 nonblocking,
+                ..
             } => {
                 *nonblocking = wanted;
                 socket.set_nonblocking(wanted).is_ok()
