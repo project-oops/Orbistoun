@@ -1317,36 +1317,42 @@ fn dcb_rewind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// `0x21a8c8fab7dd4722(jump, policy, target, dwords)`, unnamed: fills in the jump at `jump` that
-/// `sceAgcDcbJump` wrote empty - the target's halves, and `dwords` in the control word's size field
-/// (`IB_SIZE`, bits 19:0, Mesa `registers/pkt3.json`), the rest of the control word as the builder
-/// wrote it. Answers 0. Guest-observed: PPSA04263 builds each buffer's jump empty and fills it in
-/// this way once the next buffer is known, `policy` 2 and `dwords` the next buffer's length. A
-/// pointer at anything but a jump is refused and left alone.
+/// `sceAgcDcbJump` wrote empty - the target's halves, `dwords` in the control word's size field
+/// (`IB_SIZE`, bits 19:0, Mesa `registers/pkt3.json`) and `policy` in bits 29:28, the rest of the
+/// control word as the builder wrote it - and answers 0. Measured: the console wrote exactly that for
+/// `(jump, 2, target, 0x3df9)` and `(jump, 0, target, 4)`, and refused a pointer at a `REWIND`
+/// with `0x8a6c000c`, leaving it alone (`report-20261018-gt17-census.log` 3063-3075): it checks
+/// the packet's opcode. PPSA04263 fills each buffer's closing jump in this way.
 fn jump_patch_21a8c8fa(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    /// `INDIRECT_BUFFER`'s header as `sceAgcDcbJump` writes it.
-    const JUMP_HEADER: u32 = 0xc002_3f00;
+    /// `INDIRECT_BUFFER`'s opcode, bits 15:8 of a type-3 header.
+    const INDIRECT_BUFFER: u32 = 0x3f;
     /// The control word's size field (`IB_SIZE`).
     const SIZE: u32 = 0x000f_ffff;
-    let (jump, target, dwords) = (args[0], args[2], args[3] as u32);
+    /// The control word's policy bits.
+    const POLICY: u32 = 0x3 << 28;
+    let (jump, policy, target, dwords) = (args[0], args[1], args[2], args[3] as u32);
     // SAFETY: the address the title's own jump builder answered; its four dwords are read whole.
     let Some(header) = (unsafe { guest::read_u32(jump) }) else {
-        return BAD_ARGUMENT;
+        return NOT_A_PACKET;
     };
+    if header >> 8 & 0xff != INDIRECT_BUFFER || dwords & !SIZE != 0 || policy > 3 {
+        return NOT_A_PACKET;
+    }
     // SAFETY: as above, the control word twelve bytes in.
     let Some(control) = (unsafe { guest::read_u32(jump.wrapping_add(12)) }) else {
-        return BAD_ARGUMENT;
+        return NOT_A_PACKET;
     };
-    if header != JUMP_HEADER || dwords & !SIZE != 0 {
-        return BAD_ARGUMENT;
-    }
     for (at, word) in [
         (4, target as u32),
         (8, (target >> 32) as u32),
-        (12, control & !SIZE | dwords),
+        (
+            12,
+            control & !(SIZE | POLICY) | (policy as u32) << 28 | dwords,
+        ),
     ] {
         // SAFETY: as above; the jump's own dwords, just read.
         if !unsafe { guest::write_u32(jump.wrapping_add(at), word) } {
-            return BAD_ARGUMENT;
+            return NOT_A_PACKET;
         }
     }
     0
@@ -1678,14 +1684,16 @@ fn dcb_write_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// The control word `sceAgcAcbWriteData` writes for its `destination` and `cache_policy`: `0x200`
-/// for the `(2, 0)` both of obSCEne's arms passed, and PPSA04263 passes
-/// (`report-20261018-gt-census.log` 2855-2860). `None` for any other, which was not measured.
+/// The control word `sceAgcAcbWriteData` writes for its `destination` and `cache_policy`:
+/// `destination << 8 | cache_policy << 25` (`DST_SEL` and `CACHE_POLICY`, Mesa `sid.h`), as the
+/// console wrote `0x200` for `(2, 0)`, `0x400` for `(4, 0)` and `0x0200_0200` for `(2, 1)`
+/// (`report-20261018-gt-census.log` 2855-2860, `report-20261018-gt17-census.log` 3076-3081). `None`
+/// for a destination past `DST_SEL`'s four bits or a policy past its two.
 const fn acb_write_data_control(destination: u64, cache_policy: u64) -> Option<u32> {
-    match (destination, cache_policy) {
-        (2, 0) => Some(0x0000_0200),
-        _ => None,
+    if destination > 0xf || cache_policy > 3 {
+        return None;
     }
+    Some((destination as u32) << 8 | (cache_policy as u32) << 25)
 }
 
 /// `sceAgcAcbWriteData(acb, destination, cache_policy, address, data, count)`: the
@@ -1720,13 +1728,14 @@ fn acb_write_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &words)
 }
 
-/// The event dword `sceAgcAcbEventWrite` writes for `event_type`: `0x407` for the 7 both of
-/// obSCEne's arms passed, whatever the rest (`report-20261018-gt-census.log` 2861-2866) - the event
-/// with `EVENT_INDEX` 4 at bits 8-11 (Mesa `sid.h` `EVENT_INDEX`), as `CS_PARTIAL_FLUSH` is sent.
-/// `None` for any other, which was not measured.
+/// The event dword `sceAgcAcbEventWrite` writes for `event_type`: `0x407` for 7, whatever the rest
+/// (`report-20261018-gt-census.log` 2861-2866) - the event with `EVENT_INDEX` 4 at bits 8-11 (Mesa
+/// `sid.h` `EVENT_INDEX`), as `CS_PARTIAL_FLUSH` is sent - and 4, 0x14 and 0x28 as they are
+/// (`report-20261018-gt17-census.log` 3082-3090). `None` for any other, which was not measured.
 const fn acb_event(event_type: u64) -> Option<u32> {
     match event_type {
         7 => Some(0x0000_0407),
+        4 | 0x14 | 0x28 => Some(event_type as u32),
         _ => None,
     }
 }

@@ -1023,20 +1023,40 @@ pub(crate) fn dispatch_global_range(
 /// branches past, from the system registers `system` seeds, is null: zero (D800).
 pub(crate) fn resolve_fourth_word(
     source: &BufferSource,
-    (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
+    draw: (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
     memory: &impl GuestMemory,
 ) -> Option<u32> {
+    fourth_word_or_why(source, draw, memory).ok()
+}
+
+/// [`resolve_fourth_word`], or why the word cannot be found: what a refused format load reports
+/// for the slot it reads through.
+///
+/// # Errors
+///
+/// What kept the source's fourth word from being read at this draw.
+pub(crate) fn fourth_word_or_why(
+    source: &BufferSource,
+    (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
+    memory: &impl GuestMemory,
+) -> Result<u32, Refusal> {
     match source {
-        BufferSource::Descriptor { words, .. } => resolve_word(words[3], user_data, memory).ok(),
+        BufferSource::Descriptor { words, .. } => resolve_word(words[3], user_data, memory)
+            .map_err(|why| format!("its descriptor's fourth word {:?}: {why}", words[3]).into()),
         BufferSource::Computed(computed)
             if matches!(computed.through, ComputedAccess::Descriptor { .. }) =>
         {
             evaluate_computed(computed, (user_data, system), memory)
-                .ok()
                 .map(|found| found.map_or(0, |(words, _)| words[3]))
+                .map_err(|why| format!("its computed descriptor: {why}").into())
         }
         // A scalar load's base names no format, and a global load has no descriptor.
-        BufferSource::Computed(_) | BufferSource::Pointer { .. } | BufferSource::Global(_) => None,
+        BufferSource::Computed(_) => {
+            Err("it is a scalar load's base, which names no format".into())
+        }
+        BufferSource::Pointer { .. } | BufferSource::Global(_) => {
+            Err("it is a pointer or a global access, which has no descriptor".into())
+        }
     }
 }
 

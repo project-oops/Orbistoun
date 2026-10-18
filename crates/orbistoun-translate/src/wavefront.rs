@@ -608,6 +608,11 @@ impl FlatTwins {
     }
 }
 
+/// The slots [`BufferFormats`] keeps a format for: the first thirty-two of a stage's
+/// [`orbistoun_spirv::DRAW_BUFFERS_PER_STAGE`], a bit each in its mask. A typed access through a later
+/// slot finds no format, as for a slot the draw did not resolve, and is refused.
+const FORMATTED_SLOTS: usize = 32;
+
 /// Each draw buffer's descriptor's fourth word at one draw, by slot (D738). `None` for a slot whose
 /// buffer is not a descriptor the draw resolved.
 #[derive(
@@ -625,7 +630,7 @@ impl FlatTwins {
 )]
 pub struct BufferFormats {
     /// Each slot's word, zero where none was resolved.
-    words: [u32; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize],
+    words: [u32; FORMATTED_SLOTS],
     /// Which slots were resolved, a bit each: the words packed, so the draw state a module is
     /// translated for stays small enough to pass by value.
     resolved: u32,
@@ -5677,6 +5682,10 @@ impl Model for Wavefront<'_> {
 
     fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
         self.buffer_formats?.get(usize::try_from(slot).ok()?)
+    }
+
+    fn buffer_formats_given(&self) -> bool {
+        self.buffer_formats.is_some()
     }
 
     fn write_draw_buffer(

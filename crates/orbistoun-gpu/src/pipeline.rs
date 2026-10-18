@@ -1920,6 +1920,12 @@ pub struct Pipeline {
     /// Each primitive shader's traced format words, by address and user-data count, with the hash
     /// of the bytes they were traced from ([`Self::format_words`]).
     format_words: BTreeMap<(u64, u32), (u64, Option<FormatWords>)>,
+    /// Why a primitive shader's buffers could not be traced for their formats, by address: what its
+    /// draws' refusal for want of formats says.
+    untraced_formats: BTreeMap<u64, String>,
+    /// Why a primitive shader's buffer slot's format was not resolved at the last draw that asked,
+    /// by address and slot: what a refused format load through it says.
+    unresolved_formats: BTreeMap<(u64, u32), String>,
     /// The formats [`Self::draw_buffer_formats`] last resolved and what it resolved them for, kept
     /// while one submission's draws are bound ([`Self::bind_shaders`]). A draw split
     /// into chunks asks again for every chunk with the same program, words and counts, and the
@@ -2029,6 +2035,8 @@ impl Pipeline {
             depth_fills: crate::depth::PendingFills::default(),
             dispatch_modules: BTreeMap::new(),
             format_words: BTreeMap::new(),
+            untraced_formats: BTreeMap::new(),
+            unresolved_formats: BTreeMap::new(),
             formats_memo: FormatsMemo::Off,
             flat_twins_kept: BTreeMap::new(),
         })
@@ -4659,10 +4667,12 @@ impl Pipeline {
         let formats = self.format_words(address).map(|traced| {
             let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
             for (slot, source) in traced.iter().enumerate() {
-                formats.set(
-                    slot,
-                    crate::draw_buffers::resolve_fourth_word(source, (words, system), memory),
-                );
+                let word = crate::draw_buffers::fourth_word_or_why(source, (words, system), memory);
+                if let (Err(why), Ok(slot)) = (&word, u32::try_from(slot)) {
+                    self.unresolved_formats
+                        .insert((address, slot), why.to_string());
+                }
+                formats.set(slot, word.ok());
             }
             formats
         });
@@ -4678,7 +4688,11 @@ impl Pipeline {
     /// and a frame draws one program thousands of times. A program rewritten in place is traced
     /// again.
     fn format_words(&mut self, address: u64) -> Option<FormatWords> {
-        let shader = self.decoded.get(address)?;
+        let Some(shader) = self.decoded.get(address) else {
+            self.untraced_formats
+                .insert(address, "its program was not decoded".to_owned());
+            return None;
+        };
         let key = (address, self.user_data[0].count);
         // The whole program's hash: a rewrite can change one word in the middle.
         let content = content_hash(shader);
@@ -4688,23 +4702,31 @@ impl Pipeline {
             return traced.clone();
         }
         let decoded = decode_program(shader, &self.encodings, &self.operands);
-        let traced =
-            orbistoun_translate::wavefront::reads_buffer_formats(&decoded, &self.encodings)
-                .then(|| {
-                    let user_data = UserData {
-                        draw_buffers: true,
-                        ..self.user_data[0]
-                    };
-                    orbistoun_translate::wavefront::draw_buffers_for(
-                        &decoded,
-                        &self.encodings,
-                        host_stage(ShaderStage::Vertex),
-                        user_data,
-                    )
-                    .ok()
-                })
-                .flatten()
-                .map(|buffers| -> FormatWords { buffers.sources.into() });
+        let converts =
+            orbistoun_translate::wavefront::reads_buffer_formats(&decoded, &self.encodings);
+        if !converts {
+            self.untraced_formats.insert(
+                address,
+                "the trace found no load that converts by its descriptor's format".to_owned(),
+            );
+        }
+        let traced = converts
+            .then(|| {
+                let user_data = UserData {
+                    draw_buffers: true,
+                    ..self.user_data[0]
+                };
+                orbistoun_translate::wavefront::draw_buffers_for(
+                    &decoded,
+                    &self.encodings,
+                    host_stage(ShaderStage::Vertex),
+                    user_data,
+                )
+                .map_err(|why| self.untraced_formats.insert(address, why.to_string()))
+                .ok()
+            })
+            .flatten()
+            .map(|buffers| -> FormatWords { buffers.sources.into() });
         self.format_words.insert(key, (content, traced.clone()));
         traced
     }
@@ -4785,7 +4807,12 @@ impl Pipeline {
             Ok(resource) => Some(resource),
             Err(Unprepared::NeedsGeometry(reason)) => {
                 let why = unseeded.unwrap_or_else(|| "it was not given".to_owned());
-                let reason = format!("{reason}; and this draw's geometry cannot be seeded: {why}");
+                let mut reason =
+                    format!("{reason}; and this draw's geometry cannot be seeded: {why}");
+                if let Some(untraced) = self.untraced_formats.get(&candidate.address) {
+                    reason.push_str("; its buffers were not traced for their formats: ");
+                    reason.push_str(untraced);
+                }
                 if by_geometry
                     .refused
                     .insert((candidate.address, reason.clone()))
@@ -5202,7 +5229,14 @@ impl Pipeline {
                 .and_then(|offset| instruction_text(decoded, &self.encodings, offset))
                 .map(|text| format!(" ({text})"))
                 .unwrap_or_default();
-            let reason = format!("the shader at {address:#x} could not be translated: {e}{named}");
+            let mut reason =
+                format!("the shader at {address:#x} could not be translated: {e}{named}");
+            if let orbistoun_translate::TranslateError::UnresolvedBufferFormat { slot, .. } = e
+                && let Some(why) = self.unresolved_formats.get(&(address, slot))
+            {
+                reason.push_str(" - ");
+                reason.push_str(why);
+            }
             let retried = matches!(
                 e,
                 orbistoun_translate::TranslateError::ReadsGeometryInputs
@@ -6792,6 +6826,10 @@ fn tiled_volume_texture(
         FORMAT_2_10_10_10_UNORM => TexelFormat::Rgb10A2,
         _ => return None,
     };
+    // A thick `4KB_S` volume is read by addrlib's thick pattern, its first level alone.
+    if descriptor.tiling == SwizzleMode::Tiled4KbS {
+        return thick_volume_texture(descriptor, words, format, (slot, memory, texels));
+    }
     if destination_selects(words[3]) != IDENTITY_SELECTS || descriptor.compression.is_some() {
         return None;
     }
@@ -6825,30 +6863,11 @@ fn tiled_volume_texture(
     let (width, height) = surface.extent();
     let depth = surface.depth();
     let encoding = texture_encoding(format);
-    let span = surface.bytes();
     // A volume is another image than a 2D one at the same address and extent.
     let key = (surface.base(), width, height, 1 << 26 | depth);
-    let (hash, shared) = if let Some(cached) = kept_texels(texels, key, span as u64) {
-        (cached.hash, cached.texels.clone())
-    } else {
-        // Marked before the bytes are read, so a write racing the read is seen next time.
-        let since = texture_mark(surface.base(), span as u64);
-        let read = surface.detile(memory.read(surface.base(), span)?);
-        let hash = crate::content_hash(&read) ^ u64::from(encoding_tag(encoding));
-        let shared: std::sync::Arc<[u32]> = read.into();
-        if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-            crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
-        }
-        texels.insert(
-            key,
-            CachedTexels {
-                since,
-                hash,
-                texels: std::sync::Arc::clone(&shared),
-            },
-        );
-        (hash, shared)
-    };
+    let (hash, shared) = kept_or_read((texels, key, surface.bytes()), encoding, |spanned| {
+        Some(surface.detile(memory.read(surface.base(), spanned)?))
+    })?;
     Some(RenderCommand::BindVolumeTexture {
         slot,
         texels: shared,
@@ -6859,6 +6878,105 @@ fn tiled_volume_texture(
         sampling: crate::registers::TextureSampling::default(),
         encoding,
     })
+}
+
+/// A `4KB_S` volume's bind: its first level, read by addrlib's thick pattern
+/// ([`crate::tiling::tiled_byte_offset_4kb_s3_bpp4`]) as Grand Theft Auto V's scene binds one, four
+/// bytes a texel, with selects that leave it or reorder its four channels ([`channel_order`]). Only
+/// the first level is bound: a view starting past it, compression, or a chain with a level in the mip
+/// tail is `None`. Kept until its bytes are written, as a linear texture's texels are.
+fn thick_volume_texture(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    format: TexelFormat,
+    (slot, memory, texels): (u32, &impl GuestMemory, &mut TexelCache),
+) -> Option<RenderCommand> {
+    let order = channel_order(format, words[3]);
+    if (order.is_none() && destination_selects(words[3]) != IDENTITY_SELECTS)
+        || descriptor.compression.is_some()
+        || descriptor.base_level != 0
+    {
+        return None;
+    }
+    let extent @ (width, height, depth) = (
+        descriptor.width,
+        descriptor.height,
+        (words[4] & DEPTH_FIELD) + 1,
+    );
+    let levels = descriptor.levels;
+    let span = crate::tiling::volume_bytes_4kb_s3_bpp4(extent, levels)?;
+    let encoding = texture_encoding(format);
+    // Another image than a 64KB_R_X volume or a 2D one at the same address and extent; the selects
+    // reorder what is kept.
+    let order_tag = order.map_or(0, |order| u32::from_le_bytes(order) & 0x00ff_ffff);
+    let key = (
+        descriptor.base,
+        width,
+        height,
+        1 << 27 | depth ^ order_tag << 8,
+    );
+    let (hash, shared) = kept_or_read((texels, key, span), encoding, |spanned| {
+        let bytes = memory.read(descriptor.base, spanned)?;
+        let mut read = Vec::with_capacity(width as usize * height as usize * depth as usize);
+        for z in 0..depth {
+            for y in 0..height {
+                for x in 0..width {
+                    let at =
+                        crate::tiling::tiled_byte_offset_4kb_s3_bpp4(x, y, z, extent, (levels, 0))?;
+                    let texel = bytes.get(at..at + 4)?;
+                    read.push(match order {
+                        Some([r, g, b, a]) => u32::from_le_bytes([
+                            texel[usize::from(r)],
+                            texel[usize::from(g)],
+                            texel[usize::from(b)],
+                            texel[usize::from(a)],
+                        ]),
+                        None => u32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]]),
+                    });
+                }
+            }
+        }
+        Some(read)
+    })?;
+    Some(RenderCommand::BindVolumeTexture {
+        slot,
+        texels: shared,
+        hash,
+        width,
+        height,
+        depth,
+        sampling: crate::registers::TextureSampling::default(),
+        encoding,
+    })
+}
+
+/// The texels cached under `key` for `span` bytes at its address, or those `read` makes of them,
+/// kept under `key` with their hash: a volume's bind, read once until its bytes are written.
+fn kept_or_read(
+    (texels, key, span): (&mut TexelCache, (u64, u32, u32, u32), usize),
+    encoding: crate::backend::TextureEncoding,
+    read: impl FnOnce(usize) -> Option<Vec<u32>>,
+) -> Option<(u64, std::sync::Arc<[u32]>)> {
+    if let Some(cached) = kept_texels(texels, key, span as u64) {
+        return Some((cached.hash, cached.texels.clone()));
+    }
+    // Marked before the bytes are read, so a write racing the read is seen next time.
+    let since = texture_mark(key.0, span as u64);
+    let read = read(span)?;
+    let hash = crate::content_hash(&read) ^ u64::from(encoding_tag(encoding));
+    let shared: std::sync::Arc<[u32]> = read.into();
+    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
+        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
+    }
+    texels.insert(
+        key,
+        CachedTexels {
+            since,
+            hash,
+            texels: std::sync::Arc::clone(&shared),
+        },
+    );
+    Some((hash, shared))
 }
 
 /// The texels cached under `key` - its first element their address - where nothing was written to
@@ -10514,6 +10632,70 @@ mod tests {
                 .zip(0_u32..)
                 .all(|(&texel, index)| texel == index),
             "every texel in order"
+        );
+    }
+
+    /// A draw samples a `4KB_S` volume by addrlib's thick pattern
+    /// ([`crate::tiling::tiled_byte_offset_4kb_s3_bpp4`]): Grand Theft Auto V's scene binds a
+    /// 64 x 64 x 32 `8_8_8_8_UNORM` volume of three levels selecting `Z, Y, X, W` (`0xa0520f2e`).
+    /// Its first level binds as a volume of its texels in order, slice after slice, red and blue
+    /// swapped as the selects read them.
+    #[test]
+    fn a_thick_4kb_s_volume_binds_its_first_level() {
+        use super::{RenderCommand, texture_from_words};
+        use crate::tiling::{tiled_byte_offset_4kb_s3_bpp4, volume_bytes_4kb_s3_bpp4};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x10_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let extent @ (width, height, depth) = (64_u32, 64_u32, 32_u32);
+        let mut bytes = vec![0_u8; volume_bytes_4kb_s3_bpp4(extent, 3).expect("modelled")];
+        for z in 0..depth {
+            for y in 0..height {
+                for x in 0..width {
+                    let at =
+                        tiled_byte_offset_4kb_s3_bpp4(x, y, z, extent, (3, 0)).expect("level 0");
+                    let index = (z * height + y) * width + x;
+                    bytes[at..at + 4].copy_from_slice(&index.to_le_bytes());
+                }
+            }
+        }
+        let words = [
+            0x10_0000 >> 8,
+            (56 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            0xa052_0f2e,
+            depth - 1,
+            0x70_0020,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 13, &Memory(bytes), &mut super::TexelCache::new())
+            .expect("a volume");
+        let RenderCommand::BindVolumeTexture {
+            slot: 13,
+            texels,
+            width: 64,
+            height: 64,
+            depth: 32,
+            ..
+        } = bound
+        else {
+            panic!("{bound:?}");
+        };
+        let swapped = |index: u32| {
+            let [r, g, b, a] = index.to_le_bytes();
+            u32::from_le_bytes([b, g, r, a])
+        };
+        assert!(
+            texels
+                .iter()
+                .zip(0_u32..)
+                .all(|(&texel, index)| texel == swapped(index)),
+            "every texel in order, red and blue swapped"
         );
     }
 

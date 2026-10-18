@@ -277,6 +277,19 @@ pub enum TranslateError {
     )]
     NeedsBufferFormats,
 
+    /// A buffer load or store converts by its descriptor's format, and the draw's descriptors were
+    /// given, but not the one in the slot it goes through: that slot's descriptor word was not
+    /// resolved at the draw (D738).
+    #[error(
+        "instruction at {offset:#x} converts by the format of the descriptor in draw buffer slot {slot}, which this draw's descriptors did not resolve (D738)"
+    )]
+    UnresolvedBufferFormat {
+        /// Byte offset within the shader.
+        offset: u32,
+        /// The draw buffer slot.
+        slot: u32,
+    },
+
     /// A pixel shader reads one attribute both interpolated and flat, which a host input cannot
     /// be, and the translation was not given the draw's flat twins (D742).
     #[error(

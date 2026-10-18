@@ -1078,6 +1078,12 @@ pub trait Model {
         None
     }
 
+    /// Whether a draw's descriptors' formats were given at all (D738), so a slot without one is a
+    /// descriptor the draw did not resolve rather than a translation for no draw.
+    fn buffer_formats_given(&self) -> bool {
+        false
+    }
+
     /// Reads word `word_index` of the draw buffer at `slot`, which the bound buffer's first word
     /// is word zero of. An index past the bound buffer's end reads word zero instead, so the read
     /// is always defined; the caller's bounds check decides what the access answers.
@@ -6450,6 +6456,24 @@ const DESCRIPTOR_FORMAT_SHIFT: u32 = 12;
 /// and `1.0` for the others. A select of a component the format lacks, or a reserved code, is
 /// refused rather than guessed. An element outside the buffer reads as zeros under the same
 /// selects, as an untyped load answers zero.
+/// The fourth descriptor word of the draw buffer in `slot`, which a format load or store converts by
+/// (D738): refused as needing the draw's descriptors where none were given, and naming the slot
+/// where they were and this one was not resolved.
+fn buffer_format_word<M: Model + ?Sized>(
+    model: &M,
+    instruction: &Instruction,
+    slot: u32,
+) -> Result<u32, TranslateError> {
+    match model.buffer_descriptor_format(slot) {
+        Some(word3) => Ok(word3),
+        None if model.buffer_formats_given() => Err(TranslateError::UnresolvedBufferFormat {
+            offset: instruction.offset,
+            slot,
+        }),
+        None => Err(TranslateError::NeedsBufferFormats),
+    }
+}
+
 fn format_buffer_load<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -6466,9 +6490,7 @@ fn format_buffer_load<M: Model + ?Sized>(
             offset: instruction.offset,
             detail: "a format load through a buffer a draw does not bind, whose format is not known",
         })?;
-    let word3 = model
-        .buffer_descriptor_format(slot)
-        .ok_or(TranslateError::NeedsBufferFormats)?;
+    let word3 = buffer_format_word(model, instruction, slot)?;
     if word3 == 0 {
         return null_format_load(model, instruction, channels);
     }
@@ -6575,9 +6597,7 @@ fn format_buffer_store<M: Model + ?Sized>(
             offset: instruction.offset,
             detail: "a format store through a buffer a dispatch does not bind, whose format is not known",
         })?;
-    let word3 = model
-        .buffer_descriptor_format(slot)
-        .ok_or(TranslateError::NeedsBufferFormats)?;
+    let word3 = buffer_format_word(model, instruction, slot)?;
     let (format, selects, _) = descriptor_format(instruction, word3, channels)?;
     // More channels than the format has components writes the format's components, from the first
     // channels (D790): Mesa stores an image buffer's four channels whatever its format

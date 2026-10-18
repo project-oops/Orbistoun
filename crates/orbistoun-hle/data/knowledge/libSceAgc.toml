@@ -91,7 +91,8 @@ arity = 6
 returns = "pointer"
 edge_cases = [
     "MEASURED (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2855-2860): (acb, 2, 0, address, data, 1) wrote 0xc0033700 0x00000200, the address's halves and the dword; with a count of 0x40 the header is 0xc0423700 and all 0x40 dwords follow. It answered the packet's address and advanced by the packet's length.",
-    "Six arguments, nothing on the stack, unlike sceAgcDcbWriteData. A destination or cache policy other than (2, 0) was not measured and is refused.",
+    "MEASURED (obSCEne report-20261018-gt17-census.log (commit ed41499; SHA-256 a6733d7085e89bb0546ca873767f84a1ae211a62d4e8ae814af1a79c012dee13 as captured, 2cc2c9b9cbde39b8a5f12b4b77dddba24bfeece318b4df88960a6e3f23435eae as committed with LF endings), rows 3076-3081): (acb, 4, 0, ...) wrote control 0x400 and (acb, 2, 1, ...) 0x02000200 - destination << 8 | cache_policy << 25, DST_SEL and CACHE_POLICY. A destination past four bits or a policy past two is refused.",
+    "Six arguments, nothing on the stack, unlike sceAgcDcbWriteData.",
 ]
 known_by = "measured"
 found_by = "generated"
@@ -105,7 +106,8 @@ purpose = "Writes an EVENT_WRITE into an asynchronous compute command buffer."
 arity = 6
 returns = "pointer"
 edge_cases = [
-    "MEASURED (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2861-2866): (acb, 7, 0, 0x78, 0x4ee) and (acb, 7, 0, 0, 0) both wrote 0xc0004600 0x00000407 - the event with EVENT_INDEX 4 - and answered its address. An event other than 7 was not measured and is refused.",
+    "MEASURED (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2861-2866): (acb, 7, 0, 0x78, 0x4ee) and (acb, 7, 0, 0, 0) both wrote 0xc0004600 0x00000407 - the event with EVENT_INDEX 4 - and answered its address.",
+    "MEASURED (obSCEne report-20261018-gt17-census.log (commit ed41499; SHA-256 a6733d7085e89bb0546ca873767f84a1ae211a62d4e8ae814af1a79c012dee13 as captured, 2cc2c9b9cbde39b8a5f12b4b77dddba24bfeece318b4df88960a6e3f23435eae as committed with LF endings), rows 3082-3090): events 4, 0x14 and 0x28 were written as they are, 0xc0004600 then the event. Any other was not measured and is refused.",
 ]
 known_by = "measured"
 found_by = "static"
@@ -858,13 +860,13 @@ found_on = "2026-10-09"
 [[function]]
 name = "0x21a8c8fab7dd4722"
 arity = 4
-purpose = "Fills in a jump sceAgcDcbJump wrote empty: (jump, policy, target, dwords), the target's halves into the packet and dwords into the control word's size field, answering 0."
+purpose = "Fills in a jump sceAgcDcbJump wrote empty: (jump, policy, target, dwords), the target's halves into the packet, dwords into the control word's size field and policy into its bits 29:28, answering 0."
 edge_cases = [
     "GUEST-OBSERVED (PPSA04263, run 2026-10-18): 210 calls a run, each on a jump built empty - header 0xc0023f00, target 0, control 0x2f300000 - with policy 2, a target holding the next buffer's first packet, and dwords its length (0x3df9, 4). Left unanswered, every such jump stayed empty and the buffers it leads to never ran.",
-    "The size goes in IB_SIZE (bits 19:0, Mesa registers/pkt3.json) and the rest of the control word stays as the builder wrote it, CHAIN and the policy bits included; policy is not written again. A pointer at anything but a jump is refused with 0x8a6c000a and left alone. The reference emulators read the same four arguments.",
+    "MEASURED (obSCEne report-20261018-gt17-census.log (commit ed41499; SHA-256 a6733d7085e89bb0546ca873767f84a1ae211a62d4e8ae814af1a79c012dee13 as captured, 2cc2c9b9cbde39b8a5f12b4b77dddba24bfeece318b4df88960a6e3f23435eae as committed with LF endings), rows 3063-3075): on a jump sceAgcDcbJump(dcb, 1, 2, 0, 0) wrote (control 0x2f300000), (jump, 2, target, 0x3df9) answered 0 and left control 0x2f303df9, and (jump, 0, target, 4) left 0x0f300004 - the size in IB_SIZE (bits 19:0, Mesa registers/pkt3.json), the policy written into bits 29:28, the rest as the builder wrote it - with the target's halves in dwords 1 and 2. On a REWIND packet it answered 0x8a6c000c and changed nothing: it checks the packet's opcode.",
 ]
-known_by = "assumed"
-assumptions = ["the second argument is the cache policy the jump was built with, and needs no write", "the answer is 0"]
+known_by = "measured"
+cites = "obSCEne report-20261018-gt17-census.log (commit ed41499; SHA-256 a6733d7085e89bb0546ca873767f84a1ae211a62d4e8ae814af1a79c012dee13 as captured, 2cc2c9b9cbde39b8a5f12b4b77dddba24bfeece318b4df88960a6e3f23435eae as committed with LF endings), rows 3063-3075."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-18"
 

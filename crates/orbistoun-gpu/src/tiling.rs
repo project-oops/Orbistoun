@@ -426,6 +426,100 @@ pub fn tiled_byte_offset_256b_s_bpp8(x: u32, y: u32, width: u32) -> usize {
     block * S256_BLOCK_BYTES + offset
 }
 
+/// Where `GFX10_SW_4K_S3_PATINFO`'s thick pattern at four bytes an element places an element's
+/// coordinate bits in its 4 KiB block (`gfx10SwizzlePattern.h:3758` NIBBLE01 row 31, `:3904` NIBBLE2
+/// row 133): `X0 Y0 Z0 Y1 X1 Z1 Y2 X2 Z2 Y3` in byte bits 2-11, an 8 x 16 x 8-element block.
+const S3_BPP4_X_BITS: [usize; 3] = [0x4, 0x40, 0x200];
+/// The same for `y`.
+const S3_BPP4_Y_BITS: [usize; 4] = [0x8, 0x20, 0x100, 0x800];
+/// The same for `z`.
+const S3_BPP4_Z_BITS: [usize; 3] = [0x10, 0x80, 0x400];
+/// A thick 32-bpp `4KB_S` block's extent in elements: width, height, slices.
+const S3_BPP4_BLOCK: (u32, u32, u32) = (8, 16, 8);
+
+/// Each level's bytes in one slice of a thick 32-bpp `4KB_S` chain, level 0 `extent`, `levels`
+/// long, or `None` when a level lies in the mip tail, which is not modelled: a thick 4 KiB block's
+/// tail holds up to five levels no larger than 8 x 8 (`Lib::GetMipTailDim`, `addrlib2.cpp:1808`,
+/// halving the height; `Gfx10Lib::GetMaxNumMipsInTail`, `gfx10addrlib.cpp:2139`). A single level
+/// has no tail (`gfx10addrlib.cpp:3900`).
+fn s3_bpp4_level_slices((width, height): (u32, u32), levels: u32) -> Option<Vec<u64>> {
+    const TAIL_MOST: u32 = 5;
+    let (block_width, block_height, _) = S3_BPP4_BLOCK;
+    (0..levels)
+        .map(|level| {
+            let (w, h) = mip_layout_extent(width, height, level);
+            let in_tail = levels > 1
+                && w <= block_width
+                && h <= block_height / 2
+                && levels - level <= TAIL_MOST;
+            (!in_tail).then(|| {
+                u64::from(w.next_multiple_of(block_width))
+                    * u64::from(h.next_multiple_of(block_height))
+                    * 4
+            })
+        })
+        .collect()
+}
+
+/// Byte offset of element `(x, y, z)` of level `level` in a `levels`-level 32-bpp `4KB_S` volume,
+/// level 0 `extent` (width, height, depth): `Gfx10Lib::ComputeSurfaceAddrFromCoordMacroTiled`
+/// (`gfx10addrlib.cpp:4833-4849`) for a thick surface - the eight-slice layer `z` lies in, each layer
+/// holding every level's slab of eight slices smallest first, then the level's block across its
+/// pitch, then the element's bits by the thick pattern's bits. `None` past the chain, or for a
+/// chain with a level in the mip tail.
+#[must_use]
+pub fn tiled_byte_offset_4kb_s3_bpp4(
+    x: u32,
+    y: u32,
+    z: u32,
+    (width, height, _depth): (u32, u32, u32),
+    (levels, level): (u32, u32),
+) -> Option<usize> {
+    let (block_width, block_height, block_slices) = S3_BPP4_BLOCK;
+    if level >= levels {
+        return None;
+    }
+    let slices = s3_bpp4_level_slices((width, height), levels)?;
+    let layer: u64 = slices.iter().sum::<u64>() * u64::from(block_slices);
+    let macro_block: u64 = slices[level as usize + 1..]
+        .iter()
+        .map(|slice| slice * u64::from(block_slices))
+        .sum();
+    let (level_width, _) = mip_layout_extent(width, height, level);
+    let pitch_blocks = u64::from(level_width.div_ceil(block_width));
+    let block = u64::from(y / block_height) * pitch_blocks + u64::from(x / block_width);
+    let mut offset = 0;
+    for (bit, place) in S3_BPP4_X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in S3_BPP4_Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in S3_BPP4_Z_BITS.iter().enumerate() {
+        if z >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    let address = u64::from(z / block_slices) * layer + macro_block + (block << 12) + offset as u64;
+    usize::try_from(address).ok()
+}
+
+/// The bytes a `levels`-level 32-bpp `4KB_S` volume, level 0 `extent`, spans: every eight-slice
+/// layer of the chain. `None` where [`tiled_byte_offset_4kb_s3_bpp4`] is.
+#[must_use]
+pub fn volume_bytes_4kb_s3_bpp4(
+    (width, height, depth): (u32, u32, u32),
+    levels: u32,
+) -> Option<usize> {
+    let slices = s3_bpp4_level_slices((width, height), levels)?;
+    let layers = u64::from(depth.div_ceil(S3_BPP4_BLOCK.2));
+    usize::try_from(slices.iter().sum::<u64>() * u64::from(S3_BPP4_BLOCK.2) * layers).ok()
+}
+
 /// A 64-bpp `256B_S` block's width in elements: 32 elements of eight bytes, eight across.
 const S256_BPP8_BLOCK_WIDTH: u32 = 8;
 /// A 64-bpp `256B_S` block's height in elements: four down.
@@ -1978,6 +2072,51 @@ mod tests {
         );
         assert_eq!(layout.at_bytes_per_texel(4), Some(SurfaceLayout::S256B));
         assert_eq!(SurfaceLayout::S256BBpp16.words(32, 32), 8 * 8 * 0x100 / 4);
+    }
+
+    /// A 32-bpp `4KB_S` volume - PPSA04263's 64 x 64 x 32, three-level `8_8_8_8_UNORM` texture -
+    /// places each element of a level by addrlib's thick pattern (`gfx10SwizzlePattern.h:3758`,
+    /// `:3904`, `GFX10_SW_4K_S3_PATINFO` at 4 bpe: `X0 Y0 Z0 Y1 X1 Z1 Y2 X2 Z2 Y3` in byte bits 2-11),
+    /// in 8 x 16 x 8-element blocks, and the chain's levels per eight-slice layer, smallest first
+    /// (`Gfx10Lib::ComputeSurfaceAddrFromCoordMacroTiled`, `gfx10addrlib.cpp:4833-4849`): level 2's
+    /// 16 x 16 x 8 at 0, level 1's at 8192, level 0's at 40960, each layer 172032 bytes.
+    #[test]
+    fn a_4kb_s_volume_element_lies_where_addrlib_puts_it() {
+        let at = |x, y, z| super::tiled_byte_offset_4kb_s3_bpp4(x, y, z, (64, 64, 32), (3, 0));
+        for ((x, y, z), address) in [
+            ((0, 0, 0), 40960),
+            ((1, 0, 0), 40960 + 0x4),
+            ((0, 1, 0), 40960 + 0x8),
+            ((0, 0, 1), 40960 + 0x10),
+            ((0, 2, 0), 40960 + 0x20),
+            ((2, 0, 0), 40960 + 0x40),
+            ((0, 0, 2), 40960 + 0x80),
+            ((0, 4, 0), 40960 + 0x100),
+            ((4, 0, 0), 40960 + 0x200),
+            ((0, 0, 4), 40960 + 0x400),
+            ((0, 8, 0), 40960 + 0x800),
+            ((8, 0, 0), 40960 + 0x1000),
+            ((0, 16, 0), 40960 + 8 * 0x1000),
+            ((0, 0, 8), 172_032 + 40960),
+        ] {
+            assert_eq!(at(x, y, z), Some(address), "({x}, {y}, {z})");
+        }
+        // Level 1, 32 x 32 x 16, starts after level 2's layer slab.
+        assert_eq!(
+            super::tiled_byte_offset_4kb_s3_bpp4(0, 0, 0, (64, 64, 32), (3, 1)),
+            Some(8192)
+        );
+        // A single level has no tail, however small.
+        assert_eq!(super::volume_bytes_4kb_s3_bpp4((1, 1, 1), 1), Some(0x1000));
+        // A chain with a level in the mip tail is not modelled.
+        assert_eq!(
+            super::tiled_byte_offset_4kb_s3_bpp4(0, 0, 0, (64, 64, 32), (4, 0)),
+            None
+        );
+        assert_eq!(
+            super::volume_bytes_4kb_s3_bpp4((64, 64, 32), 3),
+            Some(4 * 172_032)
+        );
     }
 
     /// A 64-bpp `256B_S` surface - a `BC1` image's blocks, as a PPSA04263 scene texture holds them -

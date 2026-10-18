@@ -350,6 +350,54 @@ fn a_format_load_without_a_draws_descriptors_asks_for_them() {
     ));
 }
 
+/// With a draw's descriptors but none resolved for the slot a format load reads through, the
+/// refusal names that slot rather than asking for descriptors it was given: Grand Theft Auto V's
+/// scene vertex shader was refused as if it had none.
+#[test]
+fn a_format_load_through_an_unresolved_slot_names_it() {
+    let words: [u32; 10] = [
+        0xbe84_0300, // s_mov_b32 s4, s0
+        0xbe85_0380, // s_mov_b32 s5, 0
+        0xbe86_0390, // s_mov_b32 s6, 16
+        0xbe87_0380, // s_mov_b32 s7, 0
+        0xe00c_0000, // buffer_load_format_xyzw v[0:3], off, s[4:7], 0
+        0x8001_0000,
+        0xbf8c_0000,
+        0xf800_180f,
+        0x0302_0100,
+        0xbf81_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode_program(&bytes, &encodings, &operands);
+    let refused = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 1,
+            block_offset: 16,
+            draw_buffers: true,
+            buffer_formats: Some(orbistoun_translate::wavefront::BufferFormats::default()),
+            ..UserData::default()
+        },
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(orbistoun_translate::TranslateError::UnresolvedBufferFormat { slot: 0, .. })
+        ),
+        "{:?}",
+        refused.err()
+    );
+}
+
 /// A primitive shader that reads four words of its bound buffer, as [`pixel_shader`] does, and
 /// carries them to parameter zero of a triangle covering the target: lane `n`'s corner is
 /// `(4 * (n & 1) - 1, 2 * (n & 2) - 1)`, so `(-1, -1)`, `(3, -1)` and `(-1, 3)`.
