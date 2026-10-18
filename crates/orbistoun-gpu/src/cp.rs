@@ -395,19 +395,18 @@ fn is_memory_inert(opcode: u8, body_dwords: usize) -> bool {
 /// `INDIRECT_BUFFER` (Mesa `sid.h:97`): run another buffer's commands, then return - or, chained,
 /// run them instead of the rest of this one.
 const INDIRECT_BUFFER: u8 = 0x3F;
-/// `IB_CONTROL` (Mesa `registers/pkt3.json:273-279`): the buffer's size in dwords (19:0), whether
-/// it is a chain (20), and whether the packet is valid (23).
+/// `IB_CONTROL` (Mesa `registers/pkt3.json:273-279`): the buffer's size in dwords (19:0) and
+/// whether it is a chain (20). The console's own jump sets no `VALID` bit (23) - it writes
+/// `0x0f20_0000` besides, obSCEne `report-20261018-gt-census.log` 2845-2851 - so none is asked for.
 const IB_SIZE_MASK: u32 = 0xF_FFFF;
 const IB_CHAIN: u32 = 1 << 20;
-const IB_VALID: u32 = 1 << 23;
 /// How deep buffers calling buffers are followed: a cycle is cut there rather than followed.
 const MAX_INDIRECT_DEPTH: u32 = 8;
 
 /// `stream` with each valid `INDIRECT_BUFFER` in it replaced by the commands of the buffer it names,
 /// read through `read` and expanded in turn: a call's where it stands, the stream going on after
 /// it; a chain's in place of the rest, which never runs (Mesa `ac_parse_ib.c:519-533`). A packet
-/// whose buffer cannot be read, one not marked valid, and a stream whose walk is not trusted are
-/// left as they are.
+/// whose buffer cannot be read, and a stream whose walk is not trusted, are left as they are.
 #[must_use]
 pub fn expand_indirect_buffers(
     stream: &[u8],
@@ -448,12 +447,16 @@ fn expand_at_depth(
         else {
             continue;
         };
-        if control & IB_VALID == 0 {
-            continue;
-        }
         let length = (control & IB_SIZE_MASK) as usize * 4;
-        let Some(target) = read(address(low, high), length) else {
-            continue;
+        // A buffer of no dwords is read from nowhere, whatever its address: a chain to one ends the
+        // stream, and a call to one runs nothing.
+        let target = if length == 0 {
+            Vec::new()
+        } else {
+            let Some(target) = read(address(low, high), length) else {
+                continue;
+            };
+            target
         };
         let at = packet.offset as usize;
         expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
@@ -1627,14 +1630,15 @@ mod tests {
         assert_eq!(kept, Some((label, 0x1bbb, 2)));
     }
 
-    /// `INDIRECT_BUFFER` (`IB_SIZE` 19:0 in dwords, `CHAIN` 20, `VALID` 23, Mesa
-    /// `registers/pkt3.json:273-279`), as `ac_emit_cp_indirect_buffer` builds it.
+    /// `INDIRECT_BUFFER` (`IB_SIZE` 19:0 in dwords, `CHAIN` 20, Mesa `registers/pkt3.json:273-279`)
+    /// as the console's `sceAgcDcbJump` writes it: no `VALID` bit, and `0x0f20_0000` set besides
+    /// (obSCEne `report-20261018-gt-census.log` 2845-2851).
     fn indirect(target: u64, dwords: u32, chain: bool) -> Vec<u32> {
         vec![
             command_header(0x3F, 3),
             target as u32,
             (target >> 32) as u32,
-            dwords | u32::from(chain) << 20 | 1 << 23,
+            dwords | u32::from(chain) << 20 | 0x0f20_0000,
         ]
     }
 
@@ -1677,6 +1681,28 @@ mod tests {
             memory.word(0x4000),
             0,
             "and the rest of its caller does not"
+        );
+
+        // A chain of no dwords ends its caller, wherever it points, and a call of none runs nothing:
+        // PPSA04263 submits buffers ending in a jump whose target and size are still zero.
+        let mut ended = fill(0x2000, 0x1111_1111, 4);
+        ended.extend(indirect(0, 0, true));
+        ended.extend(fill(0x4000, 0x4444_4444, 4));
+        let expanded = super::expand_indirect_buffers(&bytes(&ended), &read);
+        let mut memory = Fake::default();
+        let done = execute(&expanded, &mut memory);
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x4000), 0, "nothing after the empty chain");
+        let mut empty_call = fill(0x2000, 0x1111_1111, 4);
+        empty_call.extend(indirect(0, 0, false));
+        empty_call.extend(fill(0x4000, 0x4444_4444, 4));
+        let expanded = super::expand_indirect_buffers(&bytes(&empty_call), &read);
+        let mut memory = Fake::default();
+        execute(&expanded, &mut memory);
+        assert_eq!(
+            memory.word(0x4000),
+            0x4444_4444,
+            "the stream goes on after an empty call"
         );
 
         // A target that cannot be read leaves the stream as it was.

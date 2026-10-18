@@ -361,13 +361,14 @@ found_on = "2026-09-14"
 [[function]]
 name = "sceAgcDcbJump"
 purpose = "Chains from one command buffer to another."
+returns = "pointer"
 edge_cases = [
     "MEASURED: sceAgcDcbJumpGetSize answered 16 bytes (4 dwords); the builder advanced the writer by 16 and wrote 16. All three agree.",
-    'DIVERGENCE from prosper, and it is the load-bearing kind. prosper (an independent PS5 emulator, public audit docs/AGC_PACKET_SIZES.md) emits 5 dwords here and documents the extra one as a predication flag slot that its own sceAgcSetPacketPredication writes into the packet afterwards - private state, not a copy of a hardware field. Its audit lists the row as "oversized by 1, but the extra dword is load-bearing" and open. The measurement here says the real library reserves 4. That matters beyond bookkeeping: prosper own audit explains that a guest which inlines the size at compile time never asks GetSize and cannot be corrected, so emitting more dwords than the library overruns a reservation the guest made in good faith - the exact defect class that cost it a title (a 16-dword submit epilogue overrun). orbistoun should encode 4 and keep any per-packet state of its own outside the packet.',
-    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "MEASURED (obSCEne report-20261018-gt-census.log 2843-2851, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d): (dcb, 1, 2, target, 0xe) wrote 0xc0023f00, target low, target high, 0x2f30000e; (dcb, 1, 2, 0, 0) wrote 0xc0023f00, 0, 0, 0x2f300000; (dcb, 0, 0, target, 0xe) wrote 0xc0023f00, target low, target high, 0x0f20000e. So INDIRECT_BUFFER (Mesa sid.h:97) with IB_SIZE the fifth argument, CHAIN (bit 20) the second, the third in bits 29:28, and 0x0f200000 always - no VALID bit (23).",
+    "PPSA04263 makes its jumps from boot on, many as (dcb, 1, 2, 0, 0): a chain whose target it fills in after it submits, the console's command processor held at a REWIND (sceAgcDcbRewind, valid bit 31 measured in the same log, 2864-2869) until sceAgcRewindPatchSetRewindState releases it. orbistoun carries a submission out as it stands when submitted, so the builder is not wired yet: wired, PPSA04263 stops at its second flip on a jump not yet filled in.",
 ]
 known_by = "measured"
-cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+cites = "obSCEne report-20261018-gt-census.log (commit 92bb1ab), rows 2843-2851; obSCEne sweep 20260914-100833 for the size."
 found_on = "2026-09-14"
 
 [[function]]
