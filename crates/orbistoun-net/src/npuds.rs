@@ -23,7 +23,7 @@ guest_module! {
         "sceNpUniversalDataSystemCreateHandle" => 1,
         // (&object)
         "sceNpUniversalDataSystemCreateEventPropertyObject" => 1,
-        // (name, prop, &event, 0)
+        // (name, prop, &event, &own)
         "sceNpUniversalDataSystemCreateEvent" => 4,
         // (ctx, handle, 0)
         "sceNpUniversalDataSystemRegisterContext" => 3,
@@ -289,25 +289,44 @@ fn create_event_property_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     new_object(args[0])
 }
 
-/// `sceNpUniversalDataSystemCreateEvent(name, prop, &event, 0)`: writes a new event's address to
+/// `sceNpUniversalDataSystemCreateEvent(name, prop, &event, &own)`: writes a new event's address to
 /// the first eight bytes of `event`, leaving the rest of the block as it was, and answers 0, with a
 /// property object or a null one; a null `event` answers `0x80553102`. A second call gives another
 /// event (REQ-20261014T0430Z-ue01, `000-boot/uds-create-event`, `report-20261014-batch4.log`
-/// 2855-2863). PPSA02664 calls it once a frame.
+/// 2855-2863, with `own` null). PPSA02664 calls it once a frame.
+///
+/// A non-null `own` takes the event's own property object, holding `prop`'s values, for the title
+/// to fill before posting (assumed, as the reference emulators read the fourth argument).
+/// PPSA04263 creates its trophy events so - `CreateEvent(name, 0, &event, &own)` - fills `own`
+/// and posts only if the fill succeeded (image+0x2d6912f-0x2d6918e).
 fn create_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let answer = new_object(args[2]);
-    if answer == 0 {
-        // SAFETY: the event slot `new_object` just wrote; read through the checked accessor.
-        let event = unsafe { orbistoun_mem::guest::read_u64(args[2]) };
-        // SAFETY: the guest's event name, a NUL-terminated string by the call's contract; read
-        // through the checked accessor.
-        let name = unsafe { orbistoun_mem::guest::read_cstr(args[0], 256) };
-        if let (Some(event), Some(name)) = (event, name) {
-            let name = String::from_utf8_lossy(&name).into_owned();
-            kept().events.insert(event, (name, args[1]));
-        }
+    if answer != 0 {
+        return answer;
     }
-    answer
+    // SAFETY: the event slot `new_object` just wrote; read through the checked accessor.
+    let event = unsafe { orbistoun_mem::guest::read_u64(args[2]) };
+    // SAFETY: the guest's event name, a NUL-terminated string by the call's contract; read
+    // through the checked accessor.
+    let name = unsafe { orbistoun_mem::guest::read_cstr(args[0], 256) };
+    let object = if args[3] == 0 {
+        args[1]
+    } else {
+        if new_object(args[3]) != 0 {
+            return u64::from(GuestError::Unimplemented.as_raw());
+        }
+        // SAFETY: the slot `new_object` just wrote; read through the checked accessor.
+        let own = unsafe { orbistoun_mem::guest::read_u64(args[3]) }.unwrap_or(0);
+        let mut state = kept();
+        let seeded = state.objects.get(&args[1]).cloned().unwrap_or_default();
+        state.objects.insert(own, seeded);
+        own
+    };
+    if let (Some(event), Some(name)) = (event, name) {
+        let name = String::from_utf8_lossy(&name).into_owned();
+        kept().events.insert(event, (name, object));
+    }
+    0
 }
 
 /// What `sceNpUniversalDataSystemRegisterContext` answered for a context and handle just made,
@@ -443,19 +462,18 @@ mod tests {
         args[..3].copy_from_slice(&[at(&mut context), u64::from(user), 0]);
         assert_eq!(super::create_context(&args), 0);
         assert_eq!(super::register_context(&[context, 0x2_0176, 0, 0, 0, 0]), 0);
+        // As PPSA04263 makes it: no property object passed, the event's own taken and filled.
+        let name = c"_UnlockTrophy";
+        let event_at = event.as_mut_ptr() as u64;
+        let own_at = at(&mut object);
         assert_eq!(
-            super::create_event_property_object(&[at(&mut object), 0, 0, 0, 0, 0]),
+            super::create_event(&[name.as_ptr() as u64, 0, event_at, own_at, 0, 0]),
             0
         );
+        assert_ne!(object, 0, "the event's own property object");
         let key = c"_trophy_id";
         assert_eq!(
             super::set_int32(&[object, key.as_ptr() as u64, 1, 0, 0, 0]),
-            0
-        );
-        let name = c"_UnlockTrophy";
-        let event_at = event.as_mut_ptr() as u64;
-        assert_eq!(
-            super::create_event(&[name.as_ptr() as u64, object, event_at, 0, 0, 0]),
             0
         );
         assert_eq!(
