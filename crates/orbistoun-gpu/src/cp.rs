@@ -946,6 +946,48 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
 }
 
 /// `RELEASE_MEM`: event control, selectors, address, data (`ac_cmdbuf_cp.c:216-229`).
+/// The labels end-of-pipe releases wrote values to this run: by address, the last value and how
+/// many releases wrote one.
+type ReleasedLabels = std::collections::BTreeMap<u64, (u64, u64)>;
+
+fn released_label_record() -> &'static std::sync::Mutex<ReleasedLabels> {
+    static RELEASED: std::sync::Mutex<ReleasedLabels> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    &RELEASED
+}
+
+/// The bits of a release's value its data selector writes: the low word, or both.
+const fn value_mask(data_sel: u32) -> u64 {
+    if data_sel == DATA_SEL_VALUE_32BIT {
+        0xFFFF_FFFF
+    } else {
+        u64::MAX
+    }
+}
+
+fn note_release(destination: u64, value: u64) {
+    if let Ok(mut labels) = released_label_record().lock() {
+        let entry = labels.entry(destination).or_insert((0, 0));
+        *entry = (value, entry.1 + 1);
+    }
+}
+
+/// Each label an end-of-pipe release wrote a value to this run, as `(address, last value,
+/// releases)`: where a guest's fences stood when it stopped, for a report to set beside the value
+/// a waiting thread asks for.
+#[must_use]
+pub fn released_labels() -> Vec<(u64, u64, u64)> {
+    released_label_record().lock().map_or_else(
+        |_| Vec::new(),
+        |labels| {
+            labels
+                .iter()
+                .map(|(&at, &(value, count))| (at, value, count))
+                .collect()
+        },
+    )
+}
+
 fn release_mem(
     body: &[u32],
     memory: &mut dyn CpMemory,
@@ -973,6 +1015,12 @@ fn release_mem(
     };
     if !written.is_empty() && !memory.write(destination, &written) {
         return Err(Stop::OutOfBounds(destination));
+    }
+    if matches!(selectors >> 29, DATA_SEL_VALUE_32BIT | DATA_SEL_VALUE_64BIT) {
+        note_release(
+            destination,
+            address(data_low, data_high) & value_mask(selectors >> 29),
+        );
     }
     // An interrupting release (`INT_SEL`, bits 26:24, Mesa `sid.h` `EOP_INT_SEL`, none at 0) raises
     // the interrupt whose context id is the last body dword (`INT_CTXID`).
@@ -1560,6 +1608,23 @@ mod tests {
             Some("copied there by a DMA_DATA from 0x8808")
         );
         assert_eq!(super::dma_landed_at(copied + 16), None, "past its end");
+    }
+
+    /// Each label an end-of-pipe release writes a value to is kept with the last value and how many
+    /// releases wrote it, so a run report says where a guest's fence stood when it stopped:
+    /// PPSA04263's prologue waits for label 0 to reach 0x1be1, and the releases left it at 0x1bbb.
+    #[test]
+    fn a_label_s_last_release_is_kept() {
+        // An address no other test releases to, as the record is the run's.
+        let label = 0x8f40_u64;
+        let mut stream = release(label, 1, 0x1bba);
+        stream.extend(release(label, 1, 0x1bbb));
+        let mut memory = Fake::default();
+        execute(&bytes(&stream), &mut memory);
+        let kept = super::released_labels()
+            .into_iter()
+            .find(|&(at, ..)| at == label);
+        assert_eq!(kept, Some((label, 0x1bbb, 2)));
     }
 
     /// `INDIRECT_BUFFER` (`IB_SIZE` 19:0 in dwords, `CHAIN` 20, `VALID` 23, Mesa

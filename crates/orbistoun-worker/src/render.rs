@@ -2629,6 +2629,30 @@ fn log_execution() {
         record.drawn,
         record.bytes_written,
     );
+    report_released_labels();
+}
+
+/// How many released labels the report names, most released first.
+const LABELS_NAMED: usize = 8;
+
+/// Says where the end-of-pipe labels stood when the run ended: a thread waiting on a fence reads
+/// one of them, and the value it asks for set beside the last one written says how many releases
+/// never came (PPSA04263's prologue asked for 0x1be1 of a label left at 0x1bbb).
+fn report_released_labels() {
+    let mut labels = orbistoun_gpu::cp::released_labels();
+    if labels.is_empty() {
+        return;
+    }
+    labels.sort_by_key(|&(.., releases)| std::cmp::Reverse(releases));
+    let named: Vec<String> = labels
+        .iter()
+        .take(LABELS_NAMED)
+        .map(|(at, value, releases)| format!("{at:#x} = {value:#x} ({releases} release(s))"))
+        .collect();
+    tracing::info!(
+        "the labels end-of-pipe releases wrote, as the run left them: {}",
+        named.join(", ")
+    );
 }
 
 #[cfg(test)]
