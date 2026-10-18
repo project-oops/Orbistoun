@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        90,
+        93,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"
@@ -110,6 +110,54 @@ fn every_wired_builder_is_reachable_by_its_import_name() {
 /// nothing, and is refused here since its answer was not reported. Longer ones follow the PM4
 /// header (count = length - 2, the rule 1 is the wrapped case of): PPSA02664 asks for 3 and fills
 /// the two body dwords through `0x7d86501b8094ef57`, so the body is reserved and left unwritten.
+/// `sceAgcDcbJump` writes the console's bytes for each of obSCEne's three arms
+/// (`report-20261018-gt-census.log` 2845-2851), with the target in place of its buffer.
+#[test]
+fn dcb_jump_writes_the_measured_indirect_buffer() {
+    let target = 0x0000_7400_01eb_c500_u64;
+    for (chain, policy, at, dwords, control) in [
+        (1, 2, target, 0xe, 0x2f30_000e_u32),
+        (1, 2, 0, 0, 0x2f30_0000),
+        (0, 0, target, 0xe, 0x0f20_000e),
+    ] {
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        (args[1], args[2], args[3], args[4]) = (chain, policy, at, dwords);
+        let start = w.cursor();
+        assert_eq!(
+            call("sceAgcDcbJump", args),
+            start,
+            "returns the packet address"
+        );
+        let expected: Vec<u8> = [0xc002_3f00, at as u32, (at >> 32) as u32, control]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        assert_eq!(
+            w.bytes(),
+            expected.as_slice(),
+            "arm ({chain}, {policy}, {at:#x}, {dwords:#x})"
+        );
+    }
+}
+
+/// `sceAgcDcbRewind` writes a REWIND not yet released and answers its address
+/// (`report-20261018-gt-census.log` 2864-2866).
+#[test]
+fn dcb_rewind_writes_an_unreleased_rewind() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    let start = w.cursor();
+    assert_eq!(
+        call("sceAgcDcbRewind", args),
+        start,
+        "returns the packet address"
+    );
+    assert_eq!(w.bytes(), &[0x00, 0x59, 0x00, 0xc0, 0, 0, 0, 0]);
+}
+
 #[test]
 fn cb_nop_writes_a_nop_of_the_length_asked() {
     let w = Writer::new(0x400);

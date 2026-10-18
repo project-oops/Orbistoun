@@ -5115,9 +5115,40 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
         return SUBMIT_OK;
     };
+    carry_out_stream(&bytes, &memory);
+    SUBMIT_OK
+}
+
+/// The most a released `REWIND`'s continuation is read for: a trampoline holds the `REWIND` and the
+/// jump after it, a few dwords, and the read stops at that jump.
+const CONTINUATION_WINDOW: usize = 0x100;
+
+/// Carries out what a `REWIND` the title has just released hands over, from `after`, just past it:
+/// its packets up to and with the jump that leaves its buffer ([`cp::through_first_chain`]),
+/// followed where they lead as a submission's are. The console's command processor holds at the
+/// `REWIND` while the title fills that jump in, then goes on through it, in order behind what was
+/// submitted before; carried out here when the title releases it, it goes on in the same order.
+pub(crate) fn release_rewind(after: u64) {
+    let memory = MappedRegions::current();
+    let window = [CONTINUATION_WINDOW, CONTINUATION_WINDOW / 4]
+        .into_iter()
+        .find_map(|length| memory.read(after, length).map(<[u8]>::to_vec));
+    let Some(continuation) = window.as_deref().and_then(cp::through_first_chain) else {
+        return;
+    };
+    orbistoun_kernel::thread::with_room(SUBMIT_STACK_ROOM, || {
+        crate::perf::measure(crate::perf::Phase::Submit, || {
+            carry_out_stream(&continuation, &memory);
+        });
+    });
+}
+
+/// Prepares and carries out a submission's `bytes`, read from guest memory: [`submit_described`]
+/// once it has them, and a released `REWIND`'s continuation.
+fn carry_out_stream(bytes: &[u8], memory: &MappedRegions) {
     // The buffers it calls or chains to are part of what it carries out, so everything after this
     // - preparation, the command processor, the queued writes - sees their commands in place.
-    let bytes = cp::expand_indirect_buffers(&bytes, &|at, length| {
+    let bytes = cp::expand_indirect_buffers(bytes, &|at, length| {
         memory.read(at, length).map(<[u8]>::to_vec)
     });
     // Asynchronously, a preparation that read what a queued submission writes is made again once
@@ -5125,7 +5156,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
     // one that read only what a queued submission draws is drawn again as it is carried out (D882).
     let ((mut submission, writes), read_ahead) =
         crate::perf::measure(crate::perf::Phase::Prepare, || {
-            command_processor::preparing(|| prepare_live(&bytes, &memory))
+            command_processor::preparing(|| prepare_live(&bytes, memory))
         });
     submission.read_ahead_of_draws = read_ahead;
     // The next submission is prepared from the registers this one leaves, so they are carried here,
@@ -5137,7 +5168,6 @@ fn submit_described_timed(descriptor: u64) -> u64 {
     } else {
         run_submission(&bytes, submission);
     }
-    SUBMIT_OK
 }
 
 /// Prepares `bytes` through the live pipeline, made at the first submission, and answers what

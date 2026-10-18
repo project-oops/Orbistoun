@@ -400,6 +400,11 @@ const INDIRECT_BUFFER: u8 = 0x3F;
 /// `0x0f20_0000` besides, obSCEne `report-20261018-gt-census.log` 2845-2851 - so none is asked for.
 const IB_SIZE_MASK: u32 = 0xF_FFFF;
 const IB_CHAIN: u32 = 1 << 20;
+/// `REWIND` (Mesa `sid.h:205`): the command processor holds here until its valid bit (31 of its
+/// one body dword, obSCEne `report-20261018-gt-census.log` 2864-2869) is set, then goes on.
+const REWIND: u8 = 0x59;
+/// A `REWIND`'s valid bit.
+pub const REWIND_RELEASED: u32 = 1 << 31;
 /// How deep buffers calling buffers are followed: a cycle is cut there rather than followed.
 const MAX_INDIRECT_DEPTH: u32 = 8;
 
@@ -415,6 +420,27 @@ pub fn expand_indirect_buffers(
     expand_at_depth(stream, read, 0)
 }
 
+/// The packets of `window` up to and with the first chained `INDIRECT_BUFFER`, which leaves the
+/// buffer they stand in: what a released `REWIND` hands over, read from just after it. `None` when
+/// no chain is found before the walk stops, so nothing past the buffer is ever carried out.
+#[must_use]
+pub fn through_first_chain(window: &[u8]) -> Option<Vec<u8>> {
+    let walked = packet::walk(window);
+    let chain = walked.packets.iter().find(|packet| {
+        packet.kind
+            == (PacketKind::Command {
+                opcode: INDIRECT_BUFFER,
+            })
+            && packet.length == 16
+            && window
+                .get(packet.offset as usize + 12..packet.offset as usize + 16)
+                .is_some_and(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & IB_CHAIN != 0)
+    })?;
+    window
+        .get(..(chain.offset + chain.length) as usize)
+        .map(<[u8]>::to_vec)
+}
+
 /// [`expand_indirect_buffers`] at `depth` buffers in.
 fn expand_at_depth(
     stream: &[u8],
@@ -428,6 +454,21 @@ fn expand_at_depth(
     let mut expanded = Vec::with_capacity(stream.len());
     let mut copied = 0;
     for packet in &walked.packets {
+        // A REWIND not yet released holds everything after it, so the stream ends there; the title
+        // releasing it hands the rest over then. A released one holds nothing back.
+        if packet.kind == (PacketKind::Command { opcode: REWIND }) {
+            let at = packet.offset as usize;
+            let body = packet.body_offset() as usize;
+            let released = stream.get(body..body + 4).is_some_and(|w| {
+                u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & REWIND_RELEASED != 0
+            });
+            expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
+            copied = at + packet.length as usize;
+            if !released {
+                return expanded;
+            }
+            continue;
+        }
         if packet.kind
             != (PacketKind::Command {
                 opcode: INDIRECT_BUFFER,
@@ -448,17 +489,17 @@ fn expand_at_depth(
             continue;
         };
         let length = (control & IB_SIZE_MASK) as usize * 4;
-        // A buffer of no dwords is read from nowhere, whatever its address: a chain to one ends the
-        // stream, and a call to one runs nothing.
-        let target = if length == 0 {
-            Vec::new()
-        } else {
-            let Some(target) = read(address(low, high), length) else {
-                continue;
-            };
-            target
-        };
         let at = packet.offset as usize;
+        // A jump of no dwords is one the title has not filled in yet: it fills it in before the
+        // console's command processor gets there, so it is passed over and the stream goes on.
+        if length == 0 {
+            expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
+            copied = at + packet.length as usize;
+            continue;
+        }
+        let Some(target) = read(address(low, high), length) else {
+            continue;
+        };
         expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
         expanded.extend(expand_at_depth(&target, read, depth + 1));
         copied = at + packet.length as usize;
@@ -1683,16 +1724,21 @@ mod tests {
             "and the rest of its caller does not"
         );
 
-        // A chain of no dwords ends its caller, wherever it points, and a call of none runs nothing:
-        // PPSA04263 submits buffers ending in a jump whose target and size are still zero.
-        let mut ended = fill(0x2000, 0x1111_1111, 4);
-        ended.extend(indirect(0, 0, true));
-        ended.extend(fill(0x4000, 0x4444_4444, 4));
-        let expanded = super::expand_indirect_buffers(&bytes(&ended), &read);
+        // A jump of no dwords is one the title has not filled in yet - PPSA04263 submits buffers
+        // holding `(dcb, 1, 2, 0, 0)` jumps from boot on, filled in before the console's command
+        // processor reaches them - so it is passed over, chain or call, and the stream goes on.
+        let mut blank = fill(0x2000, 0x1111_1111, 4);
+        blank.extend(indirect(0, 0, true));
+        blank.extend(fill(0x4000, 0x4444_4444, 4));
+        let expanded = super::expand_indirect_buffers(&bytes(&blank), &read);
         let mut memory = Fake::default();
         let done = execute(&expanded, &mut memory);
         assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
-        assert_eq!(memory.word(0x4000), 0, "nothing after the empty chain");
+        assert_eq!(
+            memory.word(0x4000),
+            0x4444_4444,
+            "the stream goes on past a blank chain"
+        );
         let mut empty_call = fill(0x2000, 0x1111_1111, 4);
         empty_call.extend(indirect(0, 0, false));
         empty_call.extend(fill(0x4000, 0x4444_4444, 4));
@@ -1705,11 +1751,44 @@ mod tests {
             "the stream goes on after an empty call"
         );
 
+        // A REWIND not yet released holds the command processor where it stands, so nothing after
+        // it runs until the title releases it (`sceAgcRewindPatchSetRewindState`); a released one
+        // is passed. Its packet as the console writes it, valid bit 31 (obSCEne
+        // `report-20261018-gt-census.log` 2864-2869).
+        let rewind = |released: bool| vec![command_header(0x59, 1), u32::from(released) << 31];
+        for (released, after) in [(false, 0), (true, 0x4444_4444)] {
+            let mut held = fill(0x2000, 0x1111_1111, 4);
+            held.extend(rewind(released));
+            held.extend(fill(0x4000, 0x4444_4444, 4));
+            let expanded = super::expand_indirect_buffers(&bytes(&held), &read);
+            let mut memory = Fake::default();
+            let done = execute(&expanded, &mut memory);
+            assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+            assert_eq!(memory.word(0x4000), after, "released {released}");
+        }
+
         // A target that cannot be read leaves the stream as it was.
         let unreadable = bytes(&indirect(0xdead_0000, dwords, false));
         assert_eq!(
             super::expand_indirect_buffers(&unreadable, &read),
             unreadable
+        );
+    }
+
+    /// What follows a released REWIND is carried out up to and with the first chain, which leaves
+    /// the buffer it stands in: a 14-dword trampoline of PPSA04263's holds the REWIND, then the jump
+    /// it fills in to its next buffer. Whatever lies past the chain is never read; a window with no
+    /// chain hands nothing over.
+    #[test]
+    fn a_released_rewind_hands_over_up_to_its_chain() {
+        let mut window = fill(0x2000, 0x1111_1111, 4);
+        window.extend(indirect(0x9000, 7, true));
+        let through: Vec<u8> = bytes(&window);
+        window.extend([0xdead_beef; 6]);
+        assert_eq!(super::through_first_chain(&bytes(&window)), Some(through));
+        assert_eq!(
+            super::through_first_chain(&bytes(&fill(0x2000, 1, 4))),
+            None
         );
     }
 

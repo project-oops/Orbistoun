@@ -365,7 +365,7 @@ returns = "pointer"
 edge_cases = [
     "MEASURED: sceAgcDcbJumpGetSize answered 16 bytes (4 dwords); the builder advanced the writer by 16 and wrote 16. All three agree.",
     "MEASURED (obSCEne report-20261018-gt-census.log 2843-2851, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d): (dcb, 1, 2, target, 0xe) wrote 0xc0023f00, target low, target high, 0x2f30000e; (dcb, 1, 2, 0, 0) wrote 0xc0023f00, 0, 0, 0x2f300000; (dcb, 0, 0, target, 0xe) wrote 0xc0023f00, target low, target high, 0x0f20000e. So INDIRECT_BUFFER (Mesa sid.h:97) with IB_SIZE the fifth argument, CHAIN (bit 20) the second, the third in bits 29:28, and 0x0f200000 always - no VALID bit (23).",
-    "PPSA04263 makes its jumps from boot on, many as (dcb, 1, 2, 0, 0): a chain whose target it fills in after it submits, the console's command processor held at a REWIND (sceAgcDcbRewind, valid bit 31 measured in the same log, 2864-2869) until sceAgcRewindPatchSetRewindState releases it. orbistoun carries a submission out as it stands when submitted, so the builder is not wired yet: wired, PPSA04263 stops at its second flip on a jump not yet filled in.",
+    "PPSA04263 makes its jumps from boot on: each buffer ends in (dcb, 1, 2, trampoline, 0xe) to a 14-dword trampoline holding a REWIND and a (dcb, 1, 2, 0, 0) jump it fills in once its next buffer is written, then releases the REWIND (sceAgcRewindPatchSetRewindState). The console's command processor holds at the REWIND meanwhile; orbistoun ends a stream at an unreleased REWIND and carries the rest out when the title releases it.",
 ]
 known_by = "measured"
 cites = "obSCEne report-20261018-gt-census.log (commit 92bb1ab), rows 2843-2851; obSCEne sweep 20260914-100833 for the size."
@@ -387,11 +387,25 @@ name = "sceAgcDcbRewind"
 purpose = "Rewinds the command-buffer write cursor."
 edge_cases = [
     'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-rewind-getsize): sceAgcDcbRewindGetSize answered a reservation of 8 bytes (2 dwords); the builder then advanced the writer by exactly 8 bytes and wrote exactly 8 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
-    "SCOPE of this entry: the packet size is what was measured, and it is the whole of what is claimed. The stated purpose is read off the name; no arity, no argument layout and no packet body is established here. Recorded as prose rather than as an open question because an open question against a measured entry would put this function back on the probe queue to re-ask something already settled.",
+    "MEASURED (obSCEne report-20261018-gt-census.log 2864-2869, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d): with its arguments zero it writes 0xc0005900 0x00000000 - REWIND (Mesa sid.h:205) not yet released; with sentinel arguments, 0xc0005900 0x80000000, the valid bit 31 set. Which argument sets it is not separated. PPSA04263 calls it with its second argument zero and hands what it answers - the packet's address - to sceAgcRewindPatchSetRewindState.",
 ]
 known_by = "measured"
-cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
+cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log; obSCEne report-20261018-gt-census.log (commit 92bb1ab), rows 2864-2869."
 found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcRewindPatchSetRewindState"
+purpose = "Releases (or holds again) a REWIND a command buffer holds, once what follows it is ready."
+arity = 6
+returns = "status"
+edge_cases = [
+    "Sets bit 31, the valid bit, of the REWIND body dword at its first argument + 4 to its second argument, and answers 0. PPSA04263 calls it as (rewind, 1), rewind being what sceAgcDcbRewind answered, after it fills in the jump that follows the REWIND in its trampoline.",
+    "A REWIND released carries out what follows it, up to and with the jump that leaves its buffer: the console's command processor, held at the REWIND, goes on through it in order.",
+]
+known_by = "assumed"
+assumptions = ["The arguments' roles as PPSA04263 uses them (run 2026-10-18, argument log): obSCEne could not bind the function to measure it (report-20261018-gt-census.log 2841, bound 0)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
 
 [[function]]
 name = "sceAgcDcbSetCxRegisterDirect"
