@@ -114,6 +114,11 @@ name = "image_sample"
 
 [[mnemonic]]
 family = "MIMG"
+opcode = 34
+name = "image_sample_d"
+
+[[mnemonic]]
+family = "MIMG"
 opcode = 36
 name = "image_sample_l"
 
@@ -316,6 +321,11 @@ name = "s_bcnt1_i32_b64"
 family = "SOP1"
 opcode = 36
 name = "s_and_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 45
+name = "s_quadmask_b64"
 
 [[mnemonic]]
 family = "SOP1"

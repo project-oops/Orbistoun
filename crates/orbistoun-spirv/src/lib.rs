@@ -367,6 +367,9 @@ pub mod storage {
 pub mod image_operands {
     /// A level of detail follows the mask.
     pub const LOD: u32 = 2;
+    /// The coordinate's derivatives across and down a pixel follow the mask, choosing the level
+    /// (SPIR-V `Grad`, image operand `0x4`).
+    pub const GRAD: u32 = 4;
 }
 
 /// Decorations.

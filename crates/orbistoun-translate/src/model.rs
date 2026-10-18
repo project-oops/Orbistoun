@@ -56,6 +56,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_load_mip",
     "image_sample",
     "image_sample_l",
+    "image_sample_d",
     "image_sample_lz",
     "image_sample_lz_o",
     "image_sample_c_lz",
@@ -202,6 +203,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_waitcnt_depctr",
     "s_wqm_b32",
     "s_wqm_b64",
+    "s_quadmask_b64",
     "s_xor_b32",
     "v_add_co_u32",
     "v_add_f32_e32",
@@ -575,7 +577,7 @@ pub fn touches_mask(instruction: &Instruction, name: &str) -> bool {
 
     // `v_cndmask_b32` reads one bit of a mask per lane, and whole quad mode operates on a lane mask
     // whose operands may be ordinary register pairs; neither is visible to the operand check below.
-    let whole_quad = matches!(name, "s_wqm_b64" | "s_wqm_b32");
+    let whole_quad = matches!(name, "s_wqm_b64" | "s_wqm_b32" | "s_quadmask_b64");
 
     // The local data share is shared between the lanes of a wavefront. A model with one lane per
     // invocation would give each lane its own copy.
@@ -715,6 +717,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_andn2_b64"
             | "s_nand_b64"
             | "s_not_b64"
+            | "s_quadmask_b64"
             // The unsigned add sets it to the carry out; the bit test to the bit; the saving and
             // the count to whether the new mask or the count is non-zero.
             | "s_add_u32"
@@ -2857,6 +2860,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // s_wqm_b64: whole quad mode. Sets each group of four bits of the result if any of the four
         // in the source is set, so a derivative across a quad has all four pixels live.
         "s_wqm_b64" => whole_quad_mode(model, instruction),
+        "s_quadmask_b64" => quad_mask(model, instruction),
         "s_brev_b32" => scalar_bit_reverse(model, instruction),
         "s_getpc_b64" => program_counter(model, instruction),
         // s_wqm_b32: the same for a 32-lane wavefront, whose mask is one register (`s_wqm_b32
@@ -3205,9 +3209,8 @@ fn memory_instruction<M: Model + ?Sized>(
 
         // A texture sample or fetch; the descriptor rules are D690's.
         "image_sample_lz" | "image_sample_lz_o" | "image_sample_c_lz" | "image_sample_c"
-        | "image_sample" | "image_sample_l" | "image_load" | "image_load_mip" => {
-            image_sample(model, instruction, name)
-        }
+        | "image_sample" | "image_sample_l" | "image_sample_d" | "image_load"
+        | "image_load_mip" => image_sample(model, instruction, name),
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
         "image_store" | "image_store_mip" => image_store(model, instruction, name),
@@ -5564,7 +5567,8 @@ fn scalar_bit_test<M: Model + ?Sized>(
 
 /// `s_and_saveexec_b64 d, s`: `d` takes the execution mask, the mask becomes `s & exec`, and the
 /// condition code says whether any lane remains (`S_AND_SAVEEXEC_B64`) - how a branch enters a
-/// conditional region and keeps the mask to restore.
+/// conditional region and keeps the mask to restore. `d` may be a register pair or a lane mask, as
+/// `s_and_saveexec_b64 vcc, vcc` keeps the old mask in the condition mask.
 fn and_save_exec<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -5575,8 +5579,12 @@ fn and_save_exec<M: Model + ?Sized>(
             detail: "s_and_saveexec_b64 does not have a destination and a source",
         });
     };
-    let register = scalar_destination(instruction, destination)?;
-    if register + 2 > SCALAR_REGISTERS {
+    let saved_mask = mask_destination(destination);
+    let register = match saved_mask {
+        Some(_) => 0,
+        None => scalar_destination(instruction, destination)?,
+    };
+    if saved_mask.is_none() && register + 2 > SCALAR_REGISTERS {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "s_and_saveexec_b64 runs past the end of the register file",
@@ -5586,8 +5594,12 @@ fn and_save_exec<M: Model + ?Sized>(
     let (exec_low, exec_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
     let low = model.binary(op::BITWISE_AND, source_low, exec_low);
     let high = model.binary(op::BITWISE_AND, source_high, exec_high);
-    model.write_scalar(register, exec_low);
-    model.write_scalar(register + 1, exec_high);
+    if let Some(mask) = saved_mask {
+        model.write_lane_mask(mask, exec_low, exec_high)?;
+    } else {
+        model.write_scalar(register, exec_low);
+        model.write_scalar(register + 1, exec_high);
+    }
     model.write_lane_mask(EXEC_LOW_HALF, low, high)?;
     let either = model.binary(op::BITWISE_OR, low, high);
     let non_zero = model.is_not_zero(either);
@@ -9981,9 +9993,8 @@ struct ImageAccess {
     halves: Halves,
     /// What shape of image it samples.
     shape: ImageShape,
-    /// Whether the first address register holds texel offsets, ahead of the coordinates: the
-    /// `_o` forms.
-    offset: bool,
+    /// What the address registers hold ahead of the coordinates.
+    ahead: Ahead,
 }
 
 /// The shape of image an access samples, beyond a flat image's.
@@ -10020,8 +10031,9 @@ const IMAGE_LAYOUT_FIELDS: u32 = 1 << 15 | 1 << 16 | 1 << 17;
 const IMAGE_NSA: (u32, u32) = (1, 0x3);
 
 /// The most address registers a translated access reads: two coordinates, a cube's face or a
-/// volume's depth, and a level.
-const MAX_ADDRESS_REGISTERS: usize = 4;
+/// volume's depth, and a level - or a gradient sample's two derivative pairs ahead of its two
+/// coordinates.
+const MAX_ADDRESS_REGISTERS: usize = 6;
 
 /// Address registers an access uses, by instruction.
 ///
@@ -10101,15 +10113,39 @@ fn address_element<M: Model + ?Sized>(
     Ok(model.binary(op::BITWISE_AND, shifted, low))
 }
 
+/// What an access's address registers hold ahead of its coordinates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ahead {
+    /// Nothing: the coordinates come first, after any compare reference.
+    Nothing,
+    /// The texel offsets, in one register: the `_o` forms.
+    Offsets,
+    /// The position's derivatives across and down a pixel, in four: `image_sample_d`, as
+    /// `llvm.amdgcn.image.sample.d.2d` orders them.
+    Gradients,
+}
+
+impl Ahead {
+    /// The address registers it takes.
+    const fn registers(self) -> u32 {
+        match self {
+            Self::Nothing => 0,
+            Self::Offsets => 1,
+            Self::Gradients => 4,
+        }
+    }
+}
+
 /// How an access's address is laid out, refusing what is not translated: a sample's position in
 /// sixteen-bit halves, and texel offsets anywhere but a flat, uncompared, full-width sample. Whether
 /// the first address register holds texel offsets, ahead of everything else (ACO's MIMG address
-/// order: offset, bias, compare, coordinates): the `_o` forms.
+/// order: offset, bias, compare, coordinates): the `_o` forms. A gradient sample's derivatives are
+/// ahead of its coordinates, and translated for a flat, uncompared sample.
 fn address_form(
     name: &str,
     shape: ImageShape,
     (a16, fetches): (bool, bool),
-) -> Result<bool, &'static str> {
+) -> Result<Ahead, &'static str> {
     if a16 && !fetches && name != "image_store" {
         return Err("a sample whose position is sixteen-bit halves, which is not translated");
     }
@@ -10120,7 +10156,17 @@ fn address_form(
             "is not translated"
         ));
     }
-    Ok(offset)
+    if name == "image_sample_d" {
+        if shape.cube || shape.volume || shape.compare {
+            return Err("a gradient sample of a cube, a volume or a compare is not translated");
+        }
+        return Ok(Ahead::Gradients);
+    }
+    Ok(if offset {
+        Ahead::Offsets
+    } else {
+        Ahead::Nothing
+    })
 }
 
 /// Whether an image instruction takes its level from an address register, after the coordinates:
@@ -10182,7 +10228,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // The level from a register rather than named: the last address element, after the coordinates,
     // as compiled levelled samples place it, and as `image_load_mip` takes its integer level.
     let levelled = takes_its_level(name);
-    let offset = address_form(name, shape, (a16, fetches)).map_err(refuse)?;
+    let ahead = address_form(name, shape, (a16, fetches)).map_err(refuse)?;
 
     let (Some(Operand::Vector(destination)), Some(Operand::Vector(address))) =
         (instruction.operands.first(), instruction.operands.get(1))
@@ -10223,7 +10269,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     }
 
     // The address registers and the components coming back both have to fit.
-    let used = address_registers(levelled, a16, shape) + u32::from(offset);
+    let used = address_registers(levelled, a16, shape) + ahead.registers();
     let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
         refuse(concat!(
             "an image access whose address registers run past the register file, or whose ",
@@ -10250,7 +10296,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             data: d16,
         },
         shape,
-        offset,
+        ahead,
     })
 }
 
@@ -10341,8 +10387,9 @@ fn image_sample<M: Model + ?Sized>(
         levelled,
         halves,
         shape,
-        offset,
+        ahead,
     } = image_access(instruction, name)?;
+    let (offset, gradients) = (ahead == Ahead::Offsets, ahead == Ahead::Gradients);
     let (cube, compare, a16) = (shape.cube, shape.compare, halves.address);
 
     let texture = model
@@ -10354,8 +10401,9 @@ fn image_sample<M: Model + ?Sized>(
         ));
     }
 
-    // Ahead of the coordinates sit the texel offsets, where the instruction has them.
-    let skip = u32::from(offset);
+    // Ahead of the coordinates sit the texel offsets, where the instruction has them, or the two
+    // derivative pairs of a gradient sample.
+    let skip = ahead.registers();
     // Which sampling instruction this is: `lz` is level zero named, `_l` takes the level from a
     // register, and the plain form lets the implementation choose from derivatives, a different
     // SPIR-V instruction with different operands.
@@ -10405,13 +10453,23 @@ fn image_sample<M: Model + ?Sized>(
         } else {
             coordinate
         };
-        let texel = sample_or_fetch(
-            model,
-            &texture,
-            (bound, coordinate),
-            (fetches, named_level),
-            level,
-        );
+        let texel = if gradients {
+            gradient_sample(
+                model,
+                instruction,
+                (&addresses, &texture),
+                (bound, coordinate),
+                lane,
+            )?
+        } else {
+            sample_or_fetch(
+                model,
+                &texture,
+                (bound, coordinate),
+                (fetches, named_level),
+                level,
+            )
+        };
 
         write_components(
             model,
@@ -10632,6 +10690,53 @@ fn sample_coordinate<M: Model + ?Sized>(
     operands.extend(components.iter().map(|component| component.0));
     builder.function(op::COMPOSITE_CONSTRUCT, &operands);
     Ok(coordinate)
+}
+
+/// The texel a gradient sample answers, from the bound image at `coordinate`: the level its
+/// derivatives choose, the position's change across a pixel in the first two address elements and
+/// down one in the next two (`image_sample_d`, as `llvm.amdgcn.image.sample.d.2d` orders them).
+fn gradient_sample<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, texture): (&[u32; MAX_ADDRESS_REGISTERS], &Texture),
+    (bound, coordinate): (Id, Id),
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    let mut pairs = [Id(0); 2];
+    for (pair, first) in pairs.iter_mut().zip([0, 2]) {
+        let mut components = [Id(0); 2];
+        for (component, at) in components.iter_mut().zip([first, first + 1]) {
+            let bits = address_element(model, instruction, (addresses, false), at, lane)?;
+            *component = model.as_float(bits);
+        }
+        let builder = model.builder();
+        let vector = builder.id();
+        builder.function(
+            op::COMPOSITE_CONSTRUCT,
+            &[
+                texture.coordinate.0,
+                vector.0,
+                components[0].0,
+                components[1].0,
+            ],
+        );
+        *pair = vector;
+    }
+    let builder = model.builder();
+    let texel = builder.id();
+    builder.function(
+        op::IMAGE_SAMPLE_EXPLICIT_LOD,
+        &[
+            texture.result.0,
+            texel.0,
+            bound.0,
+            coordinate.0,
+            image_operands::GRAD,
+            pairs[0].0,
+            pairs[1].0,
+        ],
+    );
+    Ok(texel)
 }
 
 /// The texel a sample or a fetch answers, from the bound image at `coordinate`: a fetch at an
@@ -11316,6 +11421,56 @@ fn whole_quad_mode<M: Model + ?Sized>(
     Ok(())
 }
 
+/// Translates `s_quadmask_b64`: bit `n` of the result set where any of bits `4n` to `4n + 3` of the
+/// source is, the low word's sixteen groups in the result's low sixteen bits and nothing above, and
+/// the condition code whether the result is non-zero (RDNA ISA, `S_QUADMASK_B64`).
+fn quad_mask<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let (low, high) = sixty_four_bit_source(model, instruction, source)?;
+    let zero = model.constant(0);
+    let nibble = model.constant(0xf);
+    let mut result = zero;
+    for (word, first) in [(low, 0), (high, 8)] {
+        for group in 0..8 {
+            let shift = model.constant(4 * group);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+            let bits = model.binary(op::BITWISE_AND, shifted, nibble);
+            let any = model.compare(op::INOT_EQUAL, bits, zero);
+            let bit = model.constant(1 << (first + group));
+            let set = model.select(any, bit, zero);
+            result = model.binary(op::BITWISE_OR, result, set);
+        }
+    }
+    if let Operand::Named(name) = destination
+        && let Some(mask) = lane_mask_name(name)
+    {
+        model.write_lane_mask(mask, result, zero)?;
+    } else {
+        let Operand::Scalar(register) = destination else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "s_quadmask_b64 destination is neither a register pair nor a lane mask",
+            });
+        };
+        let register = u32::from(*register);
+        if register + 2 > SCALAR_REGISTERS {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "s_quadmask_b64 runs past the end of the register file",
+            });
+        }
+        model.write_scalar(register, result);
+        model.write_scalar(register + 1, zero);
+    }
+    let condition = model.is_not_zero(result);
+    model.set_condition_code(condition);
+    model.count();
+    Ok(())
+}
+
 /// Translates `s_wqm_b32`: whole quad mode on a 32-lane mask.
 ///
 /// One register, so one [`quad_expand`], with `s_mov_b32`'s destination rules: `exec_lo` or
@@ -11485,11 +11640,11 @@ mod tests {
         let first = |bytes: &[u8]| decode(bytes, &encodings, &operands).instructions[0].clone();
         assert_eq!(
             super::address_list(&first(&listed), 2, 3),
-            Some([2, 1, 0, 2])
+            Some([2, 1, 0, 2, 2, 2])
         );
         assert_eq!(
             super::address_list(&first(&consecutive), 0, 3),
-            Some([0, 1, 2, 0])
+            Some([0, 1, 2, 0, 0, 0])
         );
         assert_eq!(
             super::address_list(&first(&listed[..8]), 2, 3),

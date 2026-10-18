@@ -171,6 +171,14 @@ const FIXTURES: &[(&str, &str)] = &[
         "the compares into the execution mask no compiled fixture produces",
     ),
     (
+        "image-gradients",
+        "a sample with explicit gradients, in consecutive and listed address registers",
+    ),
+    (
+        "scalar-quadmask",
+        "the quad mask, which no compiled fixture produces",
+    ),
+    (
         "vector-or3",
         "the three-source or and the float not-less-than compare, which no compiled fixture produces",
     ),

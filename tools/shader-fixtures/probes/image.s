@@ -123,3 +123,10 @@ image_store_mip v[40:41], v[200:202], s[20:27] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_store_mip v[60:62], v[10:12], s[80:87] dmask:0x7 dim:SQ_RSRC_IMG_2D
 image_store_mip v[24:27], v[28:30], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 image_store_mip v70, v[140:142], s[20:27] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+
+// ---- image_sample_d: two derivative pairs ahead of the coordinates --------------------------
+image_sample_d v[4:7], v[0:5], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample_d v[70:73], v[100:105], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample_d v220, v[30:35], s[40:47], s[20:23] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_d v[12:13], v[240:245], s[92:99], s[76:79] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_sample_d v[16:18], v[44:49], s[60:67], s[96:99] dmask:0x7 dim:SQ_RSRC_IMG_2D

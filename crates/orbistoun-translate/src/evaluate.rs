@@ -296,6 +296,11 @@ fn step_prefix(
                     // data - is followed both ways, as the execution mask is (D753).
                     "s_cbranch_vccz" | "s_cbranch_vccnz" => match vcc_set(&model.scalars) {
                         Some(set) => Some(set == (name == "s_cbranch_vccnz")),
+                        None if !jumps_past(instruction, until)
+                            && skips_no_scalar_work(decode, model.encodings, instruction) =>
+                        {
+                            Some(true)
+                        }
                         None => match decided.next() {
                             Some(taken) => Some(taken),
                             None => return Ok(Step::Ended(Path::Undecided)),
@@ -307,6 +312,13 @@ fn step_prefix(
                     // no vertices to write (D861).
                     "s_cbranch_execz" | "s_cbranch_execnz" if jumps_past(instruction, until) => {
                         Some(false)
+                    }
+                    // One over vector work alone leaves the scalars as they are either way: the
+                    // jump is taken, one path for both.
+                    "s_cbranch_execz" | "s_cbranch_execnz"
+                        if skips_no_scalar_work(decode, model.encodings, instruction) =>
+                    {
+                        Some(true)
                     }
                     // One landing before the access is followed both ways, a path each (D753).
                     "s_cbranch_execz" | "s_cbranch_execnz" => match decided.next() {
@@ -382,6 +394,38 @@ fn jumps_past(instruction: &Instruction, until: u32) -> bool {
         instruction.operands.first(),
         Some(Operand::Immediate(jump)) if i64::from(instruction.offset) + 4 + 4 * simm16(*jump) > i64::from(until)
     )
+}
+
+/// Whether a forward branch skips only vector work: every instruction it jumps over writes no
+/// scalar, no mask and no flow - no scalar instruction or load, branch, compare, carry, lane read or
+/// scaled division, and no scalar destination in its operands. Both ways then leave the scalars as
+/// they were, so one way is followed for both (D753).
+fn skips_no_scalar_work(decode: &Decode, encodings: &EncodingTable, branch: &Instruction) -> bool {
+    let Some(Operand::Immediate(jump)) = branch.operands.first() else {
+        return false;
+    };
+    let target = i64::from(branch.offset) + 4 + 4 * simm16(*jump);
+    if target <= i64::from(branch.offset) {
+        return false;
+    }
+    decode
+        .instructions
+        .iter()
+        .filter(|i| i.offset > branch.offset && i64::from(i.offset) < target)
+        .all(|skipped| {
+            let Some((family, name)) = named(encodings, skipped) else {
+                return false;
+            };
+            let scalar_family = matches!(family, "SOP1" | "SOP2" | "SOPK" | "SOPC" | "SMEM")
+                || (family == "SOPP" && branches(name));
+            let writes_scalars = name.starts_with("v_cmp")
+                || name.contains("_co_")
+                || name.starts_with("v_readlane")
+                || name.starts_with("v_readfirstlane")
+                || name.starts_with("v_div_scale")
+                || model::has_scalar_destination(encodings, skipped);
+            !scalar_family && !writes_scalars
+        })
 }
 
 /// Whether the execution mask is non-zero, where the scalar registers say, as [`vcc_set`] says of
@@ -2412,6 +2456,27 @@ mod tests {
             .expect("both ways reach the access");
         assert_eq!(scalars[0], Some(5), "s0 is five either way");
         assert_eq!(scalars[1], None, "s1 is seven one way only");
+    }
+
+    /// A branch on a mask the host cannot know that skips only vector work leaves the scalars as they
+    /// are either way, so it is not two paths: Grand Theft Auto V's scene compute program skips more
+    /// blocks so before its access than the paths could be followed. Eight here, each over a vector
+    /// move, would be 256 paths; `s0` is five at the access.
+    #[test]
+    fn branches_over_vector_work_alone_are_not_paths() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let mut words = vec![0xbe80_0385_u32]; // s_mov_b32 s0, 5
+        for _ in 0..8 {
+            words.extend([0xbf88_0001, 0x7e02_0281]); // s_cbranch_execz 1; v_mov_b32 v1, 1
+        }
+        words.push(0xbf81_0000);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("one way through each skip");
+        assert_eq!(scalars[0], Some(5));
     }
 
     #[test]

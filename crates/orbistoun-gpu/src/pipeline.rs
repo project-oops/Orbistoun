@@ -2216,7 +2216,7 @@ impl Pipeline {
 
     /// The accesses a dispatch's own buffers take, by instruction offset, and the guest range each
     /// binds (D746): traced from the program as a draw's are, stores included, and resolved
-    /// against the dispatch's user data. Ranges that overlap are refused. For a program that
+    /// against the dispatch's user data. Ranges that overlap where either is written are refused. For a program that
     /// converts by its descriptors' formats (D738), each buffer's fourth descriptor word too, as a
     /// draw's are resolved; one that does not resolve stays `None`, and an access through it is
     /// refused.
@@ -2264,10 +2264,18 @@ impl Pipeline {
                 } else {
                     crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)?
                 };
-            if ranges.iter().any(|&held| overlaps(held, range)) {
+            // Two copies of one byte disagree only where the dispatch writes one of them: read-only
+            // copies of the same bytes agree (D746).
+            let slot = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
+            let written = |slot: u32| traced.stored.contains(&slot);
+            if ranges
+                .iter()
+                .zip(0..)
+                .any(|(&held, other)| overlaps(held, range) && (written(slot) || written(other)))
+            {
                 return Err(concat!(
-                    "two buffers the dispatch binds overlap, and two copies of one byte would ",
-                    "disagree (D746)"
+                    "two buffers the dispatch binds overlap, one of them written, and two copies of ",
+                    "one byte would disagree (D746)"
                 )
                 .to_owned());
             }

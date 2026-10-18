@@ -3939,6 +3939,48 @@ fn every_compare_into_the_execution_mask_narrows_by_its_ordering() {
     }
 }
 
+/// `s_quadmask_b64` sets bit `n` of its result where any of bits `4n` to `4n + 3` of its source is
+/// set: Grand Theft Auto V's scene pixel shaders do `s_quadmask_b64 vcc, vcc`. Groups 0, 2 and 5
+/// of the low word and group 7 of the high word are set, so the result is `0x8025`.
+#[test]
+fn a_quad_mask_sets_a_bit_for_each_group_of_four() {
+    if !device_or_skip("a_quad_mask_sets_a_bit_for_each_group_of_four") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(sop2_literal("s_or_b32", 4, 128, 0x00f0_0102));
+    program.extend(sop2_literal("s_or_b32", 5, 128, 0x1000_0000));
+    program.push(sop1("s_quadmask_b64", 6, 4));
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!([scalar(&registers, 6), scalar(&registers, 7)], [0x8025, 0]);
+}
+
+/// `s_and_saveexec_b64` may save into the condition mask: Grand Theft Auto V's scene pixel shader
+/// does `s_and_saveexec_b64 vcc, vcc` (0xbeea246a), entering the lanes its compare kept and keeping
+/// the old mask in `vcc` to restore. Lane zero fails `0 < 0`, so it no longer writes, and `vcc_lo`
+/// holds the whole old mask's low half.
+#[test]
+fn a_mask_saved_into_vcc_keeps_the_old_execution_mask() {
+    if !device_or_skip("a_mask_saved_into_vcc_keeps_the_old_execution_mask") {
+        return;
+    }
+    let mut program = lane_index_into(0).to_vec();
+    // v_cmp_lt_u32_e32 vcc, 0, v0: every lane but zero.
+    program.push(v_cmp_f32("v_cmp_lt_u32_e32", 128, 0));
+    program.push(0xbeea_246a); // s_and_saveexec_b64 vcc, vcc
+    program.push(v_mov_inline(2, 63));
+    program.push(sop1("s_mov_b32", 4, 106)); // s4 = vcc_lo
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 2), 0, "lane zero left the mask");
+    assert_eq!(
+        scalar(&registers, 4),
+        0xffff_ffff,
+        "the old mask's low half"
+    );
+}
+
 /// A shader with no mask traffic computes the same registers at either width.
 #[test]
 fn the_two_widths_are_the_same_shader_with_different_lane_counts() {

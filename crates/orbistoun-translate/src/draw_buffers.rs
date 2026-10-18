@@ -191,6 +191,9 @@ pub struct DrawBuffers {
     /// The slots every access to which is a store (D809): a dispatch's buffer the program writes
     /// and never reads, whose words before the run nothing depends on but the ones it leaves.
     pub stored_only: std::collections::BTreeSet<u32>,
+    /// The slots any access to which is a store: a dispatch's buffers it writes. Two read-only
+    /// copies of one byte agree, so only an overlap with one of these is refused (D746).
+    pub stored: std::collections::BTreeSet<u32>,
     /// The offset and name of the first store that kept the program from being traced at all: one
     /// a snapshot bound for a draw would not see, or a dispatch's that is not a buffer store.
     pub untraced_by: Option<(u32, String)>,
@@ -296,6 +299,12 @@ pub fn trace(
     accesses.sort_by_key(|(offset, _)| *offset);
     let mut buffers = slots(accesses, (decode, encodings), (first_register, count));
     buffers.stored_only = stored_only(&buffers.served, &stores);
+    buffers.stored = buffers
+        .served
+        .iter()
+        .filter(|(offset, _)| stores.contains(offset))
+        .map(|(_, &slot)| slot)
+        .collect();
     buffers
 }
 
@@ -1250,6 +1259,11 @@ mod tests {
             dispatch.stored_only,
             std::collections::BTreeSet::from([1]),
             "only the store's buffer is written and never read (D809)"
+        );
+        assert_eq!(
+            dispatch.stored,
+            std::collections::BTreeSet::from([1]),
+            "the store's buffer is the one written"
         );
         assert!(
             trace(&copy, &encodings, (0, 16), (false, false))

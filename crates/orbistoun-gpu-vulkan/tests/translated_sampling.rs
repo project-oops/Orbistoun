@@ -831,6 +831,67 @@ fn a_translated_levelled_sample_reads_the_level_it_names() {
     }
 }
 
+/// A guest shader that samples with explicit gradients, and exports what came back.
+///
+/// `image_sample_d v[8:11], v[0:5], s[4:11], s[12:15]`: the derivative pairs in `v0` to `v3` - the
+/// position's change across and down a pixel - ahead of the coordinate in `v4` and `v5`, as Grand
+/// Theft Auto V's scene pixel shaders sample (MIMG opcode 34). `gradient` fills all four.
+fn gradient_shader(gradient: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut mov = |register: u32, source: u32| {
+        let word = 0x7E00_0000u32 | (1 << 9) | (register << 17) | source;
+        bytes.extend(word.to_le_bytes());
+    };
+    for register in 0..4 {
+        mov(register, gradient);
+    }
+    // 0.5, 0.5: the far quadrant of a two-by-two texture, and the middle of a one-by-one.
+    mov(4, 240);
+    mov(5, 240);
+    // Opcode 34 is the gradient sample.
+    bytes.extend((0xF000_0000u32 | (34 << 18) | (0xF << 8) | TWO_DIMENSIONAL).to_le_bytes());
+    bytes.extend(mimg_operands(0, 8, IMAGE_DESCRIPTOR, SAMPLER_DESCRIPTOR).to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
+    bytes.extend(0x0B0A_0908u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    bytes
+}
+
+/// A translated gradient sample reads the level its gradients name: none reads level zero, and a
+/// whole texture's width per pixel across a two-by-two texture reads the coarse level the harness
+/// builds, one texel that is none of level zero's.
+#[test]
+fn a_translated_gradient_sample_reads_the_level_its_gradients_name() {
+    if !device_or_skip("a_translated_gradient_sample_reads_the_level_its_gradients_name") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let clear = [1.0, 0.0, 1.0, 1.0];
+    let vertex = interpolated_vertex_module([[0.0, 0.0, 0.0, 1.0]; 3]);
+    let coarse = COARSE_TEXEL.to_le_bytes();
+    // Inline source 128 is the float zero's bits; 242 is the float one.
+    for (gradient, want) in [(128u32, EXPECTED[3]), (242, coarse)] {
+        let decoded = decode(&gradient_shader(gradient), &encodings, &operands);
+        let module = translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            Window::default(),
+        )
+        .map(|(module, _)| module)
+        .expect("the gradient sample translated");
+        let pixels = draw_with_texture(&vertex, &module, clear, (8, 8), (&TEXELS, 2))
+            .expect("the translated draw ran");
+        assert_eq!(
+            pixels.at(4, 4),
+            Some(want),
+            "gradients from inline source {gradient}"
+        );
+    }
+}
+
 /// A module naming a second texture is refused, not guessed at.
 ///
 /// One texture is bound, and mapping every sample onto it would draw a plausible frame for a shader
