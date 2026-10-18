@@ -313,6 +313,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVoiceSetThreadsParams", voice::voice_set_threads_params),
         ("sceVoiceCreatePort", voice::voice_create_port),
         ("sceVoiceConnectIPortToOPort", voice::voice_connect_port),
+        (
+            "sceVoiceDisconnectIPortFromOPort",
+            voice::voice_disconnect_port,
+        ),
         ("sceVoiceGetPortInfo", voice::voice_get_port_info),
         ("sceVoiceStart", voice::voice_start),
         ("sceVoiceStop", voice::voice_stop),

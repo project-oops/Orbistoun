@@ -20,6 +20,8 @@ guest_module! {
         "sceVoiceCreatePort" => 2,
         // (input port, output port)
         "sceVoiceConnectIPortToOPort" => 2,
+        // (input port, output port)
+        "sceVoiceDisconnectIPortFromOPort" => 2,
         // (port, info)
         "sceVoiceGetPortInfo" => 2,
         "sceVoiceStart" => 0,
@@ -140,12 +142,24 @@ const PORT_INFO_ZEROED: usize = 0x20;
 /// What `sceVoiceStart` answered with no headset connected (REQ-gt13).
 const START_REFUSED: u64 = 0x804e_0805;
 
-/// What `sceVoiceDeletePort` answered for a port already deleted (REQ-gt13).
+/// What `sceVoiceDeletePort` answered for a port already deleted (REQ-gt13), and
+/// `sceVoiceDisconnectIPortFromOPort` for a pair not connected (REQ-gt14).
 const PORT_DELETED: u64 = 0x804e_0807;
 
 /// The process's voice ports: each created port's kind by id, `None` once deleted. Ids count up
-/// from 0 in creation order, as measured.
+/// from 0 in creation order and are not reused after a delete, as measured (REQ-gt14's ports,
+/// made after gt13's four were deleted, were 4-7).
 static PORTS: Mutex<Vec<Option<u32>>> = Mutex::new(Vec::new());
+
+/// The connected pairs of ports, input then output.
+static CONNECTED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+/// The connected pairs, held even if a holder panicked: the list stays consistent between calls.
+fn connected() -> std::sync::MutexGuard<'static, Vec<(u64, u64)>> {
+    CONNECTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The kind of a port parameter block if it is one of the measured shapes, the user field
 /// matching the signed-in user where the shape carries one.
@@ -213,9 +227,34 @@ pub(crate) fn voice_create_port(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 pub(crate) fn voice_connect_port(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let pair = live_port(args[0]).zip(live_port(args[1]));
     if pair.is_some_and(|pair| MEASURED_CONNECTIONS.contains(&pair)) {
+        connected().push((args[0], args[1]));
         0
     } else {
         u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceVoiceDisconnectIPortFromOPort(input, output)`: 0 for a connected pair, which is then
+/// disconnected, and `0x804e0807` for two created ports not connected in that order - a pair
+/// disconnected already, never connected, given in reverse, or with a port deleted (REQ-gt14,
+/// `000-boot/gt14-voice-disconnects`, `report-20261018-gt14-census.log` rows 2922-2951). An id
+/// never created answers the placeholder.
+pub(crate) fn voice_disconnect_port(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let created = ports().len();
+    let was_created = |port: u64| usize::try_from(port).is_ok_and(|i| i < created);
+    if !was_created(args[0]) || !was_created(args[1]) {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    let mut connected = connected();
+    match connected
+        .iter()
+        .position(|&pair| pair == (args[0], args[1]))
+    {
+        Some(at) => {
+            connected.swap_remove(at);
+            0
+        }
+        None => PORT_DELETED,
     }
 }
 
@@ -262,11 +301,12 @@ pub(crate) fn voice_delete_port(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(slot) = usize::try_from(args[0]).ok().and_then(|i| ports.get_mut(i)) else {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     };
-    if slot.take().is_some() {
-        0
-    } else {
-        PORT_DELETED
+    if slot.take().is_none() {
+        return PORT_DELETED;
     }
+    drop(ports);
+    connected().retain(|&(input, output)| input != args[0] && output != args[0]);
+    0
 }
 
 #[cfg(test)]
@@ -354,11 +394,29 @@ mod tests {
         assert_eq!(super::voice_start(&none), 0x804e_0805);
         assert_eq!(super::voice_stop(&none), 0);
 
+        // The teardown (REQ-gt14): a connected pair disconnects once; a second time, a pair
+        // never connected and the reverse order answer 0x804e0807; an id never created, the
+        // placeholder.
+        let unpair = |input: u64, output: u64| {
+            let mut disconnect = [0_u64; GUEST_ARG_REGISTERS];
+            disconnect[0] = input;
+            disconnect[1] = output;
+            super::voice_disconnect_port(&disconnect)
+        };
+        assert_eq!(unpair(0, 1), 0);
+        assert_eq!(unpair(0, 1), 0x804e_0807, "disconnected already");
+        assert_eq!(unpair(0, 2), 0);
+        assert_eq!(unpair(0, 3), 0x804e_0807, "never connected");
+        assert_eq!(unpair(1, 0), 0x804e_0807, "the reverse order");
+        assert_ne!(unpair(0, 9), 0x804e_0807, "never created");
+        assert_ne!(unpair(0, 9), 0, "never created");
+
         let mut delete = [0_u64; GUEST_ARG_REGISTERS];
         for port in 0..4 {
             delete[0] = port;
             assert_eq!(super::voice_delete_port(&delete), 0, "port {port}");
         }
+        assert_eq!(unpair(0, 1), 0x804e_0807, "deleted ports");
         delete[0] = 0;
         assert_eq!(
             super::voice_delete_port(&delete),

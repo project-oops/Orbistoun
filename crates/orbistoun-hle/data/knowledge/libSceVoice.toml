@@ -118,3 +118,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceDisconnectIPortFromOPort"
+arity = 2
+purpose = "(input port, output port): disconnects two voice ports."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt14, after gt13's connects, Start refused and Stop): (p0, p1) answered 0 and then 0x804e0807; (p0, p2) 0; (p0, p3), never connected, 0x804e0807; (p1, p0), the reverse order, 0x804e0807; (p0, p1) after deleting p1, 0x804e0807.",
+    "orbistoun answers a connected pair 0 and any other pair of created ports 0x804e0807; deleting a port drops its connections. An id never created answers the placeholder. PPSA04263 deletes the output port only when this answers 0 (test eax at image+0x2903c93).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1430Z-gt14 (census commit de5efc4), reports/hardware/report-20261018-gt14-census.log (SHA-256 14cb747c4aa27980...) lines 2922-2951, 000-boot/gt14-voice-disconnects, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
