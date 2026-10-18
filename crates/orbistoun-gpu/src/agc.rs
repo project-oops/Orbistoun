@@ -34,6 +34,9 @@ guest_module! {
         "sceAgcAcbEventWriteGetSize" => 6,
         "sceAgcAcbJumpGetSize" => 6,
         "sceAgcDcbJumpGetSize" => 6,
+        "sceAgcDcbJump" => 6,
+        "sceAgcDcbRewind" => 6,
+        "sceAgcRewindPatchSetRewindState" => 6,
         "sceAgcCbBranchGetSize" => 6,
         "sceAgcCbQueueEndOfPipeActionGetSize" => 6,
         "sceAgcDcbCondExecGetSize" => 6,
@@ -626,6 +629,8 @@ fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// reserved-dword counter. This writes through the cursor, respects the limit, and touches
 /// nothing else.
 mod dcb {
+    /// The buffer's end: past the limit, by the room a buffer keeps for the jump that leaves it.
+    pub(super) const END: u64 = 0x08;
     /// The write cursor, the field a builder advances: `cur - begin` after a call is exactly the
     /// builder's own `GetSize` answer.
     pub(super) const CUR: u64 = 0x10;
@@ -696,6 +701,33 @@ fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
     };
     for (i, word) in words.iter().enumerate() {
         // SAFETY: every offset written is below `length`, and `cur + length <= limit` was checked
+        // above, so each dword lands inside the guest's own command buffer.
+        unsafe { guest::write_u32(cur.wrapping_add(i as u64 * 4), *word) };
+    }
+    // SAFETY: the cursor field of the same handle, advanced by what was just written.
+    unsafe { guest::write_u64(dcb.wrapping_add(dcb::CUR), cur.wrapping_add(length)) };
+    cur
+}
+
+/// Appends `words` within the buffer's end rather than its limit, and asks no overflow callback: a
+/// jump, which leaves a full buffer for the next one. PPSA04263's overflow callback links its next
+/// buffer with `sceAgcDcbJump` on the full one, so a jump that asked for room would ask forever;
+/// the room between the limit and the end is what a buffer keeps for it. Refused past the end.
+fn dcb_append_within_end(dcb: u64, words: &[u32]) -> u64 {
+    if dcb == 0 || words.is_empty() {
+        return BAD_ARGUMENT;
+    }
+    let length = words.len() as u64 * 4;
+    // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
+    // end are quadwords at its `+0x10` and `+0x08`.
+    let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
+    // SAFETY: the same handle, its end field.
+    let end = unsafe { guest::read_u64(dcb.wrapping_add(dcb::END)) }.unwrap_or(0);
+    if cur == 0 || end == 0 || cur.wrapping_add(length) > end {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    for (i, word) in words.iter().enumerate() {
+        // SAFETY: every offset written is below `length`, and `cur + length <= end` was checked
         // above, so each dword lands inside the guest's own command buffer.
         unsafe { guest::write_u32(cur.wrapping_add(i as u64 * 4), *word) };
     }
@@ -1251,6 +1283,63 @@ fn cb_dispatch(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
+/// `sceAgcDcbJump(dcb, chain, policy, target, dwords)`: an `INDIRECT_BUFFER` to `target`,
+/// `dwords` long, as the console writes it (obSCEne `report-20261018-gt-census.log` 2843-2851):
+/// header `0xc0023f00`, the target's halves, then the size, `chain` in bit 20, `policy` in bits
+/// 29:28, and `0x0f20_0000` set besides. A jump made before its target is known is written with a
+/// zero target and size, and filled in before the `REWIND` ahead of it is released.
+fn dcb_jump(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let target = args[3];
+    let control = (args[4] as u32 & 0xF_FFFF)
+        | (args[1] as u32 & 1) << 20
+        | (args[2] as u32 & 3) << 28
+        | 0x0f20_0000;
+    dcb_append_within_end(
+        args[0],
+        &[
+            packet::build::command_header(0x3F, 3),
+            target as u32,
+            (target >> 32) as u32,
+            control,
+        ],
+    )
+}
+
+/// `sceAgcDcbRewind(dcb, ..)`: a `REWIND` not yet released, `0xc0005900 0x00000000`, as the console
+/// writes it with its arguments zero (obSCEne `report-20261018-gt-census.log` 2864-2866); it
+/// answers the packet's address, which the title hands to
+/// [`rewind_patch_set_rewind_state`]. PPSA04263 makes it with its second argument zero; the
+/// census's sentinel arm sets the valid bit, through which argument is not measured.
+fn dcb_rewind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(args[0], &[packet::build::command_header(0x59, 1), 0])
+}
+
+/// `sceAgcRewindPatchSetRewindState(rewind, state)`: sets the valid bit of the `REWIND` at `rewind`
+/// to `state`, as PPSA04263 calls it with `state` 1 once it has filled in the jump after it. A
+/// command stream held at that `REWIND` goes on ([`crate::agc_driver::release_rewind`], D890).
+/// Answers 0; the library could not be bound to measure it (census `bound 0`).
+fn rewind_patch_set_rewind_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (rewind, released) = (args[0], args[1] & 1 != 0);
+    let body = rewind.wrapping_add(4);
+    // SAFETY: the address the title's own REWIND builder answered, its body dword four bytes in.
+    let Some(word) = (unsafe { guest::read_u32(body) }) else {
+        return BAD_ARGUMENT;
+    };
+    let word = if released {
+        word | crate::cp::REWIND_RELEASED
+    } else {
+        word & !crate::cp::REWIND_RELEASED
+    };
+    // SAFETY: as above; the dword just read.
+    if !unsafe { guest::write_u32(body, word) } {
+        return BAD_ARGUMENT;
+    }
+    if released {
+        crate::agc_driver::release_rewind(rewind);
+    }
+    0
+}
+
 /// `sceAgcDcbDispatchIndirect(dcb, ...)`. Header `0xc0011600`, 12 bytes.
 fn dcb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
@@ -1672,6 +1761,12 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAgcAcbEventWriteGetSize", acb_event_write_get_size),
     ("sceAgcAcbJumpGetSize", acb_jump_get_size),
     ("sceAgcDcbJumpGetSize", dcb_jump_get_size),
+    ("sceAgcDcbJump", dcb_jump),
+    ("sceAgcDcbRewind", dcb_rewind),
+    (
+        "sceAgcRewindPatchSetRewindState",
+        rewind_patch_set_rewind_state,
+    ),
     ("sceAgcCbBranchGetSize", cb_branch_get_size),
     (
         "sceAgcCbQueueEndOfPipeActionGetSize",

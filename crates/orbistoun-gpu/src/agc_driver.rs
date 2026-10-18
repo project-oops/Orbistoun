@@ -5115,18 +5115,61 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
         return SUBMIT_OK;
     };
-    carry_out_stream(&bytes, &memory);
+    carry_out_stream(&bytes, gpu_addr, &memory);
     SUBMIT_OK
 }
 
-/// Prepares and carries out a submission's `bytes`, read from guest memory: [`submit_described`]
-/// once it has them.
-fn carry_out_stream(bytes: &[u8], memory: &MappedRegions) {
+/// The most a released `REWIND`'s continuation is read for: a trampoline holds the `REWIND` and the
+/// jump after it, a few dwords, and the read stops at that jump.
+const CONTINUATION_WINDOW: usize = 0x100;
+
+/// The `REWIND`s a command stream stopped at, not yet released, by guest address: each resumes
+/// that stream when the title releases it (D890).
+fn held_rewinds() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static HELD: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    HELD.get_or_init(Mutex::default)
+}
+
+/// The title has released the `REWIND` at `rewind`. A command stream held at it goes on: what follows
+/// it, up to and with the jump that leaves its buffer ([`cp::through_first_chain`]), carried out as
+/// a submission is, in order behind what came before (D890). A `REWIND` no stream reached yet only
+/// keeps its valid bit; the stream that reaches it passes it.
+pub(crate) fn release_rewind(rewind: u64) {
+    let held = held_rewinds()
+        .lock()
+        .is_ok_and(|mut held| held.remove(&rewind));
+    if !held {
+        return;
+    }
+    let after = rewind.wrapping_add(8);
+    let memory = MappedRegions::current();
+    let window = [CONTINUATION_WINDOW, CONTINUATION_WINDOW / 4]
+        .into_iter()
+        .find_map(|length| memory.read(after, length).map(<[u8]>::to_vec));
+    let Some(continuation) = window.as_deref().and_then(cp::through_first_chain) else {
+        return;
+    };
+    orbistoun_kernel::thread::with_room(SUBMIT_STACK_ROOM, || {
+        crate::perf::measure(crate::perf::Phase::Submit, || {
+            carry_out_stream(&continuation, after, &memory);
+        });
+    });
+}
+
+/// Prepares and carries out a submission's `bytes`, read from guest memory at `base`:
+/// [`submit_described`] once it has them, and a released `REWIND`'s continuation.
+fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions) {
     // The buffers it calls or chains to are part of what it carries out, so everything after this
-    // - preparation, the command processor, the queued writes - sees their commands in place.
-    let bytes = cp::expand_indirect_buffers(bytes, &|at, length| {
+    // - preparation, the command processor, the queued writes - sees their commands in place; a
+    // REWIND not yet released ends it, held until the title releases it (D890).
+    let (bytes, held) = cp::expand_holding(bytes, base, &|at, length| {
         memory.read(at, length).map(<[u8]>::to_vec)
     });
+    if let Some(rewind) = held
+        && let Ok(mut rewinds) = held_rewinds().lock()
+    {
+        rewinds.insert(rewind);
+    }
     // Asynchronously, a preparation that read what a queued submission writes is made again once
     // the queue has drained, the live pipeline free meanwhile for the command processor (D876);
     // one that read only what a queued submission draws is drawn again as it is carried out (D882).

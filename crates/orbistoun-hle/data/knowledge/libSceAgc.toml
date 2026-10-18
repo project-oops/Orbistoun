@@ -365,7 +365,7 @@ returns = "pointer"
 edge_cases = [
     "MEASURED: sceAgcDcbJumpGetSize answered 16 bytes (4 dwords); the builder advanced the writer by 16 and wrote 16. All three agree.",
     "MEASURED (obSCEne report-20261018-gt-census.log 2843-2851, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d): (dcb, 1, 2, target, 0xe) wrote 0xc0023f00, target low, target high, 0x2f30000e; (dcb, 1, 2, 0, 0) wrote 0xc0023f00, 0, 0, 0x2f300000; (dcb, 0, 0, target, 0xe) wrote 0xc0023f00, target low, target high, 0x0f20000e. So INDIRECT_BUFFER (Mesa sid.h:97) with IB_SIZE the fifth argument, CHAIN (bit 20) the second, the third in bits 29:28, and 0x0f200000 always - no VALID bit (23).",
-    "PPSA04263 makes its jumps from boot on: each buffer ends in (dcb, 1, 2, trampoline, 0xe) to a 14-dword trampoline holding a REWIND and a (dcb, 1, 2, 0, 0) jump it fills in once its next buffer is written, then releases the REWIND (sceAgcRewindPatchSetRewindState). The console's command processor holds at the REWIND meanwhile; Wired in 7cd7387c with orbistoun carrying a submission out as it is read, the run raced the title filling its jumps in on another thread: two boot runs in three stalled at the second flip. Unwired again until the command processor runs behind the title, reaching each jump when it is filled in, as the console's does.",
+    "PPSA04263 makes its jumps from boot on: each buffer ends in (dcb, 1, 2, trampoline, 0xe) to a 14-dword trampoline holding a REWIND and a (dcb, 1, 2, 0, 0) jump it fills in once its next buffer is written, then releases the REWIND (sceAgcRewindPatchSetRewindState). The console's command processor holds at the REWIND meanwhile; orbistoun ends a stream at an unreleased REWIND and carries the rest out when the title releases it.",
 ]
 known_by = "measured"
 cites = "obSCEne report-20261018-gt-census.log (commit 92bb1ab), rows 2843-2851; obSCEne sweep 20260914-100833 for the size."
@@ -392,6 +392,20 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log; obSCEne report-20261018-gt-census.log (commit 92bb1ab), rows 2864-2869."
 found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcRewindPatchSetRewindState"
+purpose = "Releases (or holds again) a REWIND a command buffer holds, once what follows it is ready."
+arity = 6
+returns = "status"
+edge_cases = [
+    "Sets bit 31, the valid bit, of the REWIND body dword at its first argument + 4 to its second argument, and answers 0. PPSA04263 calls it as (rewind, 1), rewind being what sceAgcDcbRewind answered, after it fills in the jump that follows the REWIND in its trampoline.",
+    "A REWIND released resumes the command stream held at it, if one is: what follows it, up to and with the jump that leaves its buffer, carried out in order (D890). One no stream has reached yet only keeps its valid bit, as the console's command processor, running behind the title, passes a REWIND already released.",
+]
+known_by = "assumed"
+assumptions = ["The arguments' roles as PPSA04263 uses them (run 2026-10-18, argument log): obSCEne could not bind the function to measure it (report-20261018-gt-census.log 2841, bound 0)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
 
 [[function]]
 name = "sceAgcDcbSetCxRegisterDirect"

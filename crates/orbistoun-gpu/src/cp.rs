@@ -417,7 +417,19 @@ pub fn expand_indirect_buffers(
     stream: &[u8],
     read: &dyn Fn(u64, usize) -> Option<Vec<u8>>,
 ) -> Vec<u8> {
-    expand_at_depth(stream, read, 0)
+    expand_at_depth(stream, None, read, 0).0
+}
+
+/// [`expand_indirect_buffers`] of a stream read from guest address `base`, with the guest address
+/// of the `REWIND` not yet released it stopped at, in whichever buffer that stands: what a release
+/// of that `REWIND` resumes (D890). `None` for a stream that ran to its end.
+#[must_use]
+pub fn expand_holding(
+    stream: &[u8],
+    base: u64,
+    read: &dyn Fn(u64, usize) -> Option<Vec<u8>>,
+) -> (Vec<u8>, Option<u64>) {
+    expand_at_depth(stream, Some(base), read, 0)
 }
 
 /// The packets of `window` up to and with the first chained `INDIRECT_BUFFER`, which leaves the
@@ -441,15 +453,16 @@ pub fn through_first_chain(window: &[u8]) -> Option<Vec<u8>> {
         .map(<[u8]>::to_vec)
 }
 
-/// [`expand_indirect_buffers`] at `depth` buffers in.
+/// [`expand_holding`] at `depth` buffers in, of a stream at `base` where that is known.
 fn expand_at_depth(
     stream: &[u8],
+    base: Option<u64>,
     read: &dyn Fn(u64, usize) -> Option<Vec<u8>>,
     depth: u32,
-) -> Vec<u8> {
+) -> (Vec<u8>, Option<u64>) {
     let walked = packet::walk(stream);
     if depth >= MAX_INDIRECT_DEPTH || !walked.is_trustworthy() {
-        return stream.to_vec();
+        return (stream.to_vec(), None);
     }
     let mut expanded = Vec::with_capacity(stream.len());
     let mut copied = 0;
@@ -465,7 +478,7 @@ fn expand_at_depth(
             expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
             copied = at + packet.length as usize;
             if !released {
-                return expanded;
+                return (expanded, base.map(|base| base + at as u64));
             }
             continue;
         }
@@ -501,14 +514,17 @@ fn expand_at_depth(
             continue;
         };
         expanded.extend_from_slice(stream.get(copied..at).unwrap_or_default());
-        expanded.extend(expand_at_depth(&target, read, depth + 1));
+        let (inner, held) = expand_at_depth(&target, Some(address(low, high)), read, depth + 1);
+        expanded.extend(inner);
         copied = at + packet.length as usize;
-        if control & IB_CHAIN != 0 {
-            return expanded;
+        // Held inside the buffer it went to, the stream goes no further; chained, it never comes
+        // back.
+        if held.is_some() || control & IB_CHAIN != 0 {
+            return (expanded, held);
         }
     }
     expanded.extend_from_slice(stream.get(copied..).unwrap_or_default());
-    expanded
+    (expanded, None)
 }
 
 /// Carries out a stream's command-processor memory work, in order, stopping at the first packet it
@@ -1773,6 +1789,37 @@ mod tests {
             super::expand_indirect_buffers(&unreadable, &read),
             unreadable
         );
+    }
+
+    /// A stream that stops at a REWIND not yet released says which: its guest address, in whichever
+    /// buffer it stands - the submitted one, or one a jump led to - so its release resumes that
+    /// stream and no other (D890). A stream that runs to its end holds at none.
+    #[test]
+    fn a_stream_stopped_at_a_rewind_names_it() {
+        let rewind = [command_header(0x59, 1), 0];
+        let mut submitted = fill(0x2000, 0x1111_1111, 4);
+        submitted.extend(rewind);
+        let (_, held) = super::expand_holding(&bytes(&submitted), 0x5_0000, &|_, _| None);
+        assert_eq!(
+            held,
+            Some(0x5_0000 + 28),
+            "the REWIND after the 28-byte fill"
+        );
+
+        let mut trampoline: Vec<u32> = rewind.to_vec();
+        trampoline.extend(indirect(0, 0, true));
+        let trampoline_bytes = bytes(&trampoline);
+        let read = |at: u64, length: usize| {
+            (at == 0x9000 && length == trampoline_bytes.len()).then(|| trampoline_bytes.clone())
+        };
+        let dwords = u32::try_from(trampoline.len()).expect("small");
+        let mut jumping = fill(0x2000, 0x1111_1111, 4);
+        jumping.extend(indirect(0x9000, dwords, true));
+        let (_, held) = super::expand_holding(&bytes(&jumping), 0x5_0000, &read);
+        assert_eq!(held, Some(0x9000), "the trampoline's own REWIND");
+
+        let (_, held) = super::expand_holding(&bytes(&fill(0x2000, 1, 4)), 0x5_0000, &read);
+        assert_eq!(held, None);
     }
 
     /// What follows a released REWIND is carried out up to and with the first chain, which leaves
