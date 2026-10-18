@@ -29,3 +29,92 @@ known_by = "measured"
 cites = "obSCEne REQ-20261017T2000Z-gt10 (census commit 3b10104), reports/hardware/report-20261018-gt-census.log (SHA-256 4e52aabf7a9e565c...) lines 2803-2808."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-18"
+[[function]]
+name = "sceVoiceCreatePort"
+arity = 2
+purpose = "(port id out, param): creates a voice port from a 0x18-byte parameter block."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13, after sceVoiceInit): PPSA04263's four blocks {kind 0, 0, f32 1.0, user, u64 0}, {4, 0xa, 1.0, 0x1c84, 0}, {3, 0x40, 1.0, 0x800, 0, 0x3e80} and {5, 0, 1.0, user, u64 2} answered 0 and wrote port ids 0, 1, 2, 3 in creation order, each block unchanged.",
+    "orbistoun answers those four blocks (the user field the signed-in user) as measured; any other block, or a call before sceVoiceInit, answers the placeholder. PPSA04263 skips the rest of its voice set-up on a non-zero answer (jne at image+0x2602b77).",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceConnectIPortToOPort"
+arity = 2
+purpose = "(input port, output port): connects two voice ports."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13): port 0 (kind 0) to port 1 (kind 4) and to port 2 (kind 3) answered 0.",
+    "orbistoun answers those kinds of live port 0; any other pair answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceGetPortInfo"
+arity = 2
+purpose = "(port, info): a voice port's state, into a block."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13, no headset): 0x804e080a for each of ports 0-3, the first 32 bytes of a 0x40-byte 0xcc fill zeroed and the rest left.",
+    "orbistoun answers a live port so; a port not live answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceStart"
+arity = 0
+purpose = "(): starts voice processing."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13, no headset, four ports made): 0x804e0805.",
+    "orbistoun answers 0x804e0805 after sceVoiceInit; before it, the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceStop"
+arity = 0
+purpose = "(): stops voice processing."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13, after a refused sceVoiceStart): 0.",
+    "orbistoun answers 0 after sceVoiceInit; before it, the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceVoiceDeletePort"
+arity = 1
+purpose = "(port): deletes a voice port."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt13): 0 for each of ports 0-3, then 0x804e0807 for port 0 again.",
+    "orbistoun answers a live port 0 and a deleted one 0x804e0807; an id never created answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1300Z-gt13 (census commit d8af2d8), reports/hardware/report-20261018-gt13-census.log (SHA-256 60f1cab35a21d284...) lines 2876-2921, 000-boot/gt13-voice-ports, no headset connected."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
