@@ -84,6 +84,16 @@ struct Kept {
     objects: std::collections::BTreeMap<u64, std::collections::BTreeMap<String, Value>>,
     /// Each event, by its address, with its name and the property object it was made with.
     events: std::collections::BTreeMap<u64, (String, u64)>,
+    /// The names of the events posted so far, each reported the first time it is posted.
+    posted: std::collections::BTreeSet<String>,
+}
+
+impl Kept {
+    /// Whether `name` is posted for the first time, which the run reports; a title that posts an
+    /// event every frame is reported once per name.
+    fn first_post(&mut self, name: &str) -> bool {
+        self.posted.insert(name.to_owned())
+    }
 }
 
 /// The process's universal-data state.
@@ -366,7 +376,14 @@ fn post_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     if let Some(((user, label), event)) = posted {
         let earned = orbistoun_systemservice::trophy::post_event(user, label, &event);
-        if !earned.is_empty() {
+        if kept().first_post(&event.name) {
+            tracing::info!(
+                event = %event.name,
+                properties = ?event.properties,
+                ?earned,
+                "a universal-data event posted, the first of its name"
+            );
+        } else if !earned.is_empty() {
             tracing::info!(?earned, event = %event.name, "trophies earned");
         }
     }
@@ -415,6 +432,15 @@ mod tests {
             pack.extend_from_slice(bytes);
         }
         pack
+    }
+
+    /// Each event name is reported the first time it is posted, and only then.
+    #[test]
+    fn an_event_name_is_reported_once() {
+        let mut kept = super::Kept::default();
+        assert!(kept.first_post("_UnlockTrophy"));
+        assert!(!kept.first_post("_UnlockTrophy"));
+        assert!(kept.first_post("ActivityStart"));
     }
 
     /// In a title that ships its trophy and universal-data packs, an `_UnlockTrophy` event whose
