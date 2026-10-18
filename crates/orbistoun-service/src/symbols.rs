@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 65] {
+pub(crate) fn modules() -> [ModuleDesc; 66] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -84,6 +84,7 @@ pub(crate) fn modules() -> [ModuleDesc; 65] {
         orbistoun_systemservice::signin_dialog::MODULE,
         orbistoun_systemservice::trophy::MODULE,
         orbistoun_systemservice::content_search::MODULE,
+        orbistoun_systemservice::save_data_dialog::MODULE,
         orbistoun_systemservice::web_browser_dialog::MODULE,
         orbistoun_systemservice::offline::entitlement_access::MODULE,
         orbistoun_systemservice::offline::live_streaming::MODULE,
@@ -162,6 +163,7 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_systemservice::share::implementations());
     all.extend_from_slice(orbistoun_systemservice::trophy::implementations());
     all.extend_from_slice(orbistoun_systemservice::content_search::implementations());
+    all.extend_from_slice(orbistoun_systemservice::save_data_dialog::implementations());
     // The online services a title starts at boot, as an offline console starts them: each answers
     // 0, and the web browser dialog's initialiser with them.
     all.extend_from_slice(orbistoun_systemservice::offline::implementations());

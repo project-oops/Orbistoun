@@ -1,0 +1,114 @@
+library = "libSceSaveDataDialog.native"
+
+[[function]]
+name = "sceSaveDataDialogInitialize"
+arity = 6
+purpose = "(): initialises the save-data dialog."
+returns = "status"
+edge_cases = [
+    "Answers 0; a second call before Terminate answers the placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogOpen"
+arity = 1
+purpose = "(param): opens a save-data dialog."
+returns = "status"
+edge_cases = [
+    "Shows nothing and answers 0, the dialog running (D791); a null parameter, or an open before Initialize or while one runs, answers the placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogUpdateStatus"
+arity = 0
+purpose = "(): the dialog's state - 0 none, 1 initialised, 2 running, 3 finished."
+returns = "status"
+edge_cases = [
+    "A running dialog reports running once and then finished, as a user who answered at once would leave it (D791).",
+    "PPSA28061's save thread polls it until the dialog finishes; unanswered it polled twenty million times.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogGetStatus"
+arity = 0
+purpose = "(): the dialog's state, without moving it on."
+returns = "status"
+edge_cases = [
+    "A running dialog reads running until UpdateStatus finishes it.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogGetResult"
+arity = 1
+purpose = "(result): a finished dialog's result."
+returns = "status"
+edge_cases = [
+    "Writes a zero result code at +4 and the OK button id 1 at +8 and answers 0 (D791); before the dialog finishes it answers the placeholder.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogClose"
+arity = 1
+purpose = "(param): closes a running dialog."
+returns = "status"
+edge_cases = [
+    "Finishes a running dialog and answers 0; with none running it answers the placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogIsReadyToDisplay"
+arity = 0
+purpose = "(): whether the dialog can be shown."
+returns = "status"
+edge_cases = [
+    "Answers 1: nothing is ever waited for.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceSaveDataDialogTerminate"
+arity = 0
+purpose = "(): ends the save-data dialog."
+returns = "status"
+edge_cases = [
+    "Answers 0; the next dialog starts with Initialize again.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer for a dialog no one sees (D791), as the message dialog is answered; obSCEne could not bind the library from homebrew (REQ-570e)."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-18"

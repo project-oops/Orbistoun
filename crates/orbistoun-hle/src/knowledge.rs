@@ -213,6 +213,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceContentSearch.toml"),
     ),
     (
+        "libSceSaveDataDialog.native",
+        include_str!("../data/knowledge/libSceSaveDataDialog.native.toml"),
+    ),
+    (
         "libSceNpEntitlementAccess",
         include_str!("../data/knowledge/libSceNpEntitlementAccess.toml"),
     ),
