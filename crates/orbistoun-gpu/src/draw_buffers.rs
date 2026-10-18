@@ -523,26 +523,57 @@ fn evaluate_computed_now(
     let Some((scalars, unknowns)) = explained else {
         return Ok(None);
     };
-    // The register the draw cannot know, and the instruction that left it so.
+    // The register the draw cannot know, and the instruction that left it so - and, one step back,
+    // the unknown scalar it read and what left that so.
+    let spelled = |register: usize| match register {
+        0..=105 => format!("s{register}"),
+        106 => "vcc_lo".to_owned(),
+        107 => "vcc_hi".to_owned(),
+        code => format!("scalar code {code}"),
+    };
+    let cause = |register: usize| match unknowns.get(register).copied().flatten() {
+        Some(orbistoun_translate::evaluate::Unknown::LeftBy(at)) => format!(
+            "after {} at {at:#x}",
+            crate::pipeline::instruction_text(&decode, encodings, at)
+                .unwrap_or_else(|| "an instruction".to_owned())
+        ),
+        Some(orbistoun_translate::evaluate::Unknown::PathsDisagree) => {
+            "where the paths to the access disagree".to_owned()
+        }
+        None => "and nothing before the access set it".to_owned(),
+    };
     let unknown = |register: usize| -> Refusal {
-        let name = match register {
-            0..=105 => format!("s{register}"),
-            106 => "vcc_lo".to_owned(),
-            107 => "vcc_hi".to_owned(),
-            code => format!("scalar code {code}"),
-        };
-        let cause = match unknowns.get(register).copied().flatten() {
-            Some(orbistoun_translate::evaluate::Unknown::LeftBy(at)) => format!(
-                "after {} at {at:#x}",
-                crate::pipeline::instruction_text(&decode, encodings, at)
-                    .unwrap_or_else(|| "an instruction".to_owned())
-            ),
-            Some(orbistoun_translate::evaluate::Unknown::PathsDisagree) => {
-                "where the paths to the access disagree".to_owned()
-            }
-            None => "and nothing before the access set it".to_owned(),
-        };
-        format!("{UNKNOWN}: {name} is unknown {cause}").into()
+        let mut why = format!(
+            "{UNKNOWN}: {} is unknown {}",
+            spelled(register),
+            cause(register)
+        );
+        if let Some(orbistoun_translate::evaluate::Unknown::LeftBy(at)) =
+            unknowns.get(register).copied().flatten()
+            && let Some(step) = decode.instructions.iter().find(|i| i.offset == at)
+            && let Some(read) = step
+                .operands
+                .iter()
+                .skip(1)
+                .find_map(|operand| match operand {
+                    orbistoun_shader::Operand::Scalar(source)
+                        if scalars
+                            .get(usize::from(*source))
+                            .copied()
+                            .flatten()
+                            .is_none() =>
+                    {
+                        Some(usize::from(*source))
+                    }
+                    _ => None,
+                })
+        {
+            let _ = std::fmt::Write::write_fmt(
+                &mut why,
+                format_args!(", which read {} unknown {}", spelled(read), cause(read)),
+            );
+        }
+        why.into()
     };
     let (first, count) = match computed.through {
         ComputedAccess::Descriptor { first, .. } => (usize::from(first), 4),
@@ -1384,7 +1415,9 @@ pub fn bind_draw_buffers(
                         }
                         Err(why) => {
                             refused.0 += 1;
-                            refused.1.get_or_insert(why);
+                            refused
+                                .1
+                                .get_or_insert_with(|| named_refusal(stage, module, &why));
                         }
                     }
                 }
@@ -1394,6 +1427,17 @@ pub fn bind_draw_buffers(
         out.push(command);
     }
     *commands = out;
+}
+
+/// A draw's buffer refusal with the stage and module it was refused for, as the refused
+/// submission's listing names the module beside the program it binds.
+fn named_refusal(stage: ShaderStage, module: Option<ResourceId>, why: &Refusal) -> Refusal {
+    format!(
+        "the {} module {}: {why}",
+        format!("{stage:?}").to_lowercase(),
+        module.map_or_else(|| "none".to_owned(), |m| format!("{m:?}"))
+    )
+    .into()
 }
 
 #[cfg(test)]

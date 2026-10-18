@@ -83,7 +83,7 @@ pub fn scalar_prefix(
     (first_register, user_data): (u32, &[u32]),
     system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
-) -> Result<Option<Scalars>, &'static str> {
+) -> Result<Option<Scalars>, PrefixRefusal> {
     scalar_prefix_explained(
         decode,
         encodings,
@@ -108,7 +108,7 @@ pub fn scalar_prefix_explained(
     (first_register, user_data): (u32, &[u32]),
     system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
-) -> Result<Option<(Scalars, Box<Unknowns>)>, &'static str> {
+) -> Result<Option<(Scalars, Box<Unknowns>)>, PrefixRefusal> {
     // Each path a branch on the execution mask can take to the access, followed in turn: the
     // decisions taken so far, depth first.
     let mut pending: Vec<Vec<bool>> = vec![Vec::new()];
@@ -117,7 +117,7 @@ pub fn scalar_prefix_explained(
     while let Some(decisions) = pending.pop() {
         runs += 1;
         if runs > MOST_PATHS {
-            return Err("the program's paths to the access are too many to follow (D753)");
+            return Err("the program's paths to the access are too many to follow (D753)".into());
         }
         let path = prefix_path(
             decode,
@@ -163,7 +163,7 @@ pub fn scalar_prefix_explained(
 }
 
 /// How many paths [`scalar_prefix`] follows to one access before it gives up: six branches on the
-/// execution mask before it, each both ways, and one more.
+/// execution mask or an unknown condition mask before it, each both ways, and one more.
 const MOST_PATHS: usize = 1 << 7;
 
 /// Where one path through a prefix ended.
@@ -176,6 +176,9 @@ enum Path {
     Undecided,
 }
 
+/// Why a prefix cannot be replayed to its access: the branch, jump or loop that stops it.
+pub type PrefixRefusal = std::borrow::Cow<'static, str>;
+
 /// One path of [`scalar_prefix`]: each branch on the execution mask that the host cannot know and
 /// that lands before the access takes the way `decisions` gives, in order - taken for `true`. A
 /// scalar instruction runs whatever the mask holds, so every way is a way the wave may go.
@@ -186,7 +189,7 @@ fn prefix_path(
     (first_register, user_data): (u32, &[u32]),
     system: &[(u32, u32)],
     (read, decisions): (&mut dyn FnMut(u64) -> Option<u32>, &[bool]),
-) -> Result<Path, &'static str> {
+) -> Result<Path, PrefixRefusal> {
     let mut decided = decisions.iter().copied();
     let mut model = Concrete::new(encodings, decode.instructions.len());
     model.program_address = program_address;
@@ -213,11 +216,11 @@ fn prefix_path(
         }
         steps += 1;
         if steps > 4 * decode.instructions.len() {
-            return Err("the program loops before the access (D753)");
+            return Err("the program loops before the access (D753)".into());
         }
         at += 1;
         let Some((family, name)) = named(encodings, instruction) else {
-            return Err("an instruction before the access has no name (D753)");
+            return Err("an instruction before the access has no name (D753)".into());
         };
         // A register this step leaves unknown is unknown because of it; one it makes known has no
         // cause any more.
@@ -228,10 +231,27 @@ fn prefix_path(
             (decode, until),
             (&mut decided, read),
         )?;
+        // A scalar load writes its destination whatever it held: one it leaves unknown is unknown
+        // because of it, though nothing had set it before.
+        let loaded = (family == "SMEM").then(|| {
+            let first = (instruction.word >> 6 & 0x7f) as usize;
+            let words = name
+                .rsplit_once("dwordx")
+                .and_then(|(_, count)| count.parse().ok())
+                .unwrap_or(1);
+            first..first + words
+        });
         for (register, (was, now)) in before.iter().zip(model.scalars).enumerate() {
             match (was, now) {
                 (Some(_), None) => unknowns[register] = Some(Unknown::LeftBy(instruction.offset)),
                 (_, Some(_)) => unknowns[register] = None,
+                (None, None)
+                    if loaded
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&register)) =>
+                {
+                    unknowns[register] = Some(Unknown::LeftBy(instruction.offset));
+                }
                 (None, None) => {}
             }
         }
@@ -264,7 +284,7 @@ fn step_prefix(
         &mut impl Iterator<Item = bool>,
         &mut dyn FnMut(u64) -> Option<u32>,
     ),
-) -> Result<Step, &'static str> {
+) -> Result<Step, PrefixRefusal> {
     {
         match family {
             "SOPP" if branches(name) => {
@@ -272,8 +292,15 @@ fn step_prefix(
                     "s_branch" => Some(true),
                     "s_cbranch_scc0" => model.condition.map(|scc| scc == 0),
                     "s_cbranch_scc1" => model.condition.map(|scc| scc != 0),
-                    "s_cbranch_vccz" => vcc_set(&model.scalars).map(|set| !set),
-                    "s_cbranch_vccnz" => vcc_set(&model.scalars),
+                    // A condition mask the host cannot know - a vector compare's, from each lane's
+                    // data - is followed both ways, as the execution mask is (D753).
+                    "s_cbranch_vccz" | "s_cbranch_vccnz" => match vcc_set(&model.scalars) {
+                        Some(set) => Some(set == (name == "s_cbranch_vccnz")),
+                        None => match decided.next() {
+                            Some(taken) => Some(taken),
+                            None => return Ok(Step::Ended(Path::Undecided)),
+                        },
+                    },
                     // A branch on the execution mask that jumps past the access is never taken
                     // where the access runs, so the access's scalars are those of the path that
                     // falls through - a legacy streamout pass skipping its store for a wave with
@@ -289,13 +316,25 @@ fn step_prefix(
                     _ => None,
                 };
                 let Some(taken) = taken else {
-                    return Err(
-                        "the program branches before the access on what the host cannot know (D753)",
-                    );
+                    let reads = if name.contains("scc") {
+                        "the condition code"
+                    } else if name.contains("vcc") {
+                        "vcc"
+                    } else {
+                        "what the host does not follow"
+                    };
+                    return Err(format!(
+                        concat!(
+                            "the program branches before the access, at `{}` at {:#x}, on {}, ",
+                            "which the host cannot know (D753)"
+                        ),
+                        name, instruction.offset, reads
+                    )
+                    .into());
                 };
                 if taken {
                     let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
-                        return Err("a branch with no target (D753)");
+                        return Err("a branch with no target (D753)".into());
                     };
                     let target = i64::from(instruction.offset) + 4 + 4 * simm16(*jump);
                     // The prefix ends at the access: a jump beyond it skips it (D800).
@@ -308,7 +347,7 @@ fn step_prefix(
                         .position(|i| i64::from(i.offset) == target)
                         .unwrap_or(decode.instructions.len());
                     if at == decode.instructions.len() && target != i64::from(until) {
-                        return Err("a branch into the middle of an instruction (D753)");
+                        return Err("a branch into the middle of an instruction (D753)".into());
                     }
                     return Ok(Step::Jump(at));
                 }
@@ -320,9 +359,11 @@ fn step_prefix(
                     || name.starts_with("s_swappc")
                     || name.starts_with("s_cbranch")
                 {
-                    return Err(
-                        "the program branches before the access, which is not followed (D753)",
-                    );
+                    return Err(format!(
+                        "the program branches before the access at `{name}` at {:#x}, which is not followed (D753)",
+                        instruction.offset
+                    )
+                    .into());
                 }
                 if model::instruction(model, instruction).is_err() {
                     model.forget_written(instruction, name);
@@ -1821,8 +1862,10 @@ impl<'a> Concrete<'a> {
         if name.contains("_co_") && name.ends_with("_e32") {
             self.forget(VCC, 2);
         }
-        // A compare's SDWA form writes the pair its modifier word names, not the condition mask.
-        if instruction.word & 0x1ff == SDWA_SOURCE
+        // A compare's SDWA form writes the pair its modifier word names, not the condition mask;
+        // another instruction's word holds its destination select and output modifiers there.
+        if name.starts_with("v_cmp")
+            && instruction.word & 0x1ff == SDWA_SOURCE
             && let Some(word) = instruction.second_word
             && word >> 15 & 1 != 0
         {
@@ -2085,7 +2128,7 @@ mod tests {
         until: u32,
         user_data: (u32, &[u32]),
         read: &mut dyn FnMut(u64) -> Option<u32>,
-    ) -> Result<Scalars, &'static str> {
+    ) -> Result<Scalars, super::PrefixRefusal> {
         scalar_prefix(decode, encodings, (until, None), user_data, &[], read)
             .map(|scalars| scalars.expect("the access is reached"))
     }
@@ -2208,7 +2251,7 @@ mod tests {
     /// branches past while any lane runs (D800): `s_mov_b32 exec_lo, s3; s_mov_b32 exec_hi, 0`,
     /// then the condition mask copied from it and `s_cbranch_vccnz 1` over the access. A draw of
     /// three vertices seeds a non-zero `s3`, and the access is passed; with no seed the mask is
-    /// unknown and the branch is refused.
+    /// unknown and the branch is followed both ways.
     #[test]
     fn an_access_a_seeded_wave_branches_past_is_not_reached() {
         let encodings = EncodingTable::builtin().expect("encodings");
@@ -2242,17 +2285,21 @@ mod tests {
             Ok(None),
             "a wave with lanes branches past the access"
         );
+        // Unseeded, the mask is unknown and the branch is followed both ways (D753): the way that
+        // falls through reaches the access.
         assert!(
-            scalar_prefix(
-                &decode,
-                &encodings,
-                (access, None),
-                (8, &[]),
-                &[],
-                &mut |_| None
-            )
-            .is_err(),
-            "an unseeded mask leaves the branch unknown"
+            matches!(
+                scalar_prefix(
+                    &decode,
+                    &encodings,
+                    (access, None),
+                    (8, &[]),
+                    &[],
+                    &mut |_| None,
+                ),
+                Ok(Some(_))
+            ),
+            "an unseeded mask is followed both ways"
         );
     }
 
@@ -2334,6 +2381,25 @@ mod tests {
         assert_eq!(scalars[1], None, "s1 is seven one way only");
     }
 
+    /// A branch on a condition mask the host cannot know is followed both ways as one on the
+    /// execution mask is (D753): a vector compare's answer depends on each lane's data, and either
+    /// way is a way the wave may go. Grand Theft Auto V's scene pixel shader branches so
+    /// (`s_cbranch_vccz` at 0x3f8, after `v_cmp_ge_f32_sdwa vcc, s38, v19`) before a buffer it reads.
+    #[test]
+    fn a_vccz_branch_on_an_unknown_mask_is_followed_both_ways() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_mov_b32 s0, 5; s_cbranch_vccz 1; s_mov_b32 s1, 7; then the access.
+        let words = [0xbe80_0385_u32, 0xbf86_0001, 0xbe81_0387, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("both ways reach the access");
+        assert_eq!(scalars[0], Some(5), "s0 is five either way");
+        assert_eq!(scalars[1], None, "s1 is seven one way only");
+    }
+
     #[test]
     fn a_streamout_store_past_an_execz_branch_is_evaluated() {
         let encodings = EncodingTable::builtin().expect("encodings");
@@ -2398,6 +2464,103 @@ mod tests {
         );
         // s4 is non-zero, so the condition is clear and the fourth word is bits 11:4 of the table.
         assert_eq!(scalars[3], Some(0x20));
+    }
+
+    /// A bit field extracted into `vcc_hi` is known where its source is: Grand Theft Auto V's scene
+    /// vertex shader forms a format load's offset so (`s_bfe_u32 vcc_hi, s71, 0xc000e`, 0x93ebff47),
+    /// and its descriptor was refused as computed from what the host cannot know.
+    #[test]
+    fn a_bit_field_into_vcc_hi_is_evaluated() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: [u32; 7] = [
+            0xf404_0105,
+            0xfa00_0000, // s_load_dwordx2 s[4:5], s[10:11], 0x0
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0x93eb_ff04,
+            0x000c_000e, // s_bfe_u32 vcc_hi, s4, 0xc000e
+            0xe00c_2000,
+            0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let index_table = 0x1000_0000_u64;
+        let memory = BTreeMap::from([(index_table, 0x1234_5678), (index_table + 4, 0)]);
+        let user_data = [0, 0, index_table as u32, (index_table >> 32) as u32];
+        let scalars = reached(
+            &decode,
+            &encodings,
+            access,
+            (8, &user_data),
+            &mut |address| memory.get(&address).copied(),
+        )
+        .expect("a straight-line prefix");
+        // Twelve bits from bit 14 of 0x12345678.
+        assert_eq!(scalars[VCC + 1], Some(0x8d1));
+    }
+
+    /// Only a compare's SDWA word names a scalar pair it writes: Grand Theft Auto V's scene vertex
+    /// shader multiplies with `v_mul_f32_sdwa v18, vcc_lo, v18 div:2` (words 0x102424f9 0x0686c66a),
+    /// whose bits 15:8 are its destination select and output multiplier, and the descriptor it then
+    /// computes from `s71` was refused as unknown.
+    #[test]
+    fn an_sdwa_arithmetic_word_writes_no_scalar_pair() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: [u32; 8] = [
+            0xbec6_03ff,
+            0x0000_0005, // s_mov_b32 s70, 5
+            0xbec7_03ff,
+            0x0000_0007, // s_mov_b32 s71, 7
+            0x1024_24f9,
+            0x0686_c66a, // v_mul_f32_sdwa v18, vcc_lo, v18 div:2
+            0xe00c_2000,
+            0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (8, &[]), &mut |_| None)
+            .expect("a straight-line prefix");
+        assert_eq!([scalars[70], scalars[71]], [Some(5), Some(7)]);
+    }
+
+    /// A scalar load whose words cannot be read is why its destination is unknown, though nothing
+    /// had set it before: what a refusal names when the descriptor it computes depends on them.
+    #[test]
+    fn a_scalar_load_that_reads_nothing_is_the_cause() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: [u32; 7] = [
+            0xf404_0105,
+            0xfa00_0000, // s_load_dwordx2 s[4:5], s[10:11], 0x0
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0x93eb_ff04,
+            0x000c_000e, // s_bfe_u32 vcc_hi, s4, 0xc000e
+            0xe00c_2000,
+            0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let user_data = [0, 0, 0x1000_0000, 0];
+        let Ok(Some((scalars, unknowns))) = super::scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (8, &user_data),
+            &[],
+            &mut |_| None,
+        ) else {
+            panic!("a straight-line prefix");
+        };
+        assert_eq!(scalars[4], None);
+        assert_eq!(
+            unknowns[4],
+            Some(super::Unknown::LeftBy(0)),
+            "the load that read nothing"
+        );
     }
 
     /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
@@ -3109,8 +3272,9 @@ mod tests {
 
     /// A prefix follows a branch whose condition the host knows (D753, as D758 does for lanes):
     /// `s_cmp_eq_u32 s8, 0; s_cbranch_scc1 1` skips `s_mov_b32 s4, 5` when the draw's first
-    /// user-data word is zero and runs it when not, and `s_mov_b32 s5, 7` after both. A branch on
-    /// what the host cannot know, `s_cbranch_vccz` at entry, is still refused.
+    /// user-data word is zero and runs it when not, and `s_mov_b32 s5, 7` after both. A branch on a
+    /// condition mask the host cannot know, `s_cbranch_vccz` at entry, is followed both ways: `s5`
+    /// is known, `s4` not.
     #[test]
     fn a_prefix_follows_a_branch_it_can_decide() {
         let encodings = EncodingTable::builtin().expect("encodings");
@@ -3136,7 +3300,9 @@ mod tests {
             assert_eq!(scalars[5], Some(7));
         }
         let unknown = decode_program(&program(0xbf86_0001), &encodings, &operands);
-        assert!(reached(&unknown, &encodings, end, (8, &[0]), &mut |_| None).is_err());
+        let both = reached(&unknown, &encodings, end, (8, &[0]), &mut |_| None)
+            .expect("followed both ways");
+        assert_eq!([both[4], both[5]], [None, Some(7)]);
         // `s_mov_b32 vcc_lo, 1; s_mov_b32 vcc_hi, 0; s_cbranch_vccnz 1` over the same moves: the
         // mask the program set is known, so the branch is taken and s4 never written.
         let bytes: Vec<u8> = [
