@@ -505,6 +505,10 @@ pub enum TextureEncoding {
     /// row-major: the guest's compressed half floats as they are, which the host samples natively
     /// as `BC6H_UFLOAT_BLOCK`.
     Bc6hUfloat,
+    /// `BC5_UNORM` blocks, four words each, a block for every four-by-four texels, rows of blocks
+    /// row-major: the guest's two compressed channels as they are, which the host samples natively
+    /// as `BC5_UNORM_BLOCK`, blue zero and alpha one.
+    Bc5,
     /// One word a texel, `8_8_8_8_SRGB`'s bytes as the guest holds them, which the host samples as
     /// `R8G8B8A8_SRGB`: the colour channels decoded from sRGB to linear as they are read, as the
     /// guest's own sampler decodes them.

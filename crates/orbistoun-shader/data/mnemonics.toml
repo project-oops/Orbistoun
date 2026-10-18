@@ -374,6 +374,11 @@ name = "s_andn2_b64"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 22
+name = "s_orn2_b32"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 23
 name = "s_orn2_b64"
 
@@ -654,6 +659,26 @@ name = "v_cvt_i32_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 17
+name = "v_cvt_f32_ubyte0_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 18
+name = "v_cvt_f32_ubyte1_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 19
+name = "v_cvt_f32_ubyte2_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 20
+name = "v_cvt_f32_ubyte3_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 32
 name = "v_fract_f32_e32"
 
@@ -924,6 +949,11 @@ name = "v_cmp_ge_i32_e64"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 196
+name = "v_cmp_gt_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 257
 name = "v_cndmask_b32_e64"
 
@@ -946,6 +976,11 @@ name = "v_mad_f32"
 family = "VOP3"
 opcode = 322
 name = "v_mad_i32_i24"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 328
+name = "v_bfe_u32"
 
 [[mnemonic]]
 family = "VOP3"
@@ -1199,13 +1234,63 @@ name = "v_cmp_nlt_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 17
+name = "v_cmpx_lt_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 18
+name = "v_cmpx_eq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 19
+name = "v_cmpx_le_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 20
 name = "v_cmpx_gt_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 21
+name = "v_cmpx_lg_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 22
+name = "v_cmpx_ge_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 25
+name = "v_cmpx_nge_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 26
+name = "v_cmpx_nlg_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 27
+name = "v_cmpx_ngt_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 28
+name = "v_cmpx_nle_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 29
 name = "v_cmpx_neq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 30
+name = "v_cmpx_nlt_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
@@ -1239,6 +1324,11 @@ name = "v_cmp_ge_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 145
+name = "v_cmpx_lt_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 146
 name = "v_cmpx_eq_i32_e32"
 
@@ -1254,6 +1344,16 @@ name = "v_cmpx_gt_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 149
+name = "v_cmpx_ne_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 150
+name = "v_cmpx_ge_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 155
 name = "v_cmpx_le_i16_e32"
 
@@ -1261,6 +1361,11 @@ name = "v_cmpx_le_i16_e32"
 family = "VOPC"
 opcode = 195
 name = "v_cmp_le_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 196
+name = "v_cmp_gt_u32_e32"
 
 [[mnemonic]]
 family = "VOPC"
@@ -1274,5 +1379,30 @@ name = "v_cmp_ge_u32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 209
+name = "v_cmpx_lt_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 210
+name = "v_cmpx_eq_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 211
+name = "v_cmpx_le_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 212
 name = "v_cmpx_gt_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 213
+name = "v_cmpx_ne_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 214
+name = "v_cmpx_ge_u32_e32"

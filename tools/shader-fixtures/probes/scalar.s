@@ -240,3 +240,8 @@ s_getpc_b64 s[0:1]
 s_getpc_b64 s[100:101]
 s_getpc_b64 s[6:7]
 s_getpc_b64 s[60:61]
+s_orn2_b32 s0, s1, s2
+s_orn2_b32 s100, s45, 0x3f
+s_orn2_b32 s7, -1, s96
+s_orn2_b32 vcc_lo, s3, exec_lo
+s_orn2_b32 s50, s99, s101

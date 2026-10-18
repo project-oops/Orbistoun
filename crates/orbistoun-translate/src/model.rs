@@ -80,6 +80,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_brev_b32",
     "s_getpc_b64",
     "s_andn2_b32",
+    "s_orn2_b32",
     "s_and_b64",
     "s_lshl_b64",
     "s_lshr_b64",
@@ -116,6 +117,28 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmpx_eq_i32_e32",
     "v_cmpx_gt_i32_e32",
     "v_cmpx_gt_u32_e32",
+    "v_cmpx_lt_u32_e32",
+    "v_cmpx_eq_u32_e32",
+    "v_cmpx_ne_u32_e32",
+    "v_cmpx_le_f32_e32",
+    "v_cmpx_lg_f32_e32",
+    "v_cmpx_ge_f32_e32",
+    "v_cmpx_nge_f32_e32",
+    "v_cmpx_nlg_f32_e32",
+    "v_cmpx_ngt_f32_e32",
+    "v_cmpx_nle_f32_e32",
+    "v_cmpx_lt_i32_e32",
+    "v_cmpx_ne_i32_e32",
+    "v_cmpx_ge_i32_e32",
+    "v_cmpx_le_u32_e32",
+    "v_cmpx_ge_u32_e32",
+    "v_cmp_gt_u32_e32",
+    "v_cmp_gt_u32_e64",
+    "v_cvt_f32_ubyte0_e32",
+    "v_cvt_f32_ubyte1_e32",
+    "v_cvt_f32_ubyte2_e32",
+    "v_cvt_f32_ubyte3_e32",
+    "v_bfe_u32",
     "v_nop",
     "v_cvt_pkrtz_f16_f32_e64",
     "v_cvt_pknorm_u16_f32",
@@ -676,6 +699,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             // The logic sets it to whether the result is non-zero, at either width.
             | "s_and_b32"
             | "s_andn2_b32"
+            | "s_orn2_b32"
             | "s_or_b32"
             | "s_xor_b32"
             // The shift and the bit-field extract set it to whether the result is non-zero.
@@ -2854,9 +2878,9 @@ fn scalar_instruction<M: Model + ?Sized>(
 
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
-        "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_or_b32" | "s_xor_b32"
-        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32" | "s_lshr_b32"
-        | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
+        "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_orn2_b32" | "s_or_b32"
+        | "s_xor_b32" | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32"
+        | "s_lshr_b32" | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
         | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" => {
             scalar_integer(model, instruction, name)
         }
@@ -2923,7 +2947,13 @@ fn vector_instruction<M: Model + ?Sized>(
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_lt_f32_e32"
         | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_f32_e32" | "v_cmpx_eq_i32_e32"
-        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => {
+        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" | "v_cmpx_lt_u32_e32"
+        | "v_cmpx_eq_u32_e32" | "v_cmpx_ne_u32_e32" => compare_into_exec(model, instruction, name),
+        // The rest of the family, its ordering read off its name as a compare into `vcc`'s is.
+        _ if name.starts_with("v_cmpx_")
+            && name.ends_with("_e32")
+            && compare_op(&name.replacen("v_cmpx_", "v_cmp_", 1)).is_some() =>
+        {
             compare_into_exec(model, instruction, name)
         }
 
@@ -2931,16 +2961,21 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
 
         // Integer conversions.
-        "v_cvt_f32_u32_e32" | "v_cvt_f32_i32_e32" | "v_cvt_i32_f32_e32" | "v_cvt_u32_f32_e32" => {
-            integer_conversion(model, instruction, name)
-        }
+        "v_cvt_f32_u32_e32"
+        | "v_cvt_f32_i32_e32"
+        | "v_cvt_i32_f32_e32"
+        | "v_cvt_u32_f32_e32"
+        | "v_cvt_f32_ubyte0_e32"
+        | "v_cvt_f32_ubyte1_e32"
+        | "v_cvt_f32_ubyte2_e32"
+        | "v_cvt_f32_ubyte3_e32" => integer_conversion(model, instruction, name),
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
         _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
         "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_or3_b32" | "v_mul_lo_u32"
-        | "v_mul_hi_u32" | "v_msad_u8" => integer_long_form(model, instruction, name),
+        | "v_mul_hi_u32" | "v_msad_u8" | "v_bfe_u32" => integer_long_form(model, instruction, name),
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
@@ -4817,12 +4852,8 @@ fn scalar_integer<M: Model + ?Sized>(
             let result = model.binary(spirv, left, right);
             (result, Some(model.is_not_zero(result)))
         }
-        // `S_ANDN2_B32`: `D = S0 & ~S1`, the condition code whether the result is non-zero.
-        "s_andn2_b32" => {
-            let inverted = model.not(right);
-            let result = model.binary(op::BITWISE_AND, left, inverted);
-            (result, Some(model.is_not_zero(result)))
-        }
+        // `S_ANDN2_B32` and `S_ORN2_B32`, and the condition code.
+        "s_andn2_b32" | "s_orn2_b32" => negated_logic(model, name, left, right),
         // `S_LSHL_B32`: `D = S0 << S1[4:0]`, the condition code whether the result is non-zero.
         "s_lshl_b32" => {
             let five = model.constant(31);
@@ -4886,6 +4917,24 @@ fn scalar_integer<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `s_andn2_b32` and `s_orn2_b32`: `S0 & ~S1` and `S0 | ~S1`, with the condition code whether the
+/// result is non-zero.
+fn negated_logic<M: Model + ?Sized>(
+    model: &mut M,
+    name: &str,
+    left: Id,
+    right: Id,
+) -> (Id, Option<Id>) {
+    let inverted = model.not(right);
+    let spirv = if name == "s_andn2_b32" {
+        op::BITWISE_AND
+    } else {
+        op::BITWISE_OR
+    };
+    let result = model.binary(spirv, left, inverted);
+    (result, Some(model.is_not_zero(result)))
+}
+
 /// Translates the compact scalar form: a destination and a sixteen-bit immediate.
 ///
 /// The immediate is signed; the decoder reports the field as encoded (a disassembler prints -2 as
@@ -4909,6 +4958,30 @@ fn scalar_immediate<M: Model + ?Sized>(
     // constant before a local-data-share access or a message.
     if name == "s_movk_i32" && matches!(destination, Operand::Named(named) if named == "m0") {
         model.write_m0(constant);
+        model.count();
+        return Ok(());
+    }
+    // A lane mask's half used as a scalar, as Grand Theft Auto V's `s_mulk_i32 vcc_lo, 0x50` is:
+    // read and written as that half, the other kept. The move and the multiply leave the condition
+    // code alone.
+    if let Operand::Named(named) = destination
+        && let Some((mask, high)) = lane_mask_name(named)
+            .map(|mask| (mask, false))
+            .or_else(|| lane_mask_high_name(named).map(|mask| (mask, true)))
+        && matches!(name, "s_movk_i32" | "s_mulk_i32")
+    {
+        let (low_now, high_now) = model.read_lane_mask(mask)?;
+        let current = if high { high_now } else { low_now };
+        let result = if name == "s_mulk_i32" {
+            model.binary(op::IMUL, current, constant)
+        } else {
+            constant
+        };
+        if high {
+            write_mask_high(model, mask, result)?;
+        } else {
+            write_mask_low(model, mask, result)?;
+        }
         model.count();
         return Ok(());
     }
@@ -5123,7 +5196,11 @@ fn compare_into_exec<M: Model + ?Sized>(
         "v_cmpx_eq_i32_e32" => (op::IEQUAL, 2),
         "v_cmpx_le_i32_e32" => (op::SLESS_THAN_EQUAL, 2),
         "v_cmpx_gt_u32_e32" => (op::UGREATER_THAN, 2),
-        _ => (op::SGREATER_THAN, 2),
+        // Any other, by its ordering, as `compare_op` reads it: floats as floats, the rest whole.
+        _ => compare_op(&name.replacen("v_cmpx_", "v_cmp_", 1))
+            .map_or((op::SGREATER_THAN, 2), |(opcode, float)| {
+                (opcode, if float { 0 } else { 2 })
+            }),
     };
     for lane in 0..model.modelled_lanes() {
         let mut sides = [zero; 2];
@@ -8943,6 +9020,8 @@ fn multiply_add_constant<M: Model + ?Sized>(
 /// - `v_mul_lo_u32 d, a, b`: the product's low 32 bits.
 /// - `v_and_or_b32 d, a, b, c`: `(a & b) | c`.
 /// - `v_or3_b32 d, a, b, c`: `a | b | c`.
+/// - `v_bfe_u32 d, a, b, c`: `(a >> b[4:0]) & ((1 << c[4:0]) - 1)`, the field of `c[4:0]` bits from
+///   bit `b[4:0]`.
 /// - `v_msad_u8 d, a, b, c`: `c` plus, for each byte of `b` that is not zero, its absolute
 ///   difference from `a`'s - NIR's `msad_4x8` (`nir_constant_expressions.py:413`) with its
 ///   reference as the second source, as ACO emits it (`aco_select_nir_alu.cpp:3303`).
@@ -9021,6 +9100,16 @@ fn integer_long_form<M: Model + ?Sized>(
             "v_or3_b32" => {
                 let either = model.binary(op::BITWISE_OR, a, b);
                 model.binary(op::BITWISE_OR, either, c)
+            }
+            "v_bfe_u32" => {
+                let five = model.constant(31);
+                let offset = model.binary(op::BITWISE_AND, b, five);
+                let width = model.binary(op::BITWISE_AND, c, five);
+                let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, a, offset);
+                let one = model.constant(1);
+                let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
+                let mask = model.binary(op::ISUB, bit, one);
+                model.binary(op::BITWISE_AND, shifted, mask)
             }
             // The hardware's second source is the reference whose zero bytes are skipped: ACO
             // hands NIR's `msad_4x8` reference over as `b` (`swap_srcs`,
@@ -9491,7 +9580,8 @@ fn ones_between<M: Model + ?Sized>(model: &mut M, offset: Id, width: Id) -> (Id,
     (low, high)
 }
 
-/// `v_cvt_f32_u32`, `v_cvt_f32_i32`, `v_cvt_i32_f32` and `v_cvt_u32_f32`, per lane.
+/// `v_cvt_f32_u32`, `v_cvt_f32_i32`, `v_cvt_i32_f32` and `v_cvt_u32_f32`, per lane, and
+/// `v_cvt_f32_ubyte0` to `3`: byte `n` of the source as an unsigned float.
 ///
 /// Unsigned or signed to float rounds to nearest, as SPIR-V's conversion does. Float to signed truncates
 /// toward zero and saturates: below `-2^31` (and `-inf`) reads `0x80000000`, `2^31` and above (and
@@ -9514,7 +9604,17 @@ fn integer_conversion<M: Model + ?Sized>(
     let register = u32::from(*register);
     for lane in running_lanes(model) {
         let bits = model.read_source(instruction, source, lane)?;
-        let value = if name == "v_cvt_f32_u32_e32" || name == "v_cvt_f32_i32_e32" {
+        let value = if let Some(byte) = name
+            .strip_prefix("v_cvt_f32_ubyte")
+            .and_then(|rest| rest.strip_suffix("_e32"))
+            .and_then(|byte| byte.parse::<u32>().ok())
+        {
+            let shift = model.constant(8 * byte);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, bits, shift);
+            let low = model.constant(0xff);
+            let byte = model.binary(op::BITWISE_AND, shifted, low);
+            integer_to_float(model, byte, false)
+        } else if name == "v_cvt_f32_u32_e32" || name == "v_cvt_f32_i32_e32" {
             integer_to_float(model, bits, name == "v_cvt_f32_i32_e32")
         } else if name == "v_cvt_u32_f32_e32" {
             float_to_unsigned_saturated(model, bits)

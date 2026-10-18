@@ -562,7 +562,8 @@ impl VulkanBackend {
             | orbistoun_gpu::TextureEncoding::DepthCompare => (width as usize) * (height as usize),
             orbistoun_gpu::TextureEncoding::Bc3
             | orbistoun_gpu::TextureEncoding::Bc3Srgb
-            | orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
+            | orbistoun_gpu::TextureEncoding::Bc6hUfloat
+            | orbistoun_gpu::TextureEncoding::Bc5 => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 4
             }
             orbistoun_gpu::TextureEncoding::Bc1Srgb | orbistoun_gpu::TextureEncoding::Bc1 => {

@@ -163,6 +163,14 @@ const FIXTURES: &[(&str, &str)] = &[
         "the ordered not-equal and the negated float orderings, which no compiled fixture produces",
     ),
     (
+        "vector-bytes",
+        "the byte conversions, the scalar or-not, the unsigned compares into the execution mask and the vector bit-field extract",
+    ),
+    (
+        "vector-cmpx",
+        "the compares into the execution mask no compiled fixture produces",
+    ),
+    (
         "vector-or3",
         "the three-source or and the float not-less-than compare, which no compiled fixture produces",
     ),

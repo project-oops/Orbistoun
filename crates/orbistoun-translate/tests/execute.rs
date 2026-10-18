@@ -3825,6 +3825,120 @@ fn a_thirty_two_lane_shader_takes_the_other_lanes_with_andn2() {
     );
 }
 
+/// `s_orn2_b32` is `s0 | !s1`: Grand Theft Auto V's scene compute program does
+/// `s_orn2_b32 s8, vcc_lo, exec_lo`. 0x10 or not 0xfffffff0 is 0x1f.
+#[test]
+fn orn2_ors_the_inverse_of_its_second_source() {
+    if !device_or_skip("orn2_ors_the_inverse_of_its_second_source") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(sop2_literal("s_or_b32", 4, 128, 0xffff_fff0));
+    program.push(s_mov_inline(5, 0x10));
+    program.push(sop2("s_orn2_b32", 3, 5, 4));
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(scalar(&registers, 3), 0x1f);
+}
+
+/// Grand Theft Auto V's scene compute program unpacks a word's bytes to floats
+/// (`v_cvt_f32_ubyte0` to `3`, VOP1 0x11 to 0x14), extracts a field (`v_bfe_u32 v4, v0, 8, 8`,
+/// VOP3 0x148), and masks its lanes with the unsigned compares (`v_cmp_gt_u32`, `v_cmpx_lt_u32`,
+/// `v_cmpx_ne_u32`).
+#[test]
+fn grand_theft_auto_v_unpacks_bytes_and_masks_lanes() {
+    if !device_or_skip("grand_theft_auto_v_unpacks_bytes_and_masks_lanes") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(2, 0x4433_2211));
+    program.push(vop1_vv("v_cvt_f32_ubyte0_e32", 3, 2));
+    program.push(vop1_vv("v_cvt_f32_ubyte1_e32", 4, 2));
+    program.push(vop1_vv("v_cvt_f32_ubyte2_e32", 5, 2));
+    program.push(vop1_vv("v_cvt_f32_ubyte3_e32", 6, 2));
+    program.extend(v_mov_literal(7, 0x00ab_cd00));
+    // v_bfe_u32 v1, v7, 8, 8: inline 8 is code 136.
+    program.extend(vop3("v_bfe_u32", 1, [VGPR_0 + 7, 136, 136], 0, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        [3, 4, 5, 6].map(|n| vector(&registers, n)),
+        [17.0f32, 34.0, 51.0, 68.0].map(f32::to_bits)
+    );
+    assert_eq!(vector(&registers, 1), 0xcd);
+
+    // Lane zero: 5 > 0 writes; 5 < 0 does not; -1 != 0 does.
+    let lane_zero_writes = |compare: [u32; 1], into_exec: bool| -> u32 {
+        let mut program = lane_index_into(0).to_vec();
+        program.extend(compare);
+        if !into_exec {
+            program.push(s_logic_b64("s_and_b64", 126, 126, 106));
+        }
+        program.push(v_mov_inline(2, 63));
+        program.push(s_endpgm());
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    assert_eq!(
+        lane_zero_writes([v_cmp_f32("v_cmp_gt_u32_e32", 128 + 5, 0)], false),
+        63,
+        "5 > 0"
+    );
+    assert_eq!(
+        lane_zero_writes([v_cmp_f32("v_cmpx_lt_u32_e32", 128 + 5, 0)], true),
+        0,
+        "5 < 0 is false"
+    );
+    assert_eq!(
+        lane_zero_writes([v_cmp_f32("v_cmpx_ne_u32_e32", 193, 0)], true),
+        63,
+        "-1 != 0"
+    );
+    assert_eq!(
+        lane_zero_writes([v_cmp_f32("v_cmpx_eq_u32_e32", 128, 0)], true),
+        63,
+        "0 == 0"
+    );
+}
+
+/// Each compare into the execution mask keeps the lanes its ordering holds for: Grand Theft Auto V's
+/// scene pixel shaders narrow with `v_cmpx_le_f32` and `v_cmpx_ge_f32` (VOPC 19 and 22), and the
+/// rest of the family is named with them. Lane zero compares 0 against 0.0 or 0, and 5 against it.
+#[test]
+fn every_compare_into_the_execution_mask_narrows_by_its_ordering() {
+    if !device_or_skip("every_compare_into_the_execution_mask_narrows_by_its_ordering") {
+        return;
+    }
+    // Inline 5 is code 133, inline 0 128; 0.5 is 240.
+    let lane_zero_writes = |name: &str, src0: u32| -> u32 {
+        let mut program = vec![v_mov_inline(0, 0)];
+        program.push(v_cmp_f32(name, src0, 0));
+        program.push(v_mov_inline(2, 63));
+        program.push(s_endpgm());
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    for (name, src0, writes) in [
+        ("v_cmpx_le_f32_e32", 128, true),
+        ("v_cmpx_ge_f32_e32", 240, true),
+        ("v_cmpx_lt_f32_e32", 240, false),
+        ("v_cmpx_lg_f32_e32", 128, false),
+        ("v_cmpx_nge_f32_e32", 240, false),
+        ("v_cmpx_nle_f32_e32", 240, true),
+        ("v_cmpx_lt_i32_e32", 133, false),
+        ("v_cmpx_ne_i32_e32", 133, true),
+        ("v_cmpx_ge_i32_e32", 128, true),
+        ("v_cmpx_le_u32_e32", 133, false),
+        ("v_cmpx_ge_u32_e32", 133, true),
+    ] {
+        assert_eq!(
+            lane_zero_writes(name, src0),
+            if writes { 63 } else { 0 },
+            "{name} with source code {src0}"
+        );
+    }
+}
+
 /// A shader with no mask traffic computes the same registers at either width.
 #[test]
 fn the_two_widths_are_the_same_shader_with_different_lane_counts() {

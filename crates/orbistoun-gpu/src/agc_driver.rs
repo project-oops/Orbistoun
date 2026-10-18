@@ -341,8 +341,9 @@ pub fn install_more_targets(seed: MoreTargetsSeeder, read: TargetReader) {
 
 /// A colour attachment after the first that its draws can be carried out into and written back to
 /// exactly, by the rules [`writable_target`] holds the first to: a modelled layout for its tiling
-/// at its element's size, a format a frame can be written back in, and no compression. It must
-/// also have the first's extent, the one the device's render pass covers, and not be the first.
+/// at its element's size, a format a frame can be written back in, and no compression or DCC its
+/// keys can be expanded from before its draws (D873). It must also have the first's extent, the
+/// one the device's render pass covers, and not be the first.
 fn writable_more_target(
     more: &crate::pipeline::MoreColourTarget,
     first: ColourTarget,
@@ -350,8 +351,9 @@ fn writable_more_target(
     let target = more.target?;
     let format = more.format?;
     let bytes_per_texel = format.written_back_bytes()?;
-    (more.dcc.is_none()
-        && (target.width, target.height) == (first.width, first.height)
+    (more.dcc.is_none_or(|dcc| {
+        crate::dcc::unsupported(more.tiling, dcc.single_slice, dcc.single_sample).is_none()
+    }) && (target.width, target.height) == (first.width, first.height)
         && target.base != first.base
         && more
             .tiling
@@ -872,26 +874,36 @@ impl GuestCp<'_> {
                 let offset = layout
                     .compress_block_offset(x, y, extent.width)
                     .ok_or("a compress block the layout does not place")?;
+                let address = surface + (offset as u64 & !0xFF);
                 let block = match key {
                     crate::dcc::KEY_UNCOMPRESSED => continue,
                     crate::dcc::KEY_CLEAR_0000 => None,
                     crate::dcc::KEY_CLEAR_REGISTER => Some(
                         clear_block
-                            .as_ref()
+                            .clone()
                             .ok_or("a block cleared to a register colour the stream never wrote")?,
                     ),
+                    // Its single value is its first texel (comp-to-single: the clear "at the
+                    // beginning of every 256B block", `radv_meta_nir.c:834`).
+                    crate::dcc::KEY_CLEAR_SINGLE => {
+                        let texel = usize::try_from(texel_bytes)
+                            .ok()
+                            .and_then(|bytes| cp::CpMemory::read(self, address, bytes))
+                            .ok_or("a block cleared to its first texel, which is not readable")?;
+                        Some(texel.iter().copied().cycle().take(256).collect())
+                    }
                     _ => {
                         return Err(
                             "a DCC block is compressed, whose encoding is not published".to_owned()
                         );
                     }
                 };
-                blocks.push((surface + (offset as u64 & !0xFF), block));
+                blocks.push((address, block));
             }
         }
         let zeros = [0_u8; 256];
         for (address, block) in blocks {
-            let bytes = block.map_or(&zeros[..], Vec::as_slice);
+            let bytes = block.as_deref().unwrap_or(&zeros[..]);
             if !cp::CpMemory::write(self, address, bytes) {
                 return Err("an expanded DCC block could not be written to guest memory".to_owned());
             }
@@ -1046,6 +1058,11 @@ impl GuestCp<'_> {
                     }
                 )
             })?;
+            // Its keys expanded, as the first's are, so what is read and drawn over is its texels
+            // (D873).
+            if let Some(dcc) = attachment.dcc {
+                self.expand_dcc(dcc, target.layout)?;
+            }
             let length = target.words() * 4;
             // A frame still pending for its pages is written back first, so this reads it.
             let bytes = self
@@ -5777,6 +5794,65 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
 
+    /// A colour attachment after the first that is DCC-compressed is drawn into and written back as
+    /// the first is, its keys expanded before its draws (D873): Grand Theft Auto V's scene draws a
+    /// 3840 x 2160 `16_16` `FLOAT` `64KB_R_X` attachment with DCC (`CB_COLOR4`), and was refused.
+    /// One whose DCC is on a swizzle mode the expansion was not read for is still refused.
+    #[test]
+    fn a_further_attachment_with_dcc_is_written_back_as_the_first_is() {
+        use crate::registers::{
+            ColourTarget, ColourTargetDcc, ColourTargetExtent, ColourTargetFormat, ComponentSwap,
+            Place, SwizzleMode,
+        };
+        let target = |base| ColourTarget {
+            base,
+            width: 3840,
+            height: 2160,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: Place::Whole,
+        };
+        let extent = ColourTargetExtent {
+            width: 3840,
+            height: 2160,
+        };
+        let dcc = ColourTargetDcc {
+            dcc: crate::dcc::Dcc {
+                base: 0x7400_e000_0000,
+                pipe_aligned: true,
+            },
+            surface: 0x7400_d000_0000,
+            extent,
+            levels: 1,
+            single_slice: true,
+            single_sample: true,
+            clear: None,
+            pipe_bank_xor: 0,
+        };
+        let attachment = |tiling| crate::pipeline::MoreColourTarget {
+            id: crate::ResourceId(4),
+            buffer: 4,
+            extent,
+            target: Some(target(0x7400_d000_0000)),
+            tiling: Some(tiling),
+            format: Some(ColourTargetFormat {
+                format: 5,
+                number_type: 7,
+                swap: ComponentSwap::Standard,
+            }),
+            dcc: Some(dcc),
+        };
+        let first = target(0x7400_c000_0000);
+        assert!(
+            super::writable_more_target(&attachment(SwizzleMode::Tiled64KbRX), first).is_some(),
+            "16_16 FLOAT in 64KB_R_X with DCC"
+        );
+        assert!(
+            super::writable_more_target(&attachment(SwizzleMode::Tiled64KbS), first).is_none(),
+            "DCC on another swizzle mode"
+        );
+    }
+
     /// A frame drawn into more than one colour attachment is kept by each of them: a texture a
     /// later frame samples that was drawn as a second attachment is as drawn as the first.
     #[test]
@@ -8433,7 +8509,8 @@ mod tests {
 
     /// A DCC target whose keys mix clears is expanded block by block (D873): each compress block
     /// by the key the GFX10 equation finds for it - zeros for a clear to `0000`, the clear colour
-    /// for a clear to the register - and a compressed block is refused with nothing written.
+    /// for a clear to the register, its first texel for a clear to a single value - and a
+    /// compressed block is refused with nothing written.
     #[test]
     fn a_dcc_target_s_mixed_clears_are_expanded_block_by_block() {
         use super::{GuestCp, MappedRegions};
@@ -8498,7 +8575,23 @@ mod tests {
         assert!(untouched, "nothing but the two blocks moved");
         assert!(buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF));
 
+        // A block compressed to a single value holds it in its first texel (comp-to-single,
+        // `radv_meta_nir.c:834`): Grand Theft Auto V's scene keeps its G-buffer so.
         buffer[..span].fill(0xAB);
+        buffer[at(meta)..at(meta) + keys].fill(0xFF);
+        let single = block_of(8, 0);
+        buffer[single..single + 4].copy_from_slice(&0x5566_7788_u32.to_le_bytes());
+        buffer[key_of(8, 0)] = 0x10;
+        assert_eq!(cp.expand_dcc(target, layout), Ok(()));
+        assert!(
+            buffer[single..single + 256]
+                .chunks(4)
+                .all(|texel| texel == 0x5566_7788_u32.to_le_bytes()),
+            "cleared to its first texel"
+        );
+
+        buffer[..span].fill(0xAB);
+        buffer[at(meta)..at(meta) + keys].fill(0xFF);
         buffer[key_of(0, 0)] = 0x00;
         buffer[key_of(8, 0)] = 0x44;
         assert!(cp.expand_dcc(target, layout).is_err(), "a compressed block");

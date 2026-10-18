@@ -5851,6 +5851,8 @@ const FORMAT_BC3_SRGB: u32 = 174;
 /// `GFX10_FORMAT_BC6_UFLOAT` (`gfx10-rsrc.json:133`): four-by-four unsigned half-float texels to a
 /// sixteen-byte block.
 const FORMAT_BC6_UFLOAT: u32 = 179;
+/// `GFX10_FORMAT_BC5_UNORM` (`gfx10-rsrc.json`, value 177): two channels in a sixteen-byte block.
+const FORMAT_BC5_UNORM: u32 = 177;
 
 /// A block-compressed format read as its blocks: the bytes a block holds, the encoding the host
 /// samples it in, a tag that keeps its cached blocks apart from another format's, and whether it
@@ -5861,6 +5863,8 @@ struct BlockFormat {
     encoding: crate::backend::TextureEncoding,
     tag: u32,
     opaque: bool,
+    /// Two channels, red and green: blue reads zero and alpha one.
+    two_channels: bool,
 }
 
 impl BlockFormat {
@@ -5868,7 +5872,11 @@ impl BlockFormat {
     /// and for a format with no alpha, W as the one the host answers or the constant one, as
     /// [`selects_exactly`] takes `10_11_11_FLOAT`'s.
     fn read_exactly(self, selects: [u32; 4]) -> bool {
-        if self.opaque {
+        if self.two_channels {
+            // The host answers red, green, zero and one, whether asked for the missing channels or
+            // for the constants.
+            matches!(selects, [4, 5, 6 | 0, 7 | 1])
+        } else if self.opaque {
             matches!(selects, [4, 5, 6, 7 | 1])
         } else {
             selects == IDENTITY_SELECTS
@@ -5879,35 +5887,47 @@ impl BlockFormat {
 /// The block-compressed formats read as their blocks, by `IMG_FORMAT` code.
 fn block_format(format: u32) -> Option<BlockFormat> {
     match format {
+        FORMAT_BC5_UNORM => Some(BlockFormat {
+            bytes: 16,
+            encoding: crate::backend::TextureEncoding::Bc5,
+            tag: 1 << 22 | 1 << 19,
+            opaque: true,
+            two_channels: true,
+        }),
         FORMAT_BC3_UNORM => Some(BlockFormat {
             bytes: 16,
             encoding: crate::backend::TextureEncoding::Bc3,
             tag: 1 << 22,
             opaque: false,
+            two_channels: false,
         }),
         FORMAT_BC1_UNORM => Some(BlockFormat {
             bytes: 8,
             encoding: crate::backend::TextureEncoding::Bc1,
             tag: 1 << 22 | 1 << 25,
             opaque: false,
+            two_channels: false,
         }),
         FORMAT_BC1_SRGB => Some(BlockFormat {
             bytes: 8,
             encoding: crate::backend::TextureEncoding::Bc1Srgb,
             tag: 1 << 22 | 1 << 21,
             opaque: false,
+            two_channels: false,
         }),
         FORMAT_BC3_SRGB => Some(BlockFormat {
             bytes: 16,
             encoding: crate::backend::TextureEncoding::Bc3Srgb,
             tag: 1 << 22 | 1 << 23,
             opaque: false,
+            two_channels: false,
         }),
         FORMAT_BC6_UFLOAT => Some(BlockFormat {
             bytes: 16,
             encoding: crate::backend::TextureEncoding::Bc6hUfloat,
             tag: 1 << 22 | 1 << 20,
             opaque: true,
+            two_channels: false,
         }),
         _ => None,
     }
@@ -7100,6 +7120,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         | crate::backend::TextureEncoding::Bc1
         | crate::backend::TextureEncoding::Bc3Srgb
         | crate::backend::TextureEncoding::Bc6hUfloat
+        | crate::backend::TextureEncoding::Bc5
         | crate::backend::TextureEncoding::R8 { .. } => 0,
         // Never read from guest memory, so never in the cache (D817).
         crate::backend::TextureEncoding::DepthFloat
@@ -10306,6 +10327,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A `BC5_UNORM` texture binds its blocks as BC3's are, its two channels selected red, green,
+    /// zero, one - what the host samples `BC5_UNORM_BLOCK` as: Grand Theft Auto V's scene samples a
+    /// 128 x 128 `4KB_S` normal map so (`0x9055022c`).
+    #[test]
+    fn a_bc5_texture_binds_its_two_channels() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let tag = |x: u32, y: u32, word: u32| y << 12 | x << 8 | word;
+        let mut bytes = vec![0u8; 4096];
+        for y in 0..16 {
+            for x in 0..16 {
+                let at = crate::tiling::tiled_byte_offset_4kb_s_bpp16(x, y, 16);
+                for word in 0..4 {
+                    bytes[at + 4 * word as usize..][..4]
+                        .copy_from_slice(&tag(x, y, word).to_le_bytes());
+                }
+            }
+        }
+        let (width, height) = (64u32, 64u32);
+        let words = [
+            0x100,
+            (177 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            // 2D, ADDR_SW_4KB_S, one level, X Y 0 1.
+            0x9050_022c,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 64,
+            height: 64,
+            encoding: crate::backend::TextureEncoding::Bc5,
+            ..
+        }) = bound
+        else {
+            panic!("bound as BC5 blocks: {bound:?}");
+        };
+        assert_eq!(texels[..4], [0, 1, 2, 3].map(|word| tag(0, 0, word)));
+        assert_eq!(texels[4..8], [0, 1, 2, 3].map(|word| tag(1, 0, word)));
     }
 
     /// A `BC6_UFLOAT` cube binds its six faces one after another, each read a whole chain past the

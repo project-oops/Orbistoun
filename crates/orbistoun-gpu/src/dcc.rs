@@ -24,6 +24,10 @@ pub const KEY_CLEAR_0000: u8 = 0x00;
 /// `GFX8_DCC_CLEAR_REG` (`ac_descriptors.h:37`), the form GFX10 keeps: every texel of the block is
 /// the colour `CB_COLORn_CLEAR_WORD0/1` hold, whatever memory holds.
 pub const KEY_CLEAR_REGISTER: u8 = 0x20;
+/// `GFX9_DCC_CLEAR_SINGLE` (`ac_descriptors.h:38`): every texel of the block is the value its first
+/// texel holds, the clear stored "at the beginning of every 256B block" (comp-to-single,
+/// `radv_meta_nir.c:834`).
+pub const KEY_CLEAR_SINGLE: u8 = 0x10;
 
 /// GFX10's DCC key equation for a single-sample `64KB_R_X` surface (D873): which key byte describes
 /// the compress block at a texel. Read off addrlib under the console's configuration by

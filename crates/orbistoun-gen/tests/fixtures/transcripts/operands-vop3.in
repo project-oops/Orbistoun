@@ -463,3 +463,128 @@ v_cmp_ngt_f32_e64 s[100:101], s5, v190
 v_cmp_ngt_f32_e64 s[40:41], v255, -1
 v_cmp_ngt_f32_e64 vcc, 4, v77
 v_cmp_ngt_f32_e64 s[70:71], v130, s101
+v_bfe_u32 v2, v0, v1, 2
+v_bfe_u32 v200, s7, v9, v130
+v_bfe_u32 v255, v12, s30, 64
+v_bfe_u32 v9, -1, v77, s101
+v_bfe_u32 v130, v88, 4, v240
+v_cmp_gt_u32_e32 vcc, v3, v4
+v_cmp_gt_u32_e32 vcc, v255, v150
+v_cmp_gt_u32_e32 vcc, 5, v61
+v_cmp_gt_u32_e32 vcc, s99, v222
+v_cmp_gt_u32_e32 vcc, v130, v12
+v_cmp_gt_u32_e64 s[2:3], v4, v5
+v_cmp_gt_u32_e64 s[100:101], s5, v190
+v_cmp_gt_u32_e64 s[40:41], v255, -1
+v_cmp_gt_u32_e64 vcc, 4, v77
+v_cmp_gt_u32_e64 s[70:71], v130, s101
+v_cmpx_lt_u32_e32 v3, v4
+v_cmpx_lt_u32_e32 v255, v150
+v_cmpx_lt_u32_e32 5, v61
+v_cmpx_lt_u32_e32 s99, v222
+v_cmpx_lt_u32_e32 v130, v12
+v_cmpx_eq_u32_e32 v3, v4
+v_cmpx_eq_u32_e32 v255, v150
+v_cmpx_eq_u32_e32 5, v61
+v_cmpx_eq_u32_e32 s99, v222
+v_cmpx_eq_u32_e32 v130, v12
+v_cmpx_ne_u32_e32 v3, v4
+v_cmpx_ne_u32_e32 v255, v150
+v_cmpx_ne_u32_e32 5, v61
+v_cmpx_ne_u32_e32 s99, v222
+v_cmpx_ne_u32_e32 v130, v12
+v_cvt_f32_ubyte0_e32 v1, v2
+v_cvt_f32_ubyte0_e32 v200, s7
+v_cvt_f32_ubyte0_e32 v255, v130
+v_cvt_f32_ubyte0_e32 v9, -1
+v_cvt_f32_ubyte0_e32 v130, 4
+v_cvt_f32_ubyte1_e32 v1, v2
+v_cvt_f32_ubyte1_e32 v200, s7
+v_cvt_f32_ubyte1_e32 v255, v130
+v_cvt_f32_ubyte1_e32 v9, -1
+v_cvt_f32_ubyte1_e32 v130, 4
+v_cvt_f32_ubyte2_e32 v1, v2
+v_cvt_f32_ubyte2_e32 v200, s7
+v_cvt_f32_ubyte2_e32 v255, v130
+v_cvt_f32_ubyte2_e32 v9, -1
+v_cvt_f32_ubyte2_e32 v130, 4
+v_cvt_f32_ubyte3_e32 v1, v2
+v_cvt_f32_ubyte3_e32 v200, s7
+v_cvt_f32_ubyte3_e32 v255, v130
+v_cvt_f32_ubyte3_e32 v9, -1
+v_cvt_f32_ubyte3_e32 v130, 4
+v_cmpx_lt_f32_e32 v3, v4
+v_cmpx_lt_f32_e32 v255, v150
+v_cmpx_lt_f32_e32 0.5, v61
+v_cmpx_lt_f32_e32 s99, v222
+v_cmpx_lt_f32_e32 v130, v12
+v_cmpx_eq_f32_e32 v3, v4
+v_cmpx_eq_f32_e32 v255, v150
+v_cmpx_eq_f32_e32 0.5, v61
+v_cmpx_eq_f32_e32 s99, v222
+v_cmpx_eq_f32_e32 v130, v12
+v_cmpx_le_f32_e32 v3, v4
+v_cmpx_le_f32_e32 v255, v150
+v_cmpx_le_f32_e32 0.5, v61
+v_cmpx_le_f32_e32 s99, v222
+v_cmpx_le_f32_e32 v130, v12
+v_cmpx_lg_f32_e32 v3, v4
+v_cmpx_lg_f32_e32 v255, v150
+v_cmpx_lg_f32_e32 0.5, v61
+v_cmpx_lg_f32_e32 s99, v222
+v_cmpx_lg_f32_e32 v130, v12
+v_cmpx_ge_f32_e32 v3, v4
+v_cmpx_ge_f32_e32 v255, v150
+v_cmpx_ge_f32_e32 0.5, v61
+v_cmpx_ge_f32_e32 s99, v222
+v_cmpx_ge_f32_e32 v130, v12
+v_cmpx_nge_f32_e32 v3, v4
+v_cmpx_nge_f32_e32 v255, v150
+v_cmpx_nge_f32_e32 0.5, v61
+v_cmpx_nge_f32_e32 s99, v222
+v_cmpx_nge_f32_e32 v130, v12
+v_cmpx_nlg_f32_e32 v3, v4
+v_cmpx_nlg_f32_e32 v255, v150
+v_cmpx_nlg_f32_e32 0.5, v61
+v_cmpx_nlg_f32_e32 s99, v222
+v_cmpx_nlg_f32_e32 v130, v12
+v_cmpx_ngt_f32_e32 v3, v4
+v_cmpx_ngt_f32_e32 v255, v150
+v_cmpx_ngt_f32_e32 0.5, v61
+v_cmpx_ngt_f32_e32 s99, v222
+v_cmpx_ngt_f32_e32 v130, v12
+v_cmpx_nle_f32_e32 v3, v4
+v_cmpx_nle_f32_e32 v255, v150
+v_cmpx_nle_f32_e32 0.5, v61
+v_cmpx_nle_f32_e32 s99, v222
+v_cmpx_nle_f32_e32 v130, v12
+v_cmpx_nlt_f32_e32 v3, v4
+v_cmpx_nlt_f32_e32 v255, v150
+v_cmpx_nlt_f32_e32 0.5, v61
+v_cmpx_nlt_f32_e32 s99, v222
+v_cmpx_nlt_f32_e32 v130, v12
+v_cmpx_lt_i32_e32 v3, v4
+v_cmpx_lt_i32_e32 v255, v150
+v_cmpx_lt_i32_e32 5, v61
+v_cmpx_lt_i32_e32 s99, v222
+v_cmpx_lt_i32_e32 v130, v12
+v_cmpx_ne_i32_e32 v3, v4
+v_cmpx_ne_i32_e32 v255, v150
+v_cmpx_ne_i32_e32 5, v61
+v_cmpx_ne_i32_e32 s99, v222
+v_cmpx_ne_i32_e32 v130, v12
+v_cmpx_ge_i32_e32 v3, v4
+v_cmpx_ge_i32_e32 v255, v150
+v_cmpx_ge_i32_e32 5, v61
+v_cmpx_ge_i32_e32 s99, v222
+v_cmpx_ge_i32_e32 v130, v12
+v_cmpx_le_u32_e32 v3, v4
+v_cmpx_le_u32_e32 v255, v150
+v_cmpx_le_u32_e32 5, v61
+v_cmpx_le_u32_e32 s99, v222
+v_cmpx_le_u32_e32 v130, v12
+v_cmpx_ge_u32_e32 v3, v4
+v_cmpx_ge_u32_e32 v255, v150
+v_cmpx_ge_u32_e32 5, v61
+v_cmpx_ge_u32_e32 s99, v222
+v_cmpx_ge_u32_e32 v130, v12

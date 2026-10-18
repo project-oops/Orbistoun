@@ -1855,7 +1855,19 @@ impl<'a> Concrete<'a> {
         } else {
             1
         };
+        // A compare whose SDWA word names a pair writes that pair, not the condition mask its
+        // operand layout names implicitly.
+        let into_pair = name.starts_with("v_cmp")
+            && instruction.word & 0x1ff == SDWA_SOURCE
+            && instruction
+                .second_word
+                .is_some_and(|word| word >> 15 & 1 != 0);
         for operand in instruction.operands.iter().take(written) {
+            if into_pair
+                && matches!(operand, Operand::Named(named) if mask_code(named) == Some(VCC))
+            {
+                continue;
+            }
             self.forget_operand(Some(operand));
         }
         // The short carry forms write their carry into the condition mask, which no operand names.
@@ -1874,7 +1886,9 @@ impl<'a> Concrete<'a> {
         if name.starts_with("v_cmpx") {
             self.forget(EXEC, 2);
         }
-        if name.starts_with("v_cmp") {
+        // A short compare writes the condition mask, unless its SDWA word names the pair it writes
+        // instead.
+        if name.starts_with("v_cmp") && !into_pair {
             self.forget(VCC, 2);
         }
     }
@@ -2524,6 +2538,50 @@ mod tests {
         let scalars = reached(&decode, &encodings, access, (8, &[]), &mut |_| None)
             .expect("a straight-line prefix");
         assert_eq!([scalars[70], scalars[71]], [Some(5), Some(7)]);
+    }
+
+    /// The compact scalar instructions may name a lane mask's half: Grand Theft Auto V's scene
+    /// compute program forms a descriptor's offset with `s_mulk_i32 vcc_lo, 0x50` (0xb86a0050).
+    #[test]
+    fn a_compact_multiply_into_vcc_lo_is_evaluated() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: [u32; 5] = [
+            0xbeea_0383, // s_mov_b32 vcc_lo, 3
+            0xbeeb_0385, // s_mov_b32 vcc_hi, 5
+            0xb86a_0050, // s_mulk_i32 vcc_lo, 0x50
+            0xe00c_2000,
+            0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (8, &[]), &mut |_| None)
+            .expect("a straight-line prefix");
+        assert_eq!([scalars[VCC], scalars[VCC + 1]], [Some(240), Some(5)]);
+    }
+
+    /// A compare whose SDWA word names a pair writes that pair, not the condition mask: Grand Theft
+    /// Auto V's scene vertex shader compares into `s[20:21]` (`v_cmp_nlt_f32_sdwa s[20:21], s3, ...`,
+    /// words 0x7c1d00f9 0x86869403) between building `vcc_lo` from scalars and selecting with it.
+    #[test]
+    fn an_sdwa_compare_into_a_pair_keeps_vcc() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: [u32; 6] = [
+            0xbeea_0383, // s_mov_b32 vcc_lo, 3
+            0xbeeb_0385, // s_mov_b32 vcc_hi, 5
+            0x7c1d_00f9,
+            0x8686_9403, // v_cmp_nlt_f32_sdwa s[20:21], s3, ...
+            0xe00c_2000,
+            0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (8, &[]), &mut |_| None)
+            .expect("a straight-line prefix");
+        assert_eq!([scalars[VCC], scalars[VCC + 1]], [Some(3), Some(5)]);
     }
 
     /// A scalar load whose words cannot be read is why its destination is unknown, though nothing
