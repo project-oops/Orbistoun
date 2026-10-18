@@ -2630,6 +2630,26 @@ fn log_execution() {
         record.bytes_written,
     );
     report_released_labels();
+    if let Some(orbistoun_gpu::cp::Stopped::WaitNeverSatisfied { address, .. }) =
+        record.last.map(|last| last.stopped)
+    {
+        report_unsatisfied_wait(address);
+    }
+}
+
+/// Says what last filled the word a queue stopped waiting on, where something orbistoun tracks
+/// filled it: a wait that never held may hold later, written by work behind it - PPSA04263's
+/// prologue waits for 0xc800040b0 to read 0, and something writes the 0 after.
+fn report_unsatisfied_wait(address: u64) {
+    let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
+    let filled = filled_by(address, &census).unwrap_or_else(|| {
+        concat!(
+            "nothing tracked filled it - an end-of-pipe release, a WRITE_DATA, or the title's own ",
+            "stores"
+        )
+        .to_owned()
+    });
+    tracing::info!("the word the command processor waited on, {address:#x}: {filled}");
 }
 
 /// How many released labels the report names, most released first.

@@ -78,11 +78,40 @@ found_on = "2026-09-14"
 name = "sceAgcAcbWaitRegMem"
 edge_cases = [
     "56 BYTES AT ZERO ARGUMENTS, three packets - headers 0xc0027900, 0xc0053c00 and 0xc0017900 by the same reading as its Dcb twin. Byte-for-byte the same shape sceAgcDcbWaitRegMem produces at zero arguments, which is the first evidence the Acb and Dcb forms of a builder emit the same packet.",
-    "NOT WIRED, for the reason its Dcb twin is not: the Dcb form was shown argument-sensitive (56 bytes zeroed, 0 with sentinels), so a zero-argument capture is not the shape a title produces. An argument sweep settles both at once.",
+    "WIRED AS ITS DCB TWIN WITHOUT THE ENGINE ARGUMENT: (acb, wide, function, cache, poll, reference, mask, interval) writes what sceAgcDcbWaitRegMem writes with engine 0 - a compute queue has no engine to choose. Guest-observed: PPSA04263's twin wrappers at image+0x1c6110 and image+0x1c61a0 pass (dcb, 1, 3, 1, cache, poll, reference, -1, 0x190) and (acb, 1, 3, cache, poll, reference, -1, 0x190). The console wrote the same 56 bytes for the Acb form in PPSA04263's shape (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2870-2872).",
 ]
 known_by = "measured"
-cites = "obSCEne sweep 20260914-222710, check 166-agc/acb-wait-reg-mem."
+cites = "obSCEne sweep 20260914-222710, check 166-agc/acb-wait-reg-mem; obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2870-2872."
 found_on = "2026-09-14"
+
+[[function]]
+name = "sceAgcAcbWriteData"
+purpose = "Writes a WRITE_DATA into an asynchronous compute command buffer: data dwords stored to an address when the compute queue reaches it."
+arity = 6
+returns = "pointer"
+edge_cases = [
+    "MEASURED (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2855-2860): (acb, 2, 0, address, data, 1) wrote 0xc0033700 0x00000200, the address's halves and the dword; with a count of 0x40 the header is 0xc0423700 and all 0x40 dwords follow. It answered the packet's address and advanced by the packet's length.",
+    "Six arguments, nothing on the stack, unlike sceAgcDcbWriteData. A destination or cache policy other than (2, 0) was not measured and is refused.",
+]
+known_by = "measured"
+found_by = "generated"
+found_in = ["PPSA04263-app0"]
+cites = "obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2855-2860."
+found_on = "2026-10-18"
+
+[[function]]
+name = "sceAgcAcbEventWrite"
+purpose = "Writes an EVENT_WRITE into an asynchronous compute command buffer."
+arity = 6
+returns = "pointer"
+edge_cases = [
+    "MEASURED (obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2861-2866): (acb, 7, 0, 0x78, 0x4ee) and (acb, 7, 0, 0, 0) both wrote 0xc0004600 0x00000407 - the event with EVENT_INDEX 4 - and answered its address. An event other than 7 was not measured and is refused.",
+]
+known_by = "measured"
+found_by = "static"
+found_in = ["PPSA04263-app0"]
+cites = "obSCEne report-20261018-gt-census.log (commit 92bb1ab, SHA-256 4e52aabf7a9e565c513b3b88c9d663c9e9e84dc14fd932bfac6cf9b2d5d6203d), rows 2861-2866."
+found_on = "2026-10-18"
 
 [[function]]
 name = "sceAgcCbBranch"
@@ -525,8 +554,14 @@ found_on = "2026-09-04"
 [[function]]
 name = "sceAgcDriverSubmitAcb"
 purpose = "Submits an async compute command buffer. The compute counterpart to the draw path."
+arity = 2
+returns = "status"
+edge_cases = [
+    "(queue, descriptor): the descriptor is the 16-byte record sceAgcDriverSubmitDcb reads - the stream's address, its length in dwords, then flags - and the stream is carried out as a Dcb's is, in submission order on the one command processor, answering 0. Assumed: the census found it unbound in obSCEne's own process, so nothing measured its arguments; the reference emulators read it this way.",
+]
 found_by = "generated"
 known_by = "assumed"
+assumptions = ["the descriptor in the second argument is SubmitDcb's", "compute streams run in order with graphics ones"]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
@@ -819,6 +854,19 @@ known_by = "measured"
 cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x71040c4df8235e1d; probe arm obscene src/probe/sections/census.c check_census_20. REQ-20261016T1335Z-im01, 166-agc/interpolant-mapping rows as its resolution quotes them (no report log cited)."
 found_in = ["PPSA02664-app0", "PPSA03416", "PPSA21564"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "0x21a8c8fab7dd4722"
+arity = 4
+purpose = "Fills in a jump sceAgcDcbJump wrote empty: (jump, policy, target, dwords), the target's halves into the packet and dwords into the control word's size field, answering 0."
+edge_cases = [
+    "GUEST-OBSERVED (PPSA04263, run 2026-10-18): 210 calls a run, each on a jump built empty - header 0xc0023f00, target 0, control 0x2f300000 - with policy 2, a target holding the next buffer's first packet, and dwords its length (0x3df9, 4). Left unanswered, every such jump stayed empty and the buffers it leads to never ran.",
+    "The size goes in IB_SIZE (bits 19:0, Mesa registers/pkt3.json) and the rest of the control word stays as the builder wrote it, CHAIN and the policy bits included; policy is not written again. A pointer at anything but a jump is refused with 0x8a6c000a and left alone. The reference emulators read the same four arguments.",
+]
+known_by = "assumed"
+assumptions = ["the second argument is the cache policy the jump was built with, and needs no write", "the answer is 0"]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
 
 [[function]]
 name = "0x8a6f69da59a5b375"

@@ -32,7 +32,8 @@ guest_module! {
         "sceAgcDriverRegisterResource" => 6,
         "sceAgcDriverSetHsOffchipParam" => 6,
         "sceAgcDriverSetTFRing" => 6,
-        "sceAgcDriverSubmitAcb" => 6,
+        // (queue, descriptor).
+        "sceAgcDriverSubmitAcb" => 2,
         "sceAgcDriverSubmitCommandBuffer" => 2,
         "sceAgcDriverSubmitDcb" => 6,
     }
@@ -4907,6 +4908,15 @@ fn submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     submit_described(args[1])
 }
 
+/// `sceAgcDriverSubmitAcb(queue, descriptor)` - an asynchronous compute command buffer, handed over
+/// with the descriptor [`submit_dcb`] reads and carried out the same way: in submission order on the
+/// one command processor, so a graphics stream waiting on a label the compute stream writes finds
+/// it written once the compute stream is carried out. Assumed, not measured: the census found the
+/// entry point unbound in obSCEne's own process.
+fn submit_acb(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    submit_described_to(args[1], Ring::AsynchronousCompute)
+}
+
 /// The pipeline a running guest's submissions are prepared through, kept for the run so its shader
 /// cache survives between them.
 fn live_pipeline() -> &'static Mutex<Option<Pipeline>> {
@@ -5068,14 +5078,28 @@ pub fn with_every_bound_module(submission: &Submission) -> Submission {
     whole
 }
 
+/// Which of the console's command rings a submission was handed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ring {
+    /// The graphics ring: `sceAgcDriverSubmitDcb` and its kin.
+    Graphics,
+    /// An asynchronous compute ring: `sceAgcDriverSubmitAcb` (D891).
+    AsynchronousCompute,
+}
+
 /// Reads one submit descriptor, walks the command buffer it names, and keeps the submission - the
 /// body both submit entry points share.
 fn submit_described(descriptor: u64) -> u64 {
+    submit_described_to(descriptor, Ring::Graphics)
+}
+
+/// [`submit_described`] onto `ring`.
+fn submit_described_to(descriptor: u64, ring: Ring) -> u64 {
     // On a title's own stack the walk and the translator's frames may not fit (D841).
     orbistoun_kernel::thread::with_room(SUBMIT_STACK_ROOM, || {
         crate::perf::span(crate::perf::Span::SubmitCall, || {
             crate::perf::measure(crate::perf::Phase::Submit, || {
-                submit_described_timed(descriptor)
+                submit_described_timed(descriptor, ring)
             })
         })
     })
@@ -5101,7 +5125,7 @@ fn carry_registers(bytes: &[u8], submission: &Submission) {
 }
 
 /// [`submit_described`]'s body, timed whole as [`crate::perf::Phase::Submit`].
-fn submit_described_timed(descriptor: u64) -> u64 {
+fn submit_described_timed(descriptor: u64, ring: Ring) -> u64 {
     note_working_thread("submitting");
     let Some((gpu_addr, length)) = submit_descriptor(descriptor) else {
         return SUBMIT_OK;
@@ -5115,7 +5139,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
         return SUBMIT_OK;
     };
-    carry_out_stream(&bytes, gpu_addr, &memory);
+    carry_out_stream(&bytes, gpu_addr, &memory, ring);
     SUBMIT_OK
 }
 
@@ -5151,14 +5175,14 @@ pub(crate) fn release_rewind(rewind: u64) {
     };
     orbistoun_kernel::thread::with_room(SUBMIT_STACK_ROOM, || {
         crate::perf::measure(crate::perf::Phase::Submit, || {
-            carry_out_stream(&continuation, after, &memory);
+            carry_out_stream(&continuation, after, &memory, Ring::Graphics);
         });
     });
 }
 
 /// Prepares and carries out a submission's `bytes`, read from guest memory at `base`:
 /// [`submit_described`] once it has them, and a released `REWIND`'s continuation.
-fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions) {
+fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions, ring: Ring) {
     // The buffers it calls or chains to are part of what it carries out, so everything after this
     // - preparation, the command processor, the queued writes - sees their commands in place; a
     // REWIND not yet released ends it, held until the title releases it (D890).
@@ -5178,6 +5202,7 @@ fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions) {
             command_processor::preparing(|| prepare_live(&bytes, memory))
         });
     submission.read_ahead_of_draws = read_ahead;
+    submission.asynchronous_compute = ring == Ring::AsynchronousCompute;
     // The next submission is prepared from the registers this one leaves, so they are carried here,
     // in submission order, before it is carried out anywhere.
     carry_registers(&bytes, &submission);
@@ -5556,7 +5581,6 @@ mod command_processor {
 /// Carries out one prepared submission: the command processor's memory work, its draws, its
 /// flips' release, and the record of what ran.
 fn run_submission(bytes: &[u8], submission: Submission) {
-    let memory = MappedRegions::current();
     // A queue an earlier submission stopped retires nothing more (D710).
     let stalled = *queue_stall()
         .lock()
@@ -5571,22 +5595,60 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         }
         return;
     }
+    if let Ok(mut record) = execution_record().lock() {
+        record.submissions += 1;
+    }
+    if submission.asynchronous_compute {
+        // Behind any compute stream stepped aside, in its ring's order (D891).
+        aside()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(Aside {
+                bytes: bytes.to_vec(),
+                submission,
+                from: 0,
+            });
+        resume_aside();
+        return;
+    }
+    let mut executed = execute_part(bytes, 0, &submission);
+    // A graphics stream waiting on what a compute stream stepped aside writes goes on once that has
+    // run (D891).
+    while let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped
+        && resume_aside()
+    {
+        executed = execute_part(bytes, offset, &submission);
+    }
+    finish(bytes, executed);
+    if let Ok(mut slot) = last_submission().lock() {
+        *slot = Some(submission);
+    }
+    resume_aside();
+}
+
+/// Carries out `bytes` from byte `from` on, as part of `submission`.
+fn execute_part(bytes: &[u8], from: u32, submission: &Submission) -> cp::CpExecution {
     // The command processor's own memory work, carried out as the submit returns or, asynchronously,
     // on its own thread. It stops at the first packet needing the GPU, so a fence is written only
     // when everything before it ran (D705); draws are such work once an executor is installed and
     // they can run as one into a target they can be written back to.
     let executed = crate::perf::span(crate::perf::Span::CommandProcessor, || {
-        cp::execute(
+        cp::execute_from(
             bytes,
+            from,
             &mut GuestCp {
-                memory,
-                submission: Some(&submission),
+                memory: MappedRegions::current(),
+                submission: Some(submission),
             },
         )
     });
     hand_releases_to_display();
+    executed
+}
+
+/// Records a stream's execution, ended where it stopped: one that did not complete stops its queue.
+fn finish(bytes: &[u8], executed: cp::CpExecution) {
     if let Ok(mut record) = execution_record().lock() {
-        record.submissions += 1;
         record.completed += u64::from(executed.stopped == cp::Stopped::Completed);
         record.drawn += u64::from(executed.draws > 0);
         record.bytes_written += executed.bytes_written;
@@ -5600,8 +5662,59 @@ fn run_submission(bytes: &[u8], submission: Submission) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executed);
     }
-    if let Ok(mut slot) = last_submission().lock() {
-        *slot = Some(submission);
+}
+
+/// An asynchronous compute stream stepped aside at a wait not yet satisfied, and where it goes on
+/// from (D891).
+struct Aside {
+    bytes: Vec<u8>,
+    submission: Submission,
+    from: u32,
+}
+
+/// The asynchronous compute streams stepped aside, oldest first: the first waits, and the rest wait
+/// behind it in their ring's order (D891).
+fn aside() -> &'static Mutex<std::collections::VecDeque<Aside>> {
+    static ASIDE: Mutex<std::collections::VecDeque<Aside>> =
+        Mutex::new(std::collections::VecDeque::new());
+    &ASIDE
+}
+
+/// Carries the compute streams stepped aside on as far as they go, each in turn from where it
+/// stopped, until one waits again; one that stops for any other reason stops its queue as a
+/// graphics one does. Answers whether any went further (D891).
+fn resume_aside() -> bool {
+    let mut moved = false;
+    loop {
+        let Some(Aside {
+            bytes,
+            submission,
+            from,
+        }) = aside()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+        else {
+            return moved;
+        };
+        let executed = execute_part(&bytes, from, &submission);
+        if let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped {
+            moved |= offset != from;
+            if let Ok(mut record) = execution_record().lock() {
+                record.bytes_written += executed.bytes_written;
+            }
+            aside()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_front(Aside {
+                    bytes,
+                    submission,
+                    from: offset,
+                });
+            return moved;
+        }
+        moved = true;
+        finish(&bytes, executed);
     }
 }
 
@@ -5634,6 +5747,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             query_resource_registration_user_memory_requirements,
         ),
         ("sceAgcDriverSubmitCommandBuffer", submit_command_buffer),
+        ("sceAgcDriverSubmitAcb", submit_acb),
         ("sceAgcDriverSubmitDcb", submit_dcb),
     ]
 }

@@ -995,6 +995,9 @@ pub struct Submission {
     /// pending while one was queued, before that submission had drawn it (D882): carried out, its
     /// draws are prepared again from the stream, after the ones ahead of it.
     pub read_ahead_of_draws: bool,
+    /// Whether it was handed to an asynchronous compute queue (`sceAgcDriverSubmitAcb`): stopped at
+    /// a wait, it steps aside rather than stopping the queue (D891).
+    pub asynchronous_compute: bool,
     /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
     /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
@@ -7612,6 +7615,7 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::S64KbBpp8 => 1 << 18 | 1 << 15,
         crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
         crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
+        crate::tiling::SurfaceLayout::S256BBpp16 => 1 << 19 | 1 << 15,
         crate::tiling::SurfaceLayout::Rx64KbBpp8 => 1 << 28,
         crate::tiling::SurfaceLayout::Rx64KbBpp2 => 1 << 29,
         crate::tiling::SurfaceLayout::Rx64KbBpp16 => 1 << 30,
@@ -7804,7 +7808,7 @@ fn read_block_texture(
     }
     if !matches!(
         descriptor.tiling,
-        SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS
+        SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS | SwizzleMode::Tiled256BS
     ) {
         return Err("its blocks are in a tiling block-compressed textures are not read in");
     }

@@ -530,6 +530,12 @@ fn expand_at_depth(
 /// Carries out a stream's command-processor memory work, in order, stopping at the first packet it
 /// cannot carry out exactly.
 pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
+    execute_from(stream, 0, memory)
+}
+
+/// [`execute`] from the packet at byte `from` on: a stream that stopped there resumes, what came
+/// before it carried out already (D891).
+pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpExecution {
     let mut result = CpExecution::default();
     let (walked, segments) = crate::perf::span(crate::perf::Span::CpWalk, || {
         let walked = packet::walk(stream);
@@ -544,7 +550,11 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         return result;
     }
     let mut next_segment = segments.iter().peekable();
-    for packet in &walked.packets {
+    while next_segment
+        .next_if(|segment| segment.first < from)
+        .is_some()
+    {}
+    for packet in walked.packets.iter().filter(|packet| packet.offset >= from) {
         let offset = packet.offset;
         let opcode = match packet.kind {
             PacketKind::RegisterWrite { .. } | PacketKind::Filler => continue,
@@ -1302,7 +1312,7 @@ fn wait_reg_mem64(
 
 #[cfg(test)]
 mod tests {
-    use super::{CpMemory, Stopped, WAIT_REG_MEM, execute};
+    use super::{CpMemory, Stopped, WAIT_REG_MEM, execute, execute_from};
     use crate::packet::build::{command_header, measured};
     use std::collections::BTreeMap;
 
@@ -2412,6 +2422,22 @@ mod tests {
             assert_eq!(memory.word(0x1000), 0xbeef_cafe);
             assert_eq!(done.bytes_written, 12 + 4);
         }
+    }
+
+    /// A stream resumed at a packet carries out that packet and what follows, and nothing before it:
+    /// a compute stream stepped aside at a wait goes on from the wait (D891).
+    #[test]
+    fn a_stream_resumed_at_a_packet_carries_out_only_what_follows() {
+        let mut stream = write_data(2 << 8, 0x2000, &[1]);
+        let second = (stream.len() * 4) as u32;
+        stream.extend(write_data(2 << 8, 0x2004, &[2]));
+        let mut memory = Fake::default();
+
+        let done = execute_from(&bytes(&stream), second, &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed);
+        assert_eq!([memory.word(0x2000), memory.word(0x2004)], [0, 2]);
+        assert_eq!(done.bytes_written, 4);
     }
 
     /// With `ADDR_INCR` set to "do not increment" every word goes to the same address, so the last

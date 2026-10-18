@@ -23,6 +23,8 @@ guest_module! {
         // The shader-pair merge and its sizes: (out, A, B, aux, n, 0), as PPSA04263 and PPSA21564
         // call them (`agc_merge`).
         "0x0a4e469ba741de7d" => 6,
+        // The jump patch: (jump, policy, target, dwords), as PPSA04263 calls it.
+        "0x21a8c8fab7dd4722" => 4,
         "0xe486fe61994e8976" => 6,
         // Packet-size queries, answered as measured (`measured_size!`).
         "sceAgcAcbAcquireMemGetSize" => 6,
@@ -1314,6 +1316,42 @@ fn dcb_rewind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &[packet::build::command_header(0x59, 1), 0])
 }
 
+/// `0x21a8c8fab7dd4722(jump, policy, target, dwords)`, unnamed: fills in the jump at `jump` that
+/// `sceAgcDcbJump` wrote empty - the target's halves, and `dwords` in the control word's size field
+/// (`IB_SIZE`, bits 19:0, Mesa `registers/pkt3.json`), the rest of the control word as the builder
+/// wrote it. Answers 0. Guest-observed: PPSA04263 builds each buffer's jump empty and fills it in
+/// this way once the next buffer is known, `policy` 2 and `dwords` the next buffer's length. A
+/// pointer at anything but a jump is refused and left alone.
+fn jump_patch_21a8c8fa(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// `INDIRECT_BUFFER`'s header as `sceAgcDcbJump` writes it.
+    const JUMP_HEADER: u32 = 0xc002_3f00;
+    /// The control word's size field (`IB_SIZE`).
+    const SIZE: u32 = 0x000f_ffff;
+    let (jump, target, dwords) = (args[0], args[2], args[3] as u32);
+    // SAFETY: the address the title's own jump builder answered; its four dwords are read whole.
+    let Some(header) = (unsafe { guest::read_u32(jump) }) else {
+        return BAD_ARGUMENT;
+    };
+    // SAFETY: as above, the control word twelve bytes in.
+    let Some(control) = (unsafe { guest::read_u32(jump.wrapping_add(12)) }) else {
+        return BAD_ARGUMENT;
+    };
+    if header != JUMP_HEADER || dwords & !SIZE != 0 {
+        return BAD_ARGUMENT;
+    }
+    for (at, word) in [
+        (4, target as u32),
+        (8, (target >> 32) as u32),
+        (12, control & !SIZE | dwords),
+    ] {
+        // SAFETY: as above; the jump's own dwords, just read.
+        if !unsafe { guest::write_u32(jump.wrapping_add(at), word) } {
+            return BAD_ARGUMENT;
+        }
+    }
+    0
+}
+
 /// `sceAgcRewindPatchSetRewindState(rewind, state)`: sets the valid bit of the `REWIND` at `rewind`
 /// to `state`, as PPSA04263 calls it with `state` 1 once it has filled in the jump after it. A
 /// command stream held at that `REWIND` goes on ([`crate::agc_driver::release_rewind`], D890).
@@ -1640,6 +1678,87 @@ fn dcb_write_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// The control word `sceAgcAcbWriteData` writes for its `destination` and `cache_policy`: `0x200`
+/// for the `(2, 0)` both of obSCEne's arms passed, and PPSA04263 passes
+/// (`report-20261018-gt-census.log` 2855-2860). `None` for any other, which was not measured.
+const fn acb_write_data_control(destination: u64, cache_policy: u64) -> Option<u32> {
+    match (destination, cache_policy) {
+        (2, 0) => Some(0x0000_0200),
+        _ => None,
+    }
+}
+
+/// `sceAgcAcbWriteData(acb, destination, cache_policy, address, data, count)`: the
+/// `WRITE_DATA` the console wrote - header (body = 3 + count), [`acb_write_data_control`], the
+/// address's halves, then the data - answering its address. Unlike its Dcb twin it takes nothing
+/// on the stack: the measured arms passed six arguments.
+fn acb_write_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// `WRITE_DATA`'s opcode (Mesa `sid.h` `PKT3_WRITE_DATA`).
+    const WRITE_DATA: u8 = 0x37;
+    let refused = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    let (address, data, count) = (args[3], args[4], args[5] as u32);
+    let Some(control) = acb_write_data_control(args[1], args[2]) else {
+        return refused;
+    };
+    if data == 0 || count == 0 || u64::from(count) > MOST_WRITE_DATA_DWORDS {
+        return refused;
+    }
+    let mut words = Vec::with_capacity(count as usize + 4);
+    words.extend([
+        packet::build::command_header(WRITE_DATA, count + 3),
+        control,
+        address as u32,
+        (address >> 32) as u32,
+    ]);
+    for i in 0..u64::from(count) {
+        // SAFETY: the guest's data, `count` dwords by the call's contract.
+        let Some(word) = (unsafe { guest::read_u32(data.wrapping_add(i * 4)) }) else {
+            return refused;
+        };
+        words.push(word);
+    }
+    dcb_append(args[0], &words)
+}
+
+/// The event dword `sceAgcAcbEventWrite` writes for `event_type`: `0x407` for the 7 both of
+/// obSCEne's arms passed, whatever the rest (`report-20261018-gt-census.log` 2861-2866) - the event
+/// with `EVENT_INDEX` 4 at bits 8-11 (Mesa `sid.h` `EVENT_INDEX`), as `CS_PARTIAL_FLUSH` is sent.
+/// `None` for any other, which was not measured.
+const fn acb_event(event_type: u64) -> Option<u32> {
+    match event_type {
+        7 => Some(0x0000_0407),
+        _ => None,
+    }
+}
+
+/// `sceAgcAcbEventWrite(acb, event_type, ...)`: the measured `EVENT_WRITE`, answering its address.
+fn acb_event_write(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match acb_event(args[1]) {
+        Some(event) => dcb_append(
+            args[0],
+            &[
+                packet::build::command_header(measured::EVENT_WRITE, 1),
+                event,
+            ],
+        ),
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// `sceAgcAcbWaitRegMem(acb, wide, function, cache, poll, reference, mask, interval)`: what
+/// [`dcb_wait_reg_mem`] writes, without its engine argument - a compute queue has no engine to
+/// choose, so it is 0. PPSA04263's twin wrappers pass the Dcb form `(dcb, 1, 3, 1, cache, poll,
+/// reference, -1, 0x190)` and the Acb form `(acb, 1, 3, cache, poll, reference, -1, 0x190)`
+/// (`image+0x1c6110`, `image+0x1c61a0`); at zero arguments the console wrote the same 56 bytes for
+/// both (`report-20261018-gt-census.log` 2870-2872).
+fn acb_wait_reg_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let acb = builder_arguments(args);
+    let mut dcb = [0_u64; 11];
+    dcb[..2].copy_from_slice(&acb[..2]);
+    dcb[3..].copy_from_slice(&acb[2..10]);
+    dcb_append(args[0], &packet::build::wait_reg_mem(&dcb))
+}
+
 /// What `sceAgcWriteDataPatchSetAddressOrOffset` answered for a pointer that is not a packet
 /// (`166-agc/dcb-write-data`, the swapped call).
 const NOT_A_PACKET: u64 = 0x8a6c_000c;
@@ -1745,6 +1864,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         write_data_patch_set_address,
     ),
     ("0x71040c4df8235e1d", interpolants_71040c4d),
+    ("0x21a8c8fab7dd4722", jump_patch_21a8c8fa),
     ("0x8a6f69da59a5b375", interpolants_8a6f69da),
     ("sceAgcAcbAcquireMemGetSize", acb_acquire_mem_get_size),
     ("sceAgcDcbAcquireMemGetSize", dcb_acquire_mem_get_size),
@@ -1865,6 +1985,9 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAgcDcbPushMarker", dcb_push_marker),
     ("sceAgcDcbPopMarker", dcb_pop_marker),
     ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
+    ("sceAgcAcbWaitRegMem", acb_wait_reg_mem),
+    ("sceAgcAcbWriteData", acb_write_data),
+    ("sceAgcAcbEventWrite", acb_event_write),
     // The whole `sceAgc*Patch*` family, each measured to return 0x0.
     (
         "sceAgcSetCxRegIndirectPatchAddRegisters",

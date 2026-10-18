@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        93,
+        97,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"
@@ -105,11 +105,6 @@ fn every_wired_builder_is_reachable_by_its_import_name() {
     }
 }
 
-/// `sceAgcCbNop(cb, dwords)` writes a `NOP` `dwords` long. Measured (`166-agc/cb-nop`): 1 writes
-/// the header-only word `0xffff1000`, four bytes, and answers the packet's address; 0 writes
-/// nothing, and is refused here since its answer was not reported. Longer ones follow the PM4
-/// header (count = length - 2, the rule 1 is the wrapped case of): PPSA02664 asks for 3 and fills
-/// the two body dwords through `0x7d86501b8094ef57`, so the body is reserved and left unwritten.
 /// `sceAgcDcbJump` writes the console's bytes for each of obSCEne's three arms
 /// (`report-20261018-gt-census.log` 2845-2851), with the target in place of its buffer.
 #[test]
@@ -169,6 +164,35 @@ fn dcb_jump_is_written_past_the_limit_within_the_end() {
     assert_eq!(full.written(), 0);
 }
 
+/// `0x21a8c8fab7dd4722(jump, policy, target, dwords)` fills in a jump `sceAgcDcbJump` left empty:
+/// its target, and its size in the control word's low twenty bits, the rest of it as it was.
+/// PPSA04263 makes each buffer's jump empty and fills it in this way, 210 times a run.
+#[test]
+fn the_jump_patch_fills_in_an_empty_jump() {
+    let target = 0x0000_7400_3e0f_0080_u64;
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    (args[1], args[2]) = (1, 2);
+    let jump = call("sceAgcDcbJump", args);
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    (patch[0], patch[1], patch[2], patch[3]) = (jump, 2, target, 0x3df9);
+    assert_eq!(call("0x21a8c8fab7dd4722", patch), 0);
+    let expected: Vec<u8> = [
+        0xc002_3f00,
+        target as u32,
+        (target >> 32) as u32,
+        0x2f30_0000 | 0x3df9,
+    ]
+    .iter()
+    .flat_map(|word| word.to_le_bytes())
+    .collect();
+    assert_eq!(w.bytes(), expected.as_slice());
+    // Anything but a jump is refused and left alone.
+    patch[0] = w.handle();
+    assert_ne!(call("0x21a8c8fab7dd4722", patch), 0);
+}
+
 /// `sceAgcDcbRewind` writes a REWIND not yet released and answers its address
 /// (`report-20261018-gt-census.log` 2864-2866).
 #[test]
@@ -185,6 +209,80 @@ fn dcb_rewind_writes_an_unreleased_rewind() {
     assert_eq!(w.bytes(), &[0x00, 0x59, 0x00, 0xc0, 0, 0, 0, 0]);
 }
 
+/// `sceAgcAcbWriteData(acb, 2, 0, address, data, count)` writes the console's `WRITE_DATA` for
+/// both of obSCEne's arms, control `0x200` (`report-20261018-gt-census.log` 2855-2860), and answers
+/// its address. It takes no stack arguments, unlike its Dcb twin.
+#[test]
+fn acb_write_data_writes_the_measured_packet() {
+    let address = 0x0000_7400_40d0_0000_u64;
+    for count in [1_u32, 0x40] {
+        let data = vec![0x1111_1111_u32; count as usize];
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        (args[1], args[3], args[4], args[5]) = (2, address, data.as_ptr() as u64, u64::from(count));
+        let start = w.cursor();
+        assert_eq!(
+            call("sceAgcAcbWriteData", args),
+            start,
+            "returns the packet address"
+        );
+        let expected: Vec<u8> = [
+            0xc000_3700 | (count + 2) << 16,
+            0x200,
+            address as u32,
+            (address >> 32) as u32,
+        ]
+        .into_iter()
+        .chain(data.iter().copied())
+        .flat_map(u32::to_le_bytes)
+        .collect();
+        assert_eq!(w.bytes(), expected.as_slice(), "count {count:#x}");
+    }
+}
+
+/// `sceAgcAcbEventWrite(acb, 7, ...)` writes `0xc0004600 0x00000407` whatever its other arguments,
+/// as both of obSCEne's arms did (`report-20261018-gt-census.log` 2861-2866).
+#[test]
+fn acb_event_write_writes_the_measured_event() {
+    for (a3, a4) in [(0x78, 0x4ee), (0, 0)] {
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        (args[1], args[3], args[4]) = (7, a3, a4);
+        let start = w.cursor();
+        assert_eq!(call("sceAgcAcbEventWrite", args), start);
+        assert_eq!(w.bytes(), &[0x00, 0x46, 0x00, 0xc0, 0x07, 0x04, 0x00, 0x00]);
+    }
+}
+
+/// `sceAgcAcbWaitRegMem` writes what `sceAgcDcbWaitRegMem` does without its engine argument, which
+/// a compute queue has none of: PPSA04263's twin wrappers pass the Acb form one argument shorter
+/// (`image+0x1c6110`, `image+0x1c61a0`), and at zero arguments the console wrote the same 56 bytes
+/// for both (`report-20261018-gt-census.log` 2870-2872).
+#[test]
+fn acb_wait_reg_mem_takes_no_engine() {
+    let poll = 0x0000_000c_8000_40a0_u64;
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    (args[1], args[2], args[3], args[4], args[5]) = (0, 3, 2, poll, 7);
+    let start = w.cursor();
+    assert_eq!(call("sceAgcAcbWaitRegMem", args), start);
+    let expected: Vec<u8> =
+        orbistoun_gpu::packet::build::wait_reg_mem(&[0, 3, 0, 2, poll, 7, 0, 0, 0, 0, 0])
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+    assert_eq!(w.written(), 0x38);
+    assert_eq!(w.bytes(), expected.as_slice());
+}
+
+/// `sceAgcCbNop(cb, dwords)` writes a `NOP` `dwords` long. Measured (`166-agc/cb-nop`): 1 writes
+/// the header-only word `0xffff1000`, four bytes, and answers the packet's address; 0 writes
+/// nothing, and is refused here since its answer was not reported. Longer ones follow the PM4
+/// header (count = length - 2, the rule 1 is the wrapped case of): PPSA02664 asks for 3 and fills
+/// the two body dwords through `0x7d86501b8094ef57`, so the body is reserved and left unwritten.
 #[test]
 fn cb_nop_writes_a_nop_of_the_length_asked() {
     let w = Writer::new(0x400);
