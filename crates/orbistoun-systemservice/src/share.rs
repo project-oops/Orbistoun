@@ -15,8 +15,18 @@ guest_module! {
         // (callbacks)
         "sceShareRegisterContentEventCallback" => 1,
         "sceShareTerminate" => 0,
+        // (feature)
+        "sceShareFeaturePermit" => 1,
     }
 }
+
+/// What `sceShareFeaturePermit` answered for every feature asked, on an offline console:
+/// `SCE_SHARE_ERROR_FEATURE_NOT_PERMITTED` (REQ-gt16).
+const FEATURE_NOT_PERMITTED: u64 = 0x8196_000c;
+
+/// The share features PPSA04263 asks about at its title screen (REQ-gt16), the only ones
+/// measured.
+const MEASURED_FEATURES: [u64; 2] = [0x10, 0x24];
 
 /// What `sceShareInitialize` answered once the process had initialised the service.
 const ALREADY_INITIALIZED: u64 = 0x8196_000d;
@@ -64,6 +74,18 @@ fn terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `sceShareFeaturePermit(feature)`: `0x8196000c` (feature not permitted) for the features
+/// PPSA04263 asks about, as an offline console answered each and a repeat (REQ-gt16,
+/// `000-boot/gt16-share-recording`, `report-20261018-gt16-census.log` rows 3040-3043). A
+/// feature not measured answers the placeholder.
+fn feature_permit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if MEASURED_FEATURES.contains(&args[0]) {
+        FEATURE_NOT_PERMITTED
+    } else {
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
 /// Implementations this module provides for `libSceShare`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -73,6 +95,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceShareRegisterContentEventCallback",
             register_content_event_callback,
         ),
+        ("sceShareFeaturePermit", feature_permit),
     ]
 }
 
@@ -100,5 +123,20 @@ mod tests {
         );
         assert_eq!(block, [0x4a_e020, 0x4a_e080, 0, 0, 0, 0]);
         assert_eq!(super::terminate(&[0; GUEST_ARG_REGISTERS]), 0);
+    }
+
+    /// A share feature is not permitted on an offline console, both the features PPSA04263 asks
+    /// about and on a second ask (REQ-gt16); a feature not measured answers the placeholder.
+    #[test]
+    fn a_share_feature_is_not_permitted_offline() {
+        let feature = |id: u64| {
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = id;
+            super::feature_permit(&args)
+        };
+        assert_eq!(feature(0x10), 0x8196_000c);
+        assert_eq!(feature(0x10), 0x8196_000c, "a second ask");
+        assert_eq!(feature(0x24), 0x8196_000c);
+        assert_ne!(feature(0x11), 0x8196_000c, "a feature not measured");
     }
 }

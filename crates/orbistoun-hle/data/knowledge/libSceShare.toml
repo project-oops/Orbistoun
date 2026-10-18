@@ -41,3 +41,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T1430Z-sh02, reports/hardware/report-1791758178.txt lines 3856-3879 (070-user/share-initialize)."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceShareFeaturePermit"
+arity = 1
+purpose = "(feature): whether a share feature is permitted in the console's current state."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt16, 000-boot/gt16-share-recording, after sceSharePlayInitialize): features 0x10 and 0x24 each answered 0x8196000c (SCE_SHARE_ERROR_FEATURE_NOT_PERMITTED), and a second ask of each answered 0x8196000c again - an offline console's service state.",
+    "orbistoun answers the two features PPSA04263 asks about 0x8196000c; a feature not measured answers the placeholder. PPSA04263 ignores the answer (the call sites at image+0x2d4ecbe and +0x2d4ecd1 discard it).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1545Z-gt16, reports/hardware/report-20261018-gt16-census.log (SHA-256 65aa9e2d3ae2a35f...) lines 3040-3043 (000-boot/gt16-share-recording)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
