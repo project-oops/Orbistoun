@@ -142,6 +142,55 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     1
 }
 
+/// Bytes of the socket record `sceNetGetSockInfo` writes that the console was measured writing
+/// (REQ-gt10): the log shows the first 64 of each 160-byte record.
+const SOCK_INFO_MEASURED_BYTES: usize = 0x40;
+
+/// The word the console wrote at `+0x20` of every socket record, whatever the socket (REQ-gt10:
+/// two sockets, unbound and bound); what it means is not known.
+const SOCK_INFO_WORD_20: u32 = 0xd5;
+
+/// The two half-words the console wrote at `+0x28` of every UDP socket record (REQ-gt10).
+const SOCK_INFO_HALVES_28: [u16; 2] = [0x0002, 0x0010];
+
+/// The first 64 bytes of `sceNetGetSockInfo`'s record for socket `fd` bound to `port` (0 when
+/// unbound), as the console wrote them: the measured word at `+0x20`, the socket at `+0x24`, the
+/// measured half-words at `+0x28`, and the local port, big-endian, at `+0x3c`.
+fn sock_info_record(fd: u32, port: u16) -> [u8; SOCK_INFO_MEASURED_BYTES] {
+    let mut record = [0_u8; SOCK_INFO_MEASURED_BYTES];
+    record[0x20..0x24].copy_from_slice(&SOCK_INFO_WORD_20.to_le_bytes());
+    record[0x24..0x28].copy_from_slice(&fd.to_le_bytes());
+    record[0x28..0x2a].copy_from_slice(&SOCK_INFO_HALVES_28[0].to_le_bytes());
+    record[0x2a..0x2c].copy_from_slice(&SOCK_INFO_HALVES_28[1].to_le_bytes());
+    record[0x3c..0x3e].copy_from_slice(&port.to_be_bytes());
+    record
+}
+
+/// `sceNetGetSockInfo(socket, info, 1, 0)`: answers 1, the records written, and writes the first
+/// 64 bytes of the socket's record into `info` as the console did (REQ-gt10,
+/// `000-boot/gt10-socket-voice`, `report-20261018-gt-census.log` rows 2789-2802: a UDP socket
+/// unbound, bound to port 0 and bound to 6672). The record's last 96 bytes were not logged and
+/// are left as they were; PPSA04263 zeroes them and reads only the port at `+0x3c`. Another
+/// count or flags, or a descriptor that is no socket, is unmeasured and answers the placeholder.
+fn get_sock_info(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let placeholder = u64::from(GuestError::Unimplemented.as_raw());
+    let (fd, info, count, flags) = (args[0], args[1], args[2], args[3]);
+    if info == 0 || count != 1 || flags != 0 {
+        return placeholder;
+    }
+    let Some(port) = orbistoun_fs::socket::local_port(fd) else {
+        return placeholder;
+    };
+    let record = sock_info_record(fd as u32, port.unwrap_or(0));
+    // SAFETY: the guest's record, 160 bytes by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_bytes(info, &record) } {
+        1
+    } else {
+        placeholder
+    }
+}
+
 /// Implementations this module provides, by symbol name.
 ///
 /// The names obSCEne's `102-net/resolve` calls, plus `sceNetGetsockname`, which a server
@@ -156,6 +205,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNetConnect", vendor_connect),
         ("sceNetSetsockopt", vendor_setsockopt),
         ("sceNetGetsockname", vendor_getsockname),
+        ("sceNetGetSockInfo", get_sock_info),
         ("sceNetSend", vendor_send),
         ("sceNetRecv", vendor_recv),
         ("sceNetSendto", vendor_sendto),
@@ -176,6 +226,8 @@ guest_module! {
         "sceNetConnect" => 3,
         "sceNetErrnoLoc" => 0,
         "sceNetGetsockname" => 3,
+        // (socket, info, count, flags)
+        "sceNetGetSockInfo" => 4,
         "sceNetHtons" => 1,
         // (family, src, dst)
         "sceNetInetPton" => 3,
@@ -200,6 +252,22 @@ guest_module! {
 
 #[cfg(test)]
 mod tests {
+
+    /// A socket record is the console's, byte for byte, for a UDP socket unbound and bound to
+    /// 6672 (REQ-gt10, `report-20261018-gt-census.log` rows 2793 and 2802).
+    #[test]
+    fn a_socket_record_is_the_consoles() {
+        let unbound = "0000000000000000000000000000000000000000000000000000000000000000d50000001b000000020010000000000000000000000000000000000000000000";
+        let bound = "0000000000000000000000000000000000000000000000000000000000000000d50000001c00000002001000000000000000000000000000000000001a100000";
+        let bytes = |text: &str| -> Vec<u8> {
+            (0..text.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+                .collect()
+        };
+        assert_eq!(super::sock_info_record(0x1b, 0).to_vec(), bytes(unbound));
+        assert_eq!(super::sock_info_record(0x1c, 6672).to_vec(), bytes(bound));
+    }
     use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError};
     use orbistoun_fs::socket::{SOCKADDR_IN_LEN, af_inet, sock_stream};
 

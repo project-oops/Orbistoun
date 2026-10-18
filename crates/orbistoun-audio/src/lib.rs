@@ -310,6 +310,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmBatchStart", ajm::ajm_batch_start),
         ("sceAjmBatchWait", ajm::ajm_batch_wait),
         ("sceVoiceInit", voice::voice_init),
+        ("sceVoiceSetThreadsParams", voice::voice_set_threads_params),
         ("sceAudioOut2Initialize", audio_out2::initialize),
         ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),

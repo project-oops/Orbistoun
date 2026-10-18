@@ -24,12 +24,10 @@ purpose = "The network clock's current tick, written to the caller's 64-bit word
 returns = "status"
 edge_cases = [
     "PPSA04263 takes a failure path on a negative answer (`jns` after its calls).",
-    "A null destination is refused with the reserved placeholder; what the console answers is not measured.",
+    "MEASURED (REQ-tr01, signed in to no account): 0, and a tick of the current time (0xe31e194118ea6d). A null destination is unmeasured and answers the placeholder.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = [
-    "An offline console answers its own clock, as the reference emulators give it; obSCEne has not measured the call.",
-]
+known_by = "measured"
+cites = "obSCEne REQ-20261017T1945Z-tr01 (census commit 3b10104), reports/hardware/report-20261018-gt-census.log (SHA-256 4e52aabf7a9e565c...) lines 2828-2832: net-tick-rc 0, net-tick-val 0xe31e194118ea6d, the current time."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"

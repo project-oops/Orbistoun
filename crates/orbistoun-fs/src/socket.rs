@@ -653,6 +653,21 @@ pub fn getsockname(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     }
 }
 
+/// The local port socket `fd` is bound to - `Some(None)` for a socket bound to nothing yet - or
+/// `None` when `fd` is no socket.
+#[must_use]
+pub fn local_port(fd: u64) -> Option<Option<u16>> {
+    crate::descriptor::with_socket(fd, |socket| {
+        match socket {
+            Socket::Listener { listener, .. } => listener.local_addr().ok(),
+            Socket::Stream { stream, .. } => stream.local_addr().ok(),
+            Socket::Datagram { socket, .. } => socket.local_addr().ok(),
+            Socket::Pending { bound, .. } => *bound,
+        }
+        .map(|address| address.port())
+    })
+}
+
 /// `getpeername(fd, address, length)`: who is at the other end.
 ///
 /// Reference: POSIX.1-2008 `getpeername(2)`.

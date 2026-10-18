@@ -254,3 +254,18 @@ cites = "obSCEne REQ-20261012T1816Z-7af9, reports/report-1791836505.txt lines 83
 note = "orbistoun keeps one slot per thread, apart from libc's errno; no second thread was compared."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetGetSockInfo"
+arity = 4
+purpose = "(socket, info, count, flags): a socket's record, into a 160-byte block."
+returns = "count"
+edge_cases = [
+    "MEASURED (REQ-gt10, count 1 and flags 0, a UDP socket unbound, bound to port 0 and to 6672): answers 1; the first 64 bytes of the record are zero but for 0xd5 at +0x20, the socket at +0x24, 0x0002 then 0x0010 at +0x28, and the local port big-endian at +0x3c (0 unbound, 0x1a10 for 6672). The last 96 bytes were not logged.",
+    "orbistoun writes those 64 bytes for its socket and answers 1; another count or flags, or a descriptor that is no socket, answers the placeholder. PPSA04263 zeroes 0xa0 bytes, reads the port at +0x3c, and closes the socket on a negative answer (js at image+0x2cd7035).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261017T2000Z-gt10 (census commit 3b10104), reports/hardware/report-20261018-gt-census.log (SHA-256 4e52aabf7a9e565c...) lines 2789-2802; gt07's lines 2768-2771 agree."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"

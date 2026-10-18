@@ -46,8 +46,9 @@ fn rtc_get_current_tick(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceRtcGetCurrentNetworkTick(tick)`: the network clock's current tick. A console sets its
 /// clock from the network and keeps it offline, so the network tick is its own clock, as
-/// [`rtc_get_current_tick`] answers it (assumed: the reference emulators answer it so for an
-/// offline console; PPSA04263 takes a failure path on a negative answer, `jns` at its calls).
+/// [`rtc_get_current_tick`] answers it: 0 and the current time on a console signed in to no
+/// account (REQ-tr01, `report-20261018-gt-census.log` rows 2828-2832). PPSA04263 takes a failure
+/// path on a negative answer, `jns` at its calls.
 fn rtc_get_current_network_tick(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     rtc_get_current_tick(args)
 }

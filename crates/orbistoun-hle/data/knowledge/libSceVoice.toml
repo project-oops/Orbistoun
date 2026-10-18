@@ -14,3 +14,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261015T2025Z-gt02, reports/hardware/20261016-000300-eboot.log lines 4910-4917; REQ-20261015T1234Z-gt01, reports/hardware/20261015-164000-eboot.log lines 4862-4864."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-16"
+
+[[function]]
+name = "sceVoiceSetThreadsParams"
+arity = 1
+purpose = "(params): the voice library's thread priorities and CPU masks."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt10, after sceVoiceInit): 0 for PPSA04263's 0x38-byte block (01 00 00 00 bc 02 00 00 7f ...) and 0 for a zeroed one, the block unchanged both times.",
+    "orbistoun answers the two measured blocks 0 after sceVoiceInit; before it, and any other block, the placeholder. PPSA04263 skips its voice ports on a non-zero answer (jne at image+0x2602b2c).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261017T2000Z-gt10 (census commit 3b10104), reports/hardware/report-20261018-gt-census.log (SHA-256 4e52aabf7a9e565c...) lines 2803-2808."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
