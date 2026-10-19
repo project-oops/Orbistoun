@@ -594,6 +594,44 @@ mod refusal_tests {
     }
 }
 
+/// `why` a dispatch's computed buffer could not be resolved, with what its waves reach it with when
+/// each is run on the host (D900): how many distinct descriptors, or why they cannot be run.
+fn probed_note(
+    why: impl std::fmt::Display,
+    source: &orbistoun_translate::draw_buffers::BufferSource,
+    (words, state): (&[u32; USER_DATA_WORDS], &crate::dispatch::DispatchState),
+    memory: &impl GuestMemory,
+) -> String {
+    let orbistoun_translate::draw_buffers::BufferSource::Computed(computed) = source else {
+        return why.to_string();
+    };
+    let count = state.user_data.len().min(USER_DATA_WORDS);
+    match crate::draw_buffers::dispatch_computed_descriptors(
+        (computed, state.program),
+        (
+            &words[..count],
+            state.inputs,
+            state.groups,
+            state.width.lanes(),
+        ),
+        memory,
+    ) {
+        Ok(reached) => {
+            let ends: Vec<String> = reached
+                .ends
+                .iter()
+                .map(|(at, waves)| format!("{waves} at {at:#x}"))
+                .collect();
+            format!(
+                "{why}; run wave by wave, its waves reach it with {} distinct descriptor(s), their runs ending {} (D900)",
+                reached.descriptors.len(),
+                ends.join(", ")
+            )
+        }
+        Err(probe) => format!("{why}; run wave by wave: {probe}"),
+    }
+}
+
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
 /// position space (D731), in the cache key.
 fn for_draw_salt(for_draw: ForDraw) -> u64 {
@@ -2343,7 +2381,8 @@ impl Pipeline {
                     global_base = Some(range.0);
                     range
                 } else {
-                    crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)?
+                    crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)
+                        .map_err(|why| probed_note(why, source, (&words, state), memory))?
                 };
             // Two copies of one byte disagree only where the dispatch writes one of them: read-only
             // copies of the same bytes agree (D746).

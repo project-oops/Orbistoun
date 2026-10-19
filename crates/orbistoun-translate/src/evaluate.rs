@@ -649,6 +649,33 @@ pub struct WaveEntry {
     pub components: u32,
 }
 
+/// What a run's probes recorded (D900): each time a probed instruction ran, its byte and the
+/// registers it names, each [`None`] where unknown.
+pub type ProbeValues = Vec<(u32, Vec<Option<u32>>)>;
+
+/// How many steps a probed run takes at most, in multiples of the program's instructions: a
+/// waterfall's every pass, one per distinct value across a wave's lanes, runs its loop again.
+const PROBE_STEP_FACTOR: usize = 72;
+
+/// Runs `program`, made [`LaneProgram::with_probes`], over one compute wave as
+/// [`wave_lane_addresses`] does, and answers what its probes recorded (D900) and the byte of the
+/// last instruction it ran.
+///
+/// # Errors
+///
+/// As [`lane_addresses`]: a branch on what the host cannot know, or a run past its step bound.
+pub fn wave_probes(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    user_data: &[u32],
+    (width, wave): (u32, &WaveEntry),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<(ProbeValues, u32), LaneRefusal> {
+    let (mut model, lanes) = wave_model(program, encodings, user_data, (width, wave));
+    run_lanes(&mut model, program, encodings, lanes, read)?;
+    Ok((model.probed, model.last))
+}
+
 /// Runs `program` over one compute wave (D883), as [`lane_addresses`] runs a draw's: the user data
 /// from `s0`, then `wave`'s group ids; in each lane with a thread its id components from `v0`, and
 /// that lane's execution-mask bit; every other vector register zero. The wave is `width` lanes.
@@ -664,6 +691,19 @@ pub fn wave_lane_addresses(
     (width, wave): (u32, &WaveEntry),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Result<LaneAddresses, LaneRefusal> {
+    let (mut model, lanes) = wave_model(program, encodings, user_data, (width, wave));
+    run_lanes(&mut model, program, encodings, lanes, read)
+}
+
+/// A model at a compute wave's entry (D883): the user data from `s0`, then `wave`'s group ids; in
+/// each lane with a thread its id components from `v0`, and that lane's execution-mask bit; every
+/// other vector register zero. Answers it and the lanes the wave has.
+fn wave_model<'a>(
+    program: &LaneProgram,
+    encodings: &'a EncodingTable,
+    user_data: &[u32],
+    (width, wave): (u32, &WaveEntry),
+) -> (Concrete<'a>, u32) {
     let mut model = Concrete::new(encodings, program.decode.instructions.len());
     for (register, word) in user_data.iter().chain(&wave.group_ids).enumerate() {
         if register < model::SCALAR_REGISTERS as usize {
@@ -695,7 +735,7 @@ pub fn wave_lane_addresses(
             model.vectors.insert((register, lane), Some(*id));
         }
     }
-    run_lanes(&mut model, program, encodings, lanes, read)
+    (model, lanes)
 }
 
 /// The run [`lane_addresses`] and [`wave_lane_addresses`] share, from a model at the wave's entry:
@@ -729,7 +769,7 @@ fn run_lanes(
         if instruction.offset > until {
             break;
         }
-        if steps > 4 * decode.instructions.len() {
+        if steps > program.step_factor * decode.instructions.len() {
             return Err(LOOPS_PAST_THE_BOUND.into());
         }
         steps += 1;
@@ -741,6 +781,7 @@ fn run_lanes(
             let addresses = model.load_addresses(instruction, lanes).ok_or(UNKNOWN)?;
             found.push((instruction.offset, addresses));
         }
+        model.record_probes(program, instruction.offset);
         at += 1;
         match family {
             "SOPP" if name == "s_endpgm" => break,
@@ -798,6 +839,10 @@ fn run_lanes(
                     model.forget_vector_writes(instruction, name);
                 }
                 model.catch_up();
+            }
+            // A buffer load each lane forms through its descriptor reads guest memory (D900).
+            _ if model.lanes && name.starts_with("buffer_load_dword") => {
+                model.vector_buffer_load(instruction, written_vectors(name), read);
             }
             // Any other access's destination is what memory held, unknown here.
             _ => model.forget_vector(instruction.operands.first(), written_vectors(name)),
@@ -1095,6 +1140,11 @@ pub struct LaneProgram {
     /// The program compiled for native runs, where every instruction a run reaches is one they
     /// carry out exactly (D850); else the byte of the first that is not.
     quick: Result<crate::quick_lanes::Program, u32>,
+    /// The instructions whose scalar registers a run records each time it reaches one, with the
+    /// registers (D900).
+    probes: Vec<(u32, Vec<usize>)>,
+    /// How many steps a run takes at most, in multiples of the program's instructions.
+    step_factor: usize,
 }
 
 impl LaneProgram {
@@ -1111,6 +1161,48 @@ impl LaneProgram {
             kept,
             crosses,
             quick,
+            probes: Vec::new(),
+            step_factor: 4,
+        }
+    }
+
+    /// `decode` prepared for runs that record the scalar registers each of `probes` names each time
+    /// the instruction at its byte runs (D900): every instruction is run, through the loop a probe
+    /// lies in - to its last backward branch to a byte at or before the probe - so a waterfall's
+    /// every pass is probed, and a wave's whole run up to there.
+    #[must_use]
+    pub fn with_probes(
+        decode: Decode,
+        encodings: &EncodingTable,
+        probes: &[(u32, Vec<usize>)],
+    ) -> Self {
+        let kept = vec![true; decode.instructions.len()];
+        let crosses = crosses_lanes(&decode, encodings, &kept);
+        let last = probes.iter().map(|(at, _)| *at).max().unwrap_or(0);
+        // The end of the loop the last probe lies in, where one closes after it.
+        let until = decode
+            .instructions
+            .iter()
+            .filter(|i| i.offset > last)
+            .filter(|i| named(encodings, i).is_some_and(|(_, name)| branches(name)))
+            .filter_map(|i| match i.operands.first() {
+                Some(Operand::Immediate(jump)) => {
+                    let target = i64::from(i.offset) + 4 + 4 * simm16(*jump);
+                    (target <= i64::from(last)).then_some(i.offset)
+                }
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or(last);
+        Self {
+            until,
+            loads: Vec::new(),
+            decode,
+            kept,
+            crosses,
+            quick: Err(last),
+            probes: probes.to_vec(),
+            step_factor: PROBE_STEP_FACTOR,
         }
     }
 
@@ -1533,6 +1625,10 @@ struct Concrete<'a> {
     instructions: usize,
     types: [Id; 6],
     pointers: [Id; 4],
+    /// What a run's probes recorded, in the order they ran (D900).
+    probed: ProbeValues,
+    /// The byte of the last instruction a run ran.
+    last: u32,
 }
 
 /// Indices into [`Concrete::types`].
@@ -1570,6 +1666,8 @@ impl<'a> Concrete<'a> {
             instructions,
             types,
             pointers,
+            probed: ProbeValues::new(),
+            last: 0,
         }
     }
 
@@ -1867,6 +1965,97 @@ impl<'a> Concrete<'a> {
             });
             if let Some(slot) = self.scalars.get_mut(destination + step) {
                 *slot = value;
+            }
+        }
+    }
+
+    /// Notes `at` as the last instruction run, and records the registers each probe there names
+    /// (D900).
+    fn record_probes(&mut self, program: &LaneProgram, at: u32) {
+        self.last = at;
+        for (_, registers) in program.probes.iter().filter(|(probe, _)| *probe == at) {
+            let values = registers
+                .iter()
+                .map(|&register| self.scalars.get(register).copied().flatten())
+                .collect();
+            self.probed.push((at, values));
+        }
+    }
+
+    /// A `buffer_load_dword*` in each running lane: its descriptor's base, the scalar offset, the
+    /// instruction's offset and the lane's own - its vector offset where `offen` (bit 12) is set,
+    /// its index times the stride where `idxen` (bit 13) is - read from guest memory, `words` words
+    /// of it; zero past the descriptor's records, as the hardware reads there. Unknown where the
+    /// descriptor, an offset or the memory is.
+    fn vector_buffer_load(
+        &mut self,
+        instruction: &Instruction,
+        words: u32,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) {
+        let [
+            Operand::Vector(data),
+            vaddr,
+            Operand::Scalar(resource),
+            soffset,
+        ] = instruction.operands.as_slice()
+        else {
+            self.forget_vector(instruction.operands.first(), words);
+            return;
+        };
+        let resource = usize::from(*resource);
+        let descriptor = [0, 1, 2].map(|word| self.scalars.get(resource + word).copied().flatten());
+        let soffset = match soffset {
+            Operand::Scalar(code) => self.scalars.get(usize::from(*code)).copied().flatten(),
+            Operand::Integer(value) => u32::try_from(*value).ok(),
+            _ => None,
+        };
+        let word = instruction.word;
+        let (immediate, offen, idxen) = (word & 0xFFF, word & 1 << 12 != 0, word & 1 << 13 != 0);
+        let Operand::Vector(vaddr) = vaddr else {
+            self.forget_vector(instruction.operands.first(), words);
+            return;
+        };
+        let data = u32::from(*data);
+        for lane in 0..self.modelled {
+            if self.lane_runs(lane) != Some(true) {
+                continue;
+            }
+            let mut next = u32::from(*vaddr);
+            let mut take = |model: &Self, on: bool| {
+                on.then(|| {
+                    let value = model.vector(next, lane);
+                    next += 1;
+                    value
+                })
+            };
+            let index = take(self, idxen);
+            let offset = take(self, offen);
+            let place = match (descriptor, soffset, index.flatten(), offset.flatten()) {
+                ([Some(low), Some(high), Some(records)], Some(soffset), index, voffset)
+                    if index.is_some() == idxen && voffset.is_some() == offen =>
+                {
+                    let base = (u64::from(high & 0xffff) << 32) | u64::from(low);
+                    let stride = u64::from(high >> 16 & 0x3fff);
+                    let index = u64::from(index.unwrap_or(0));
+                    let offset = u64::from(immediate) + u64::from(voffset.unwrap_or(0));
+                    // Records are elements with a stride, bytes without.
+                    let outside = if stride == 0 {
+                        offset + u64::from(soffset) + 4 * u64::from(words) > u64::from(records)
+                    } else {
+                        index >= u64::from(records)
+                    };
+                    Some((base + u64::from(soffset) + offset + index * stride, outside))
+                }
+                _ => None,
+            };
+            for step in 0..words {
+                let value = match place {
+                    Some((_, true)) => Some(0),
+                    Some((address, false)) => read(address + 4 * u64::from(step)),
+                    None => None,
+                };
+                self.vectors.insert((data + step, lane), value);
             }
         }
     }
@@ -3520,6 +3709,67 @@ mod tests {
             run(vec![Some([0, 0, 0]), Some([1, 0, 0])]),
             Ok(vec![(load, vec![0, 0])]),
             "two threads, whose address registers are zero"
+        );
+    }
+
+    /// A wave run through a waterfall loop - each pass taking the first running lane's value with
+    /// `v_readfirstlane`, retiring the lanes that hold it - records the probed register once a pass,
+    /// one pass per distinct value, from values each lane loaded through a buffer descriptor and its
+    /// own offset (D900): Grand Theft Auto V's compute program picks its store buffers so. Eight
+    /// lanes holding 5, 5, 9, 5, 2, 9, 2, 2 make three passes, probed at `s_nop` for `s7`, the value
+    /// shifted by four.
+    #[test]
+    fn a_waterfall_s_passes_are_probed_one_per_value() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // v_lshlrev_b32 v2, 2, v0; buffer_load_dword v1, v2, s[0:3], 0 offen; s_waitcnt;
+        // s_mov_b32 s5, exec_lo; loop: v_readfirstlane_b32 s4, v1; v_cmp_eq_u32 vcc_lo, s4, v1;
+        // s_and_saveexec_b32 s6, vcc_lo; s_lshl_b32 s7, s4, 4; s_nop 0;
+        // s_andn2_b32 exec_lo, s6, exec_lo; s_cbranch_execnz loop; s_mov_b32 exec_lo, s5;
+        // s_endpgm.
+        let words = [
+            0x3404_0082_u32,
+            0xe030_1000,
+            0x8000_0102,
+            0xbf8c_3f70,
+            0xbe85_037e,
+            0x7e08_0501,
+            0x7d84_0204,
+            0xbe86_3c6a,
+            0x8f07_8404,
+            0xbf80_0000,
+            0x8a7e_7e06,
+            0xbf89_fff9,
+            0xbefe_0305,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let program = super::LaneProgram::with_probes(decode, &encodings, &[(36, vec![7])]);
+        let values = [5_u32, 5, 9, 5, 2, 9, 2, 2];
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: (0..8).map(|lane| Some([lane, 0, 0])).collect(),
+            components: 1,
+        };
+        let probed = super::wave_probes(
+            &program,
+            &encodings,
+            &[0x1000, 0, 32, 0],
+            (32, &wave),
+            &mut |address| {
+                address
+                    .checked_sub(0x1000)
+                    .and_then(|at| values.get(usize::try_from(at / 4).ok()?).copied())
+            },
+        );
+        assert_eq!(
+            probed.map(|(values, _)| values),
+            Ok(vec![
+                (36, vec![Some(0x50)]),
+                (36, vec![Some(0x90)]),
+                (36, vec![Some(0x20)])
+            ])
         );
     }
 

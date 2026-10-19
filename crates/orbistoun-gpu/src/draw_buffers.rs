@@ -1030,10 +1030,10 @@ pub(crate) fn dispatch_global_range(
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), Refusal> {
     use orbistoun_translate::evaluate::{
-        LOOPS_PAST_THE_BOUND, WaveEntry, long_wave_lane_addresses, wave_lane_addresses,
+        LOOPS_PAST_THE_BOUND, long_wave_lane_addresses, wave_lane_addresses,
     };
-    let waves = inputs.waves(width);
-    let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(waves);
+    let runs =
+        groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(inputs.waves(width));
     if runs > MOST_DISPATCH_WAVES {
         return Err(concat!(
             "a dispatch of more waves than one preparation runs on the host to find where its ",
@@ -1047,9 +1047,53 @@ pub(crate) fn dispatch_global_range(
         let bytes = memory.read(address, 4)?;
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     };
-    let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
     // The span every wave reads, folded wave by wave: a long loop's addresses are many.
     let mut span: Option<(u64, u64)> = None;
+    for entry in dispatch_waves(inputs, groups, width) {
+        let addresses = match wave_lane_addresses(
+            &prepared.program,
+            encodings,
+            user_data,
+            (width, &entry),
+            &mut word,
+        ) {
+            Ok(addresses) => addresses,
+            // A loop longer than the model follows is followed natively (D850).
+            Err(why) if why == LOOPS_PAST_THE_BOUND => {
+                long_wave_lane_addresses(&prepared.program, user_data, (width, &entry), &mut word)
+                    .map_err(|at| -> Refusal {
+                    let step = prepared.program.instruction_named(at);
+                    if prepared.program.runs_quickly() {
+                        format!("{why}; the native run stops at {step}").into()
+                    } else {
+                        format!("{why}; the native run does not carry out {step}").into()
+                    }
+                })?
+            }
+            Err(why) => {
+                return Err(format!("{why}; {}", wave_entry(user_data.len(), inputs)).into());
+            }
+        };
+        let (first, bytes) = span_of(global, addresses);
+        if bytes > 0 {
+            let end = first + bytes;
+            span = Some(span.map_or((first, end), |(low, high)| (low.min(first), high.max(end))));
+        }
+    }
+    Ok(span.map_or((0, 0), |(low, high)| (low, high - low)))
+}
+
+/// Every wave of a dispatch of `groups` workgroups as the hardware starts it (D883): its group's
+/// enabled id components, and each lane's thread ids - `None` past the group's threads, or outside
+/// a partial last group (D855) - the x id counting from the dispatch's first thread (D861).
+fn dispatch_waves(
+    inputs: orbistoun_translate::wavefront::ComputeInputs,
+    groups: [u32; 3],
+    width: u32,
+) -> Vec<orbistoun_translate::evaluate::WaveEntry> {
+    let waves = inputs.waves(width);
+    let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
+    let mut entries = Vec::new();
     for z in 0..groups[2] {
         for y in 0..groups[1] {
             for x in 0..groups[0] {
@@ -1070,63 +1114,102 @@ pub(crate) fn dispatch_global_range(
                                 thread / x_threads % y_threads,
                                 thread / (x_threads * y_threads),
                             ];
-                            // The last group of a partial dispatch runs only the threads it has.
                             let runs = inputs.partial.is_none_or(|partial| {
                                 (0..3).all(|c| {
                                     group[c] != partial.last[c] || id[c] < partial.threads[c]
                                 })
                             });
-                            // The x id counts from the dispatch's first thread (D861).
                             runs.then_some([id[0] + inputs.first_thread, id[1], id[2]])
                         })
                         .collect();
-                    let entry = WaveEntry {
+                    entries.push(orbistoun_translate::evaluate::WaveEntry {
                         group_ids: group_ids.clone(),
                         threads,
                         components: inputs.thread_id_components,
-                    };
-                    let addresses = match wave_lane_addresses(
-                        &prepared.program,
-                        encodings,
-                        user_data,
-                        (width, &entry),
-                        &mut word,
-                    ) {
-                        Ok(addresses) => addresses,
-                        // A loop longer than the model follows is followed natively (D850).
-                        Err(why) if why == LOOPS_PAST_THE_BOUND => long_wave_lane_addresses(
-                            &prepared.program,
-                            user_data,
-                            (width, &entry),
-                            &mut word,
-                        )
-                        .map_err(|at| -> Refusal {
-                            let step = prepared.program.instruction_named(at);
-                            if prepared.program.runs_quickly() {
-                                format!("{why}; the native run stops at {step}").into()
-                            } else {
-                                format!("{why}; the native run does not carry out {step}").into()
-                            }
-                        })?,
-                        Err(why) => {
-                            return Err(
-                                format!("{why}; {}", wave_entry(user_data.len(), inputs)).into()
-                            );
-                        }
-                    };
-                    let (first, bytes) = span_of(global, addresses);
-                    if bytes > 0 {
-                        let end = first + bytes;
-                        span =
-                            Some(span.map_or((first, end), |(low, high)| {
-                                (low.min(first), high.max(end))
-                            }));
-                    }
+                    });
                 }
             }
         }
     }
-    Ok(span.map_or((0, 0), |(low, high)| (low, high - low)))
+    entries
+}
+
+/// How many bytes past a computed access's prefix a probed run reads of its program: the loop the
+/// access lies in closes after it (D900).
+const PROBE_TAIL_BYTES: usize = 4096;
+
+/// The descriptors, and scalar offsets, a dispatch's waves reach a computed access with (D900):
+/// each wave run on the host through its program - read from guest memory, past the access to the
+/// end of the loop it lies in - the access's registers recorded each time it runs. A waterfall loop
+/// runs it once a distinct value across its wave's lanes.
+///
+/// # Errors
+///
+/// A refusal naming what the host cannot follow: no program address, more waves than are run, or
+/// what a wave's run could not know. `address` is the program's, whose prefix the access's is.
+pub(crate) fn dispatch_computed_descriptors(
+    (computed, address): (&Computed, u64),
+    (user_data, inputs, groups, width): (
+        &[u32],
+        orbistoun_translate::wavefront::ComputeInputs,
+        [u32; 3],
+        u32,
+    ),
+    memory: &impl GuestMemory,
+) -> Result<ReachedDescriptors, Refusal> {
+    use orbistoun_translate::evaluate::{LaneProgram, wave_probes};
+    let runs =
+        groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(inputs.waves(width));
+    if runs > MOST_DISPATCH_WAVES {
+        return Err("a dispatch of more waves than are run on the host (D900)".into());
+    }
+    let (encodings, operands) = tables()?;
+    let length = computed.prefix.len() * 4 + PROBE_TAIL_BYTES;
+    let bytes = memory
+        .read(address, length)
+        .or_else(|| memory.read(address, computed.prefix.len() * 4))
+        .ok_or("a program that is not readable guest memory (D900)")?;
+    let decode = orbistoun_shader::decode_program(bytes, encodings, operands);
+    let (first, count) = match computed.through {
+        ComputedAccess::Descriptor { first, .. } => (usize::from(first), 4),
+        ComputedAccess::Pointer { base, .. } => (usize::from(base), 2),
+    };
+    let mut registers: Vec<usize> = (first..first + count).collect();
+    let soffset = usize::from(computed.soffset);
+    if soffset < 128 {
+        registers.push(soffset);
+    }
+    let program = LaneProgram::with_probes(decode, encodings, &[(computed.at, registers)]);
+    let mut word = |address: u64| {
+        let bytes = memory.read(address, 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let mut reached = ReachedDescriptors::default();
+    for entry in dispatch_waves(inputs, groups, width) {
+        let (probed, last) =
+            wave_probes(&program, encodings, user_data, (width, &entry), &mut word)?;
+        *reached.ends.entry(last).or_default() += 1;
+        for (_, values) in probed {
+            let values: Option<Vec<u32>> = values.into_iter().collect();
+            let values = values.ok_or("a wave reaches the access with registers it cannot know")?;
+            let mut words = [0; 4];
+            words[..count].copy_from_slice(&values[..count]);
+            reached
+                .descriptors
+                .insert((words, values.get(count).copied().unwrap_or(0)));
+        }
+    }
+    Ok(reached)
+}
+
+/// What a dispatch's waves reach a computed access with, run on the host (D900): each distinct
+/// descriptor with its scalar offset, and how many waves' runs ended at each byte.
+#[derive(Debug, Default)]
+pub(crate) struct ReachedDescriptors {
+    /// The distinct descriptors and scalar offsets.
+    pub descriptors: std::collections::BTreeSet<([u32; 4], u32)>,
+    /// Waves by the byte of the last instruction their run ran.
+    pub ends: BTreeMap<u32, u32>,
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
