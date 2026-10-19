@@ -265,6 +265,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceVideoRecording.toml"),
     ),
     (
+        "libSceVideoRecordingP",
+        include_str!("../data/knowledge/libSceVideoRecordingP.toml"),
+    ),
+    (
         "libSceVoice",
         include_str!("../data/knowledge/libSceVoice.toml"),
     ),

@@ -12,6 +12,7 @@ pub mod png_dec;
 pub mod png_enc;
 pub mod queued;
 pub mod recording;
+pub mod recording_p;
 
 guest_module! {
     "libSceVideoOut" {
@@ -887,6 +888,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAvPlayerStreamCount", av_player::stream_count),
         ("sceAvPlayerPostInit", av_player::post_init),
         ("sceAvPlayerStop", av_player::stop),
+        ("sceVideoRecordingSetInfo", recording_p::set_info),
         ("scePngDecQueryMemorySize", png_dec::query_memory_size),
         ("scePngDecCreate", png_dec::create),
         ("scePngDecParseHeader", png_dec::parse_header),

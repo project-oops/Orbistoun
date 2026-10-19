@@ -1,0 +1,16 @@
+library = "libSceVideoRecordingP"
+
+[[function]]
+name = "sceVideoRecordingSetInfo"
+arity = 6
+purpose = "(type, info, length): sets a recording info field of the given type."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt16, 000-boot/gt16-share-recording): type 6 with a 0x24-byte UTF-16 title and type 2 with an 8-byte one each answered 0x80a80003 (SCE_VIDEO_RECORDING_ERROR_INVALID_ARGUMENT), the info block unchanged, both before and after an open. The export's valid types are 0x8002, 0x8003, 0xa003, 0xa004 and 0xa006; every other type branches straight to this error.",
+    "orbistoun answers the two types PPSA04263 passes 0x80a80003 and writes nothing; a type not measured answers the placeholder. PPSA04263 ignores the answer (the call sites at image+0xb43e48, +0xb43f08 and +0xb43fc8 discard it).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261018T1545Z-gt16, reports/hardware/report-20261018-gt16-census.log (SHA-256 65aa9e2d3ae2a35f...) lines 3044-3053 (000-boot/gt16-share-recording)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-18"
