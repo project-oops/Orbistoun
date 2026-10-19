@@ -6324,16 +6324,23 @@ fn type_rewrites(
             .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
     };
     let mut found = std::collections::BTreeSet::new();
-    for (index, pair) in decode.instructions.windows(2).enumerate() {
-        let [and, or] = pair else { continue };
-        if named(and) != Some("s_and_b32") || named(or) != Some("s_or_b32") {
+    for (index, and) in decode.instructions.iter().enumerate() {
+        if named(and) != Some("s_and_b32") {
             continue;
         }
-        let ([scratch, Operand::Scalar(word), mask], [Operand::Scalar(written), read, set]) =
-            (and.operands.as_slice(), or.operands.as_slice())
+        let ([scratch, Operand::Scalar(word), mask], Some((between, or))) =
+            (and.operands.as_slice(), the_or_after(decode, index, &named))
         else {
             continue;
         };
+        let [Operand::Scalar(written), read, set] = or.operands.as_slice() else {
+            continue;
+        };
+        // What runs between them touches neither the scratch register nor the word.
+        let apart = decode.instructions[index + 1..between].iter().all(|other| {
+            !other.operands.contains(scratch)
+                && !other.operands.contains(&Operand::Scalar(*written))
+        });
         let word3 = u32::from(*word)
             .checked_sub(3)
             .is_some_and(|group| loads.contains_key(&group));
@@ -6345,7 +6352,7 @@ fn type_rewrites(
         // The scratch register holds a word of the descriptor nothing reads before it is written
         // again.
         let mut unread_after = true;
-        for later in &decode.instructions[index + 2..] {
+        for later in &decode.instructions[between + 1..] {
             if later.operands.iter().skip(1).any(|o| o == scratch) {
                 unread_after = false;
                 break;
@@ -6354,12 +6361,29 @@ fn type_rewrites(
                 break;
             }
         }
-        if word3 && type_only && written == word && read == scratch && unread_after {
+        if word3 && type_only && written == word && read == scratch && unread_after && apart {
             found.insert(and.offset);
             found.insert(or.offset);
         }
     }
     found
+}
+
+/// The first `s_or_b32` after the instruction at `index`, as its index and itself, unless a scalar
+/// memory or image instruction comes first.
+fn the_or_after<'d, 'e>(
+    decode: &'d Decode,
+    index: usize,
+    named: &dyn Fn(&Instruction) -> Option<&'e str>,
+) -> Option<(usize, &'d Instruction)> {
+    for (at, instruction) in decode.instructions.iter().enumerate().skip(index + 1) {
+        match named(instruction) {
+            Some("s_or_b32") => return Some((at, instruction)),
+            Some(name) if name.starts_with("image_") || name.starts_with("s_load") => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `SQ_RSRC_IMG_2D`, the `TYPE` of a two-dimensional image (`gfx10-rsrc.json`).

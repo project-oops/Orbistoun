@@ -389,6 +389,64 @@ fn a_rewrite_of_a_table_descriptor_s_type_alone_keeps_its_image() {
     );
 }
 
+/// A type rewrite whose two instructions have another between them that touches neither register
+/// keeps the image as an adjacent pair does (D895): Grand Theft Auto V's compute copy at
+/// `0x74004314a600` computes a store coordinate between them, and fetches through `image_load_mip`
+/// at a level its user data names.
+#[test]
+fn a_type_rewrite_split_by_an_unrelated_instruction_keeps_its_image() {
+    let words = [
+        0xf410_0300_u32, // s_load_dwordx16 s[12:27], s[0:1], 0x0
+        0xfa00_0000,
+        0xbf8c_c07f, // s_waitcnt
+        0x876a_ff17, // s_and_b32 vcc_lo, s23, 0x0fffffff
+        0x0fff_ffff,
+        0x4a08_0802, // v_add_nc_u32_e32 v4, s2, v4
+        0x8817_ff6a, // s_or_b32 s23, vcc_lo, 0xd0000000
+        0xd000_0000,
+        0xf004_3128, // image_load_mip v0, v[0:3], s[20:27] dmask:0x1 dim:2D_ARRAY
+        0x0005_0000,
+        0x876a_ff0f, // s_and_b32 vcc_lo, s15, 0x0fffffff
+        0x0fff_ffff,
+        0x880f_ff6a, // s_or_b32 s15, vcc_lo, 0xd0000000
+        0xd000_0000,
+        0xbf8c_3f70, // s_waitcnt
+        0xf020_3128, // image_store v0, v[4:6], s[12:19] dmask:0x1 dim:2D_ARRAY
+        0x0003_0004,
+        0xbf81_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (_, _, (textures, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 2,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("a split type rewrite keeps the images");
+    assert_eq!(
+        textures.first().map(|t| (t.table_offset, t.layered)),
+        Some((Some(0x20), true))
+    );
+    assert_eq!(
+        storage.first().map(|t| (t.table_offset, t.layered)),
+        Some((Some(0), true))
+    );
+}
+
 /// Threads a partial last group runs along x.
 const RUN: u32 = 3;
 
