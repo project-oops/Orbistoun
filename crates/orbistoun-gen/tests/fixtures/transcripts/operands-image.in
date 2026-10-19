@@ -130,3 +130,8 @@ image_sample_d v[70:73], v[100:105], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IM
 image_sample_d v220, v[30:35], s[40:47], s[20:23] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_sample_d v[12:13], v[240:245], s[92:99], s[76:79] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_sample_d v[16:18], v[44:49], s[60:67], s[96:99] dmask:0x7 dim:SQ_RSRC_IMG_2D
+
+// ---- image_gather4_lz: the scene's level-zero gather (PPSA04263) -----------------------------
+image_gather4_lz v[4:7], v[2:3], s[4:11], s[12:15] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_gather4_lz v[100:103], v[200:201], s[80:87], s[92:95] dmask:0x2 dim:SQ_RSRC_IMG_2D
+image_gather4_lz v[252:255], v[10:11], s[40:47], s[20:23] dmask:0x8 dim:SQ_RSRC_IMG_2D

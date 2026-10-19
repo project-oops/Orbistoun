@@ -183,6 +183,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "the unsigned minimum, maximum and multiply-add and the three-word read, which no compiled fixture produces",
     ),
     (
+        "vector-scene",
+        "the signed minimum and maximum, the rounding and half conversions, the class compare, the relative move, the wide local writes, the local and buffer atomics, the level-zero gather and the inverted mask save, which no compiled fixture produces",
+    ),
+    (
         "vector-or3",
         "the three-source or and the float not-less-than compare, which no compiled fixture produces",
     ),

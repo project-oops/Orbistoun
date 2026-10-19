@@ -624,3 +624,35 @@ v_sub_nc_u32_e32 v200, v4, v9
 v_sub_nc_u32_e32 v255, -1, v130
 v_sub_nc_u32_e32 v9, 4, v77
 v_sub_nc_u32_e32 v130, v88, v255
+
+// ---- the scene's signed min/max, rounding conversions, half conversion, class compare and
+// relative move (PPSA04263) -------------------------------------------------------------------
+v_min_i32_e32 v3, v4, v5
+v_min_i32_e32 v200, s5, v9
+v_min_i32_e32 v255, -1, v130
+v_min_i32_e32 v9, 4, v77
+v_min_i32_e32 v130, v88, v255
+v_max_i32_e32 v3, v4, v5
+v_max_i32_e32 v200, s5, v9
+v_max_i32_e32 v255, -1, v130
+v_max_i32_e32 v9, 4, v77
+v_max_i32_e32 v130, v88, v255
+v_cvt_rpi_i32_f32_e32 v3, v4
+v_cvt_rpi_i32_f32_e32 v200, s5
+v_cvt_rpi_i32_f32_e32 v255, -1.0
+v_cvt_rpi_i32_f32_e32 v9, v255
+v_cvt_flr_i32_f32_e32 v3, v4
+v_cvt_flr_i32_f32_e32 v200, s5
+v_cvt_flr_i32_f32_e32 v255, 0.5
+v_cvt_flr_i32_f32_e32 v9, v255
+v_cvt_f16_f32_e32 v3, v4
+v_cvt_f16_f32_e32 v200, s5
+v_cvt_f16_f32_e32 v255, 1.0
+v_cvt_f16_f32_e32 v9, v255
+v_movrels_b32_e32 v3, v4
+v_movrels_b32_e32 v200, v9
+v_movrels_b32_e32 v255, v130
+v_cmp_class_f32_e32 vcc, v4, v5
+v_cmp_class_f32_e32 vcc, s5, v9
+v_cmp_class_f32_e32 vcc, -1, v130
+v_cmp_class_f32_e32 vcc, v255, v255

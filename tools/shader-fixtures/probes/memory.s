@@ -314,3 +314,25 @@ buffer_store_dwordx4 v[160:163], v250, s[36:39], s51 idxen
 buffer_store_dwordx4 v[80:83], v23, s[24:27], s61 offen
 buffer_store_dwordx4 v[212:215], v[85:86], s[52:55], s71 idxen offen
 buffer_store_dwordx4 v[120:123], v130, s[32:35], 0 offen
+
+// ---- the scene's local writes and atomics, and the buffer atomic add (PPSA04263) -------------
+ds_write_b96 v1, v[2:4] offset:3
+ds_write_b96 v77, v[100:102] offset:200
+ds_write_b96 v200, v[9:11] offset:65535
+ds_write_b128 v1, v[4:7] offset:2
+ds_write_b128 v77, v[100:103] offset:300
+ds_write_b128 v254, v[8:11] offset:65535
+ds_min_u32 v1, v2 offset:3
+ds_min_u32 v77, v130 offset:200
+ds_min_u32 v200, v9 offset:65535
+ds_max_u32 v1, v2 offset:3
+ds_max_u32 v77, v130 offset:200
+ds_max_u32 v200, v9 offset:65535
+ds_add_rtn_u32 v1, v2, v3 offset:4
+ds_add_rtn_u32 v130, v77, v200 offset:65535
+ds_add_rtn_u32 v9, v254, v100 offset:16
+buffer_atomic_add v4, v51, s[12:15], s6 offen
+buffer_atomic_add v45, v5, s[20:23], s16 offen
+buffer_atomic_add v24, v63, s[28:31], s26 offen
+buffer_atomic_add v58, v11, s[36:39], s36 offen
+buffer_atomic_add v200, v130, s[96:99], s46 offen

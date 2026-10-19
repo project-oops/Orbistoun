@@ -19,6 +19,16 @@ target = "gfx1013"
 
 [[mnemonic]]
 family = "DS"
+opcode = 7
+name = "ds_min_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 8
+name = "ds_max_u32"
+
+[[mnemonic]]
+family = "DS"
 opcode = 10
 name = "ds_or_b32"
 
@@ -39,6 +49,11 @@ name = "ds_write_b8"
 
 [[mnemonic]]
 family = "DS"
+opcode = 32
+name = "ds_add_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
 opcode = 55
 name = "ds_read2_b32"
 
@@ -46,6 +61,16 @@ name = "ds_read2_b32"
 family = "DS"
 opcode = 58
 name = "ds_read_u8"
+
+[[mnemonic]]
+family = "DS"
+opcode = 222
+name = "ds_write_b96"
+
+[[mnemonic]]
+family = "DS"
+opcode = 223
+name = "ds_write_b128"
 
 [[mnemonic]]
 family = "DS"
@@ -131,6 +156,11 @@ name = "image_sample_l"
 family = "MIMG"
 opcode = 39
 name = "image_sample_lz"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 71
+name = "image_gather4_lz"
 
 [[mnemonic]]
 family = "MTBUF"
@@ -253,6 +283,11 @@ opcode = 31
 name = "buffer_store_dwordx3"
 
 [[mnemonic]]
+family = "MUBUF"
+opcode = 50
+name = "buffer_atomic_add"
+
+[[mnemonic]]
 family = "SMEM"
 opcode = 0
 name = "s_load_dword"
@@ -331,6 +366,11 @@ name = "s_and_saveexec_b64"
 family = "SOP1"
 opcode = 45
 name = "s_quadmask_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 55
+name = "s_andn1_saveexec_b64"
 
 [[mnemonic]]
 family = "SOP1"
@@ -674,6 +714,21 @@ name = "v_cvt_i32_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 10
+name = "v_cvt_f16_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 12
+name = "v_cvt_rpi_i32_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 13
+name = "v_cvt_flr_i32_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 17
 name = "v_cvt_f32_ubyte0_e32"
 
@@ -758,6 +813,11 @@ opcode = 56
 name = "v_bfrev_b32_e32"
 
 [[mnemonic]]
+family = "VOP1"
+opcode = 67
+name = "v_movrels_b32_e32"
+
+[[mnemonic]]
 family = "VOP2"
 opcode = 1
 name = "v_cndmask_b32_e32"
@@ -796,6 +856,16 @@ name = "v_min_f32_e32"
 family = "VOP2"
 opcode = 16
 name = "v_max_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 17
+name = "v_min_i32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 18
+name = "v_max_i32_e32"
 
 [[mnemonic]]
 family = "VOP2"
@@ -1351,6 +1421,11 @@ name = "v_cmp_ne_i32_e32"
 family = "VOPC"
 opcode = 134
 name = "v_cmp_ge_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 136
+name = "v_cmp_class_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
