@@ -42,6 +42,22 @@ pub enum IndexBuffer {
         /// The first vertex id.
         first: u32,
     },
+    /// A chunk of a fan, as a list's thirty-two-bit ids (D898): triangles from the fan's
+    /// `start`-th on, each the fan's first index and the two after the triangle's own, in the order
+    /// `Assembly::Fan` takes them. The indices are the guest's at `address`, `bytes` each, or count
+    /// up from `first` for a fan with none.
+    Fan {
+        /// The guest's first index's address, for an indexed fan.
+        address: Option<u64>,
+        /// Bytes one guest index takes: two or four.
+        bytes: u32,
+        /// The first vertex id a fan with no indices counts from.
+        first: u32,
+        /// The fan's triangle the chunk starts at.
+        start: u32,
+        /// Whether the last vertex is the provoking one.
+        provoking_last: bool,
+    },
 }
 
 /// A colour attachment's output state past the first one's

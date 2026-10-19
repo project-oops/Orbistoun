@@ -613,6 +613,9 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
                 Assembly::LineList => 0x4c4c_0000_0000_0000,
                 Assembly::LineStrip => 0x4c53_0000_0000_0000,
                 Assembly::Points => 0x5054_0000_0000_0000,
+                Assembly::Fan { provoking_last } => {
+                    0x4641_0000_0000_0000 ^ u64::from(provoking_last)
+                }
                 Assembly::Strip { provoking_last } => {
                     0x5354_0000_0000_0000 ^ u64::from(provoking_last)
                 }
@@ -1445,6 +1448,9 @@ const DI_PT_LINELIST: u32 = 2;
 const DI_PT_LINESTRIP: u32 = 3;
 /// `DI_PT_TRISTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): triangles sharing vertices in a strip.
 const DI_PT_TRISTRIP: u32 = 6;
+/// `DI_PT_TRIFAN` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json:692`): triangles about the first vertex.
+const DI_PT_TRIFAN: u32 = 5;
+
 /// `DI_PT_QUADSTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx10.json:811`): quads sharing an edge in a strip,
 /// seeded as the triangle strip over the same vertices (D797).
 const DI_PT_QUADSTRIP: u32 = 20;
@@ -1550,6 +1556,15 @@ fn draw_geometry(
             },
             vertices.saturating_sub(2),
         ),
+        // Each triangle takes the fan's first vertex; a fan one subgroup does not hold is drawn in
+        // chunks of a list (D898).
+        Some(DI_PT_TRIFAN) => (
+            Assembly::Fan {
+                provoking_last: latest(PA_SU_SC_MODE_CNTL)
+                    .is_some_and(|value| value & PROVOKING_VTX_LAST != 0),
+            },
+            vertices.saturating_sub(2),
+        ),
         // Its whole quads, two triangles each, as Mesa splits them (D798).
         Some(DI_PT_QUADLIST) => (
             Assembly::Quads {
@@ -1613,7 +1628,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
         return Vec::new();
     }
     let per_chunk = match whole.assembly {
-        Assembly::List => lanes / 3,
+        // A fan's chunks are lists of its triangles written out (D898).
+        Assembly::List | Assembly::Fan { .. } => lanes / 3,
         Assembly::Strip { .. } => lanes.saturating_sub(2) & !1,
         Assembly::LineList => lanes / 2,
         Assembly::LineStrip => lanes.saturating_sub(1),
@@ -1623,6 +1639,9 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
     };
     if per_chunk == 0 {
         return Vec::new();
+    }
+    if let Assembly::Fan { provoking_last } = whole.assembly {
+        return fan_chunks(whole, index_address, (per_chunk, provoking_last));
     }
     let width = whole
         .indices
@@ -1635,7 +1654,10 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                 Assembly::List => start * 3,
                 // A line's two vertices, and a quad's four for its two triangles.
                 Assembly::LineList | Assembly::Quads { .. } => start * 2,
-                Assembly::Strip { .. } | Assembly::LineStrip | Assembly::Points => start,
+                Assembly::Strip { .. }
+                | Assembly::Fan { .. }
+                | Assembly::LineStrip
+                | Assembly::Points => start,
             };
             let index_buffer = match (whole.indices, index_address) {
                 (Some(width), Some(address)) => IndexBuffer::Guest {
@@ -1666,6 +1688,45 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                     streamout: whole.streamout,
                 },
                 index_buffer,
+            }
+        })
+        .collect()
+}
+
+/// A fan's chunks (D898): `per_chunk` triangles each, a list of thirty-two-bit ids the host writes
+/// out from the fan's indices - its own, the draw's offset added as the module adds it, or counting
+/// from its first vertex where it has none.
+fn fan_chunks(
+    whole: GeometryInputs,
+    index_address: Option<u64>,
+    (per_chunk, provoking_last): (u32, bool),
+) -> Vec<ChunkPlan> {
+    let (address, bytes, first, first_vertex) = match (whole.indices, index_address) {
+        (Some(width), Some(address)) => (Some(address), width.bytes(), 0, whole.first_vertex),
+        _ => (None, 4, whole.first_vertex, 0),
+    };
+    (0..whole.primitives)
+        .step_by(per_chunk as usize)
+        .map(|start| {
+            let primitives = per_chunk.min(whole.primitives - start);
+            ChunkPlan {
+                geometry: GeometryInputs {
+                    first_vertex,
+                    vertices: primitives * 3,
+                    primitives,
+                    assembly: Assembly::List,
+                    indices: Some(orbistoun_translate::wavefront::IndexWidth::Bits32),
+                    passthrough: whole.passthrough,
+                    legacy: whole.legacy,
+                    streamout: whole.streamout,
+                },
+                index_buffer: IndexBuffer::Fan {
+                    address,
+                    bytes,
+                    first,
+                    start,
+                    provoking_last,
+                },
             }
         })
         .collect()
@@ -5926,7 +5987,7 @@ fn as_draw_chunks(chunks: &[Chunk], instances: u32) -> Option<RenderCommand> {
         .iter()
         .map(|chunk| match chunk.index_buffer {
             IndexBuffer::Counting { first } => Some(first),
-            IndexBuffer::Guest { .. } => None,
+            IndexBuffer::Guest { .. } | IndexBuffer::Fan { .. } => None,
         })
         .collect::<Option<_>>()?;
     let (first, second, last) = (chunks.first()?, chunks.get(1)?, chunks.last()?);
@@ -5986,7 +6047,8 @@ fn push_chunks(
                 instances,
                 first_vertex: first,
             },
-            IndexBuffer::Guest { .. } => RenderCommand::DrawIndexed {
+            // A fan's chunk reads the list of ids the host writes out for it (D898).
+            IndexBuffer::Guest { .. } | IndexBuffer::Fan { .. } => RenderCommand::DrawIndexed {
                 indices: chunk.indices,
                 instances,
                 first_index: 0,
@@ -13135,6 +13197,38 @@ mod tests {
         assert_eq!(geometry(None, Some(0x1112)), (false, false));
     }
 
+    /// A fan's geometry is seeded whatever its length (D898): six vertices are four triangles, its
+    /// provoking convention from `PA_SU_SC_MODE_CNTL`, and a fan longer than a subgroup is drawn in
+    /// chunks.
+    #[test]
+    fn a_fan_s_geometry_is_seeded_whatever_its_length() {
+        use super::{VGT_PRIMITIVE_TYPE, draw_geometry};
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = |vertices, instances| DrawCall {
+            packet_offset: 0,
+            instances,
+            kind: DrawKind::Auto { vertices },
+        };
+        let fan = |register| match register {
+            VGT_PRIMITIVE_TYPE => Some(super::DI_PT_TRIFAN),
+            super::PA_SU_SC_MODE_CNTL => Some(super::PROVOKING_VTX_LAST),
+            _ => None,
+        };
+        assert_eq!(
+            draw_geometry(&draw(6, 1), fan).map(|g| (g.primitives, g.assembly)),
+            Ok((
+                4,
+                super::Assembly::Fan {
+                    provoking_last: true
+                }
+            ))
+        );
+        assert_eq!(
+            draw_geometry(&draw(40, 1), fan).map(|g| g.primitives),
+            Ok(38)
+        );
+    }
+
     #[test]
     fn a_draw_s_geometry_is_seeded_only_for_one_instance_of_triangles() {
         use super::{
@@ -13192,8 +13286,10 @@ mod tests {
             draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0)),
             draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 0))
         );
-        let fan = draw_geometry(&draw(3, 1), registers(5, 0, 0));
-        assert!(fan.is_err(), "{fan:?}");
+        // A list of triangles with adjacency, `DI_PT_TRILIST_ADJ` (12, `gfx103.json:699`), is not
+        // seeded.
+        let adjacent = draw_geometry(&draw(6, 1), registers(12, 0, 0));
+        assert!(adjacent.is_err(), "{adjacent:?}");
         // Larger than a wave is not refused: it is drawn in chunks (D741).
         assert!(draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0)).is_ok());
         // An indexed draw takes its index size from `VGT_INDEX_TYPE` (D740): sixteen and
@@ -13264,6 +13360,87 @@ mod tests {
                 Ok((3, assembly))
             );
         }
+    }
+
+    /// A fan one wave does not hold is split into chunks of a triangle list (D898): every triangle
+    /// takes the fan's first vertex, which a run of the draw's indices holds only in the first
+    /// chunk, so each chunk's ids are its triangles written out from where its first one starts. An
+    /// indexed fan's are its own indices, the draw's offset added as the module adds it; a fan
+    /// with no indices counts them from its first vertex.
+    #[test]
+    fn a_fan_larger_than_a_wave_is_split_into_listed_chunks() {
+        use super::{Assembly, GeometryInputs, IndexBuffer, chunk_plans};
+        use orbistoun_translate::wavefront::IndexWidth;
+        let fan = Assembly::Fan {
+            provoking_last: true,
+        };
+        let whole = |indices| GeometryInputs {
+            first_vertex: 5,
+            vertices: 66,
+            primitives: 64,
+            assembly: fan,
+            indices,
+            passthrough: false,
+            legacy: false,
+            streamout: false,
+        };
+        let listed = |address, bytes, first, start| IndexBuffer::Fan {
+            address,
+            bytes,
+            first,
+            start,
+            provoking_last: true,
+        };
+        let summary = |plans: Vec<super::ChunkPlan>| {
+            plans
+                .iter()
+                .map(|plan| {
+                    let g = plan.geometry;
+                    (
+                        (
+                            g.vertices,
+                            g.primitives,
+                            g.assembly,
+                            g.indices,
+                            g.first_vertex,
+                        ),
+                        plan.index_buffer,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let list = |vertices, primitives, first_vertex| {
+            (
+                vertices,
+                primitives,
+                Assembly::List,
+                Some(IndexWidth::Bits32),
+                first_vertex,
+            )
+        };
+        // 64 triangles at 64 lanes: 21, 21, 21, then 1.
+        assert_eq!(
+            summary(chunk_plans(
+                whole(Some(IndexWidth::Bits16)),
+                Some(0x1000),
+                64
+            )),
+            [
+                (list(63, 21, 5), listed(Some(0x1000), 2, 0, 0)),
+                (list(63, 21, 5), listed(Some(0x1000), 2, 0, 21)),
+                (list(63, 21, 5), listed(Some(0x1000), 2, 0, 42)),
+                (list(3, 1, 5), listed(Some(0x1000), 2, 0, 63)),
+            ]
+        );
+        assert_eq!(
+            summary(chunk_plans(whole(None), None, 64)),
+            [
+                (list(63, 21, 0), listed(None, 4, 5, 0)),
+                (list(63, 21, 0), listed(None, 4, 5, 21)),
+                (list(63, 21, 0), listed(None, 4, 5, 42)),
+                (list(3, 1, 0), listed(None, 4, 5, 63)),
+            ]
+        );
     }
 
     /// A draw one wave does not hold is split as the geometry engine splits it into subgroups

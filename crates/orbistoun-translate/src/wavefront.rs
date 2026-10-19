@@ -858,6 +858,13 @@ pub enum Assembly {
     /// register as a triangle's first is; the others are not read (`ac_nir_lower_ngg.c:130`, one
     /// vertex per primitive).
     Points,
+    /// A fan: primitive `i` is the first vertex and vertices `i + 1`, `i + 2`, in the rotation that
+    /// puts the provoking vertex where the draw's convention looks - `(0, i + 1, i + 2)` under the
+    /// last-vertex convention, `(i + 1, i + 2, 0)` under the first (`u_indices_gen.py:268-271`).
+    Fan {
+        /// Whether the last vertex is the provoking one.
+        provoking_last: bool,
+    },
 }
 
 impl Assembly {
@@ -878,6 +885,12 @@ impl Assembly {
             Self::LineList => [2 * i, 2 * i + 1, 0],
             Self::LineStrip => [i, i + 1, 0],
             Self::Points => [i, 0, 0],
+            Self::Fan {
+                provoking_last: true,
+            } => [0, i + 1, i + 2],
+            Self::Fan {
+                provoking_last: false,
+            } => [i + 1, i + 2, 0],
             Self::Quads { provoking_last } => {
                 let base = i / 2 * 4;
                 match (i % 2 == 0, provoking_last) {
@@ -895,8 +908,8 @@ impl Assembly {
     pub const fn vertices_for(self, primitives: u32) -> u32 {
         match self {
             Self::List => primitives * 3,
-            Self::Strip { .. } | Self::LineStrip if primitives == 0 => 0,
-            Self::Strip { .. } => primitives + 2,
+            Self::Strip { .. } | Self::Fan { .. } | Self::LineStrip if primitives == 0 => 0,
+            Self::Strip { .. } | Self::Fan { .. } => primitives + 2,
             Self::LineList => primitives * 2,
             Self::LineStrip => primitives + 1,
             Self::Quads { .. } => primitives.div_ceil(2) * 4,
@@ -912,7 +925,7 @@ impl Assembly {
         match self {
             Self::List => vertices / 3,
             Self::LineList => vertices / 2,
-            Self::Strip { .. } => vertices.saturating_sub(2),
+            Self::Strip { .. } | Self::Fan { .. } => vertices.saturating_sub(2),
             Self::LineStrip => vertices.saturating_sub(1),
             Self::Quads { .. } => vertices / 4 * 2,
             Self::Points => vertices,
@@ -3484,6 +3497,13 @@ impl<'a> Wavefront<'a> {
             }
             Assembly::LineStrip => [at, next, zero],
             Assembly::Points => [at, zero, zero],
+            // The fan's first vertex and the two after the primitive's own, as `vertices_of`.
+            Assembly::Fan {
+                provoking_last: true,
+            } => [zero, next, after],
+            Assembly::Fan {
+                provoking_last: false,
+            } => [next, after, zero],
             // A quad's two triangles, as `vertices_of` splits them (D798).
             Assembly::Quads { provoking_last } => {
                 let quad = self.binary(op::SHIFT_RIGHT_LOGICAL, at, one);
@@ -3615,7 +3635,7 @@ impl<'a> Wavefront<'a> {
                 let two = self.constant(2);
                 self.binary(op::UDIV, vertices, two)
             }
-            Assembly::Strip { .. } => saturating_less(self, 2),
+            Assembly::Strip { .. } | Assembly::Fan { .. } => saturating_less(self, 2),
             Assembly::LineStrip => saturating_less(self, 1),
             Assembly::Points => vertices,
             // Whole quads, two triangles each.
@@ -7794,6 +7814,28 @@ mod assembly_tests {
         assert_eq!(first.vertices_of(1), [0, 2, 3]);
         assert_eq!(last.vertices_of(2), [4, 5, 7], "the second quad");
         assert_eq!(first.vertices_for(6), 12, "three quads");
+    }
+
+    /// A fan's triangles each take its first vertex and the next two after their own, in the
+    /// rotation that puts the provoking vertex where the convention looks, as Mesa's index
+    /// generation orders them (`u_indices_gen.py:268-271`): `(0, i + 1, i + 2)` under the
+    /// last-vertex convention, `(i + 1, i + 2, 0)` under the first.
+    #[test]
+    fn a_fan_s_triangles_share_its_first_vertex() {
+        use super::Assembly;
+        let last = Assembly::Fan {
+            provoking_last: true,
+        };
+        let first = Assembly::Fan {
+            provoking_last: false,
+        };
+        assert_eq!(last.vertices_of(0), [0, 1, 2]);
+        assert_eq!(last.vertices_of(3), [0, 4, 5]);
+        assert_eq!(first.vertices_of(3), [4, 5, 0]);
+        assert_eq!(last.vertices_for(4), 6);
+        assert_eq!(last.vertices_for(0), 0);
+        assert_eq!(first.primitives_from(6), 4);
+        assert_eq!(first.primitives_from(2), 0);
     }
 
     /// A strip's triangles take overlapping vertices, each odd one reversed in the rotation that

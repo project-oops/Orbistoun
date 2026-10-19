@@ -519,14 +519,20 @@ pub struct TableSpan {
 const TABLE_ENTRIES_MOST: u64 = 1 << 16;
 
 /// The buffer `words` describe read as a table of buffer descriptors ([`TableSpan`]), its words
-/// through `read`; `None` for a structured buffer, one asking for addressing not modelled, or one
-/// whose entries cannot all be read.
+/// through `read`: a raw buffer's sixteen-byte entries, or a structured one's records, each at least
+/// a descriptor. `None` for a record smaller than one, addressing not modelled, or entries that
+/// cannot all be read.
 pub fn table_span(words: [u32; 4], read: &mut dyn FnMut(u64) -> Option<u32>) -> Option<TableSpan> {
     let table = decode_buffer_descriptor(words);
-    if table.unsupported || table.stride != 0 {
+    let (stride, entries) = match table.stride {
+        0 => (16, table.byte_len() / 16),
+        stride if stride >= 16 => (u64::from(stride), u64::from(table.records)),
+        _ => return None,
+    };
+    if table.unsupported {
         return None;
     }
-    let entries = (table.byte_len() / 16).min(TABLE_ENTRIES_MOST);
+    let entries = entries.min(TABLE_ENTRIES_MOST);
     let mut span = TableSpan {
         entries,
         named: 0,
@@ -534,7 +540,7 @@ pub fn table_span(words: [u32; 4], read: &mut dyn FnMut(u64) -> Option<u32>) -> 
         end: 0,
     };
     for entry in 0..entries {
-        let at = table.base + entry * 16;
+        let at = table.base + entry * stride;
         let mut entry_words = [0u32; 4];
         for (step, word) in (0u64..).zip(entry_words.iter_mut()) {
             *word = read(at + step * 4)?;
@@ -1331,23 +1337,74 @@ fn resolve_range_now(
     Ok((address, length))
 }
 
-/// The vertex ids a chunk of a non-indexed draw reads in place of indices (D741): `count`
-/// thirty-two-bit ids counting up from its first; empty for anything else.
-fn counting_indices(indices: Option<Result<(IndexBuffer, u32), &'static str>>) -> DrawBuffer {
+/// The ids a fan's chunk reads as a list (D898): `primitives` triangles from the fan's `start`-th,
+/// each the fan's first index and the two after the triangle's own, rotated as `Assembly::Fan`
+/// rotates them; its `k`-th index through `index`. `None` where one cannot be read.
+fn fan_ids(
+    index: impl Fn(u32) -> Option<u32>,
+    start: u32,
+    primitives: u32,
+    provoking_last: bool,
+) -> Option<Vec<u32>> {
+    let pivot = index(0)?;
+    let mut ids = Vec::with_capacity(primitives as usize * 3);
+    for triangle in start..start + primitives {
+        let (next, after) = (index(triangle + 1)?, index(triangle + 2)?);
+        ids.extend(if provoking_last {
+            [pivot, next, after]
+        } else {
+            [next, after, pivot]
+        });
+    }
+    Some(ids)
+}
+
+/// The vertex ids a chunk reads in place of the draw's indices: a non-indexed draw's `count`
+/// thirty-two-bit ids counting up from its first (D741), or a fan's triangles written out (D898);
+/// empty for anything else.
+fn chunk_indices(
+    indices: Option<Result<(IndexBuffer, u32), &'static str>>,
+    memory: &impl GuestMemory,
+) -> Result<DrawBuffer, Refusal> {
     let ids: Vec<u32> = match indices {
         Some(Ok((IndexBuffer::Counting { first }, count))) => {
             (0..count).map(|id| first.wrapping_add(id)).collect()
+        }
+        Some(Ok((
+            IndexBuffer::Fan {
+                address,
+                bytes,
+                first,
+                start,
+                provoking_last,
+            },
+            count,
+        ))) => {
+            let index = |at: u32| match address {
+                Some(address) => {
+                    let place = address + u64::from(at) * u64::from(bytes);
+                    let read = memory.read(place, bytes as usize)?;
+                    Some(match *read {
+                        [low, high] => u32::from(u16::from_le_bytes([low, high])),
+                        [a, b, c, d] => u32::from_le_bytes([a, b, c, d]),
+                        _ => return None,
+                    })
+                }
+                None => Some(first.wrapping_add(at)),
+            };
+            fan_ids(index, start, count / 3, provoking_last)
+                .ok_or("a fan whose indices are not readable (D898)")?
         }
         _ => Vec::new(),
     };
     let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
     let mut hasher = crate::ContentHasher::new(ids.len());
     hasher.bytes(&bytes);
-    DrawBuffer {
+    Ok(DrawBuffer {
         hash: hasher.finish(),
         bytes: bytes.into(),
         base: 0,
-    }
+    })
 }
 
 /// The translated primitive shaders that read their vertex ids from the draw's index buffer (D740),
@@ -1459,13 +1516,13 @@ pub fn bind_draw_buffers(
                                     IndexBuffer::Guest { address, bytes } => {
                                         Some((address, u64::from(count) * u64::from(bytes)))
                                     }
-                                    IndexBuffer::Counting { .. } => None,
+                                    IndexBuffer::Counting { .. } | IndexBuffer::Fan { .. } => None,
                                 })
                         }));
                     let resolved: Result<Vec<DrawBuffer>, Refusal> = ranges
                         .map(|range| {
                             let Some(range) = range? else {
-                                return Ok(counting_indices(indices));
+                                return chunk_indices(indices, memory);
                             };
                             read.entry(range)
                                 .or_insert_with(|| {
@@ -1587,11 +1644,30 @@ mod tests {
     use super::descriptor_extent;
     use orbistoun_translate::draw_buffers::DescriptorReads;
 
+    /// A chunk of a fan reads its triangles as a list (D898): from its first triangle on, each the
+    /// fan's first index and the two after the triangle's own, rotated for the provoking
+    /// convention as `Assembly::Fan` orders them.
+    #[test]
+    fn a_fan_chunk_s_ids_are_its_triangles_written_out() {
+        let indices = [10_u32, 11, 12, 13, 14];
+        let index = |at: u32| indices.get(at as usize).copied();
+        assert_eq!(
+            super::fan_ids(index, 1, 2, true),
+            Some(vec![10, 12, 13, 10, 13, 14])
+        );
+        assert_eq!(
+            super::fan_ids(index, 1, 2, false),
+            Some(vec![12, 13, 10, 13, 14, 10])
+        );
+        assert_eq!(super::fan_ids(index, 2, 2, true), None, "past the indices");
+    }
+
     /// A raw buffer read at an offset the host cannot know is measured as a table of descriptors:
     /// how many entries it holds, how many name a buffer, and the span those buffers cover - what
     /// says whether one range could hold every buffer an access through an entry reaches.
     /// Grand Theft Auto V's compute program at `0x74005b87ce00` picks its store buffer from such a
-    /// table by a lane's index. A structured buffer is not a table.
+    /// table by a lane's index. A structured buffer's records are its entries, where each holds a
+    /// descriptor.
     #[test]
     fn a_table_s_entries_span_is_measured() {
         let raw = |base: u32, bytes: u32| [base, 0, bytes, 0];
@@ -1614,8 +1690,13 @@ mod tests {
         );
         assert_eq!(
             super::table_span([0x1000, 16 << 16, 3, 0], &mut read),
+            super::table_span(raw(0x1000, 48), &mut read),
+            "a structured table of three sixteen-byte records"
+        );
+        assert_eq!(
+            super::table_span([0x1000, 8 << 16, 6, 0], &mut read),
             None,
-            "a structured buffer"
+            "a record smaller than a descriptor"
         );
     }
 
