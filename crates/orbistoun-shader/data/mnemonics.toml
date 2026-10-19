@@ -48,6 +48,11 @@ opcode = 58
 name = "ds_read_u8"
 
 [[mnemonic]]
+family = "DS"
+opcode = 254
+name = "ds_read_b96"
+
+[[mnemonic]]
 family = "EXP"
 opcode = 0
 name = "exp"
@@ -794,6 +799,16 @@ name = "v_max_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 19
+name = "v_min_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 20
+name = "v_max_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 22
 name = "v_lshrrev_b32_e32"
 
@@ -986,6 +1001,11 @@ name = "v_mad_f32"
 family = "VOP3"
 opcode = 322
 name = "v_mad_i32_i24"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 323
+name = "v_mad_u32_u24"
 
 [[mnemonic]]
 family = "VOP3"

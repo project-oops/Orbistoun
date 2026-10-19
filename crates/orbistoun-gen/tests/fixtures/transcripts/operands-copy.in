@@ -185,6 +185,16 @@ v_mul_u32_u24_e32 v200, s5, v9
 v_mul_u32_u24_e32 v255, -1, v130
 v_mul_u32_u24_e32 v9, 4, v77
 v_mul_u32_u24_e32 v130, v88, v255
+v_min_u32_e32 v3, v4, v5
+v_min_u32_e32 v200, s5, v9
+v_min_u32_e32 v255, -1, v130
+v_min_u32_e32 v9, 4, v77
+v_min_u32_e32 v130, v88, v255
+v_max_u32_e32 v3, v4, v5
+v_max_u32_e32 v200, s5, v9
+v_max_u32_e32 v255, -1, v130
+v_max_u32_e32 v9, 4, v77
+v_max_u32_e32 v130, v88, v255
 
 // ---- v_cmp_eq/le/ge_f32_e64: VOP3-encoded compares into a lane mask, at the extremes ---------
 v_cmp_eq_f32_e64 s[2:3], v4, v5

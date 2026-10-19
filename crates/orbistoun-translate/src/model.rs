@@ -49,6 +49,7 @@ pub const SUPPORTED: &[&str] = &[
     "ds_write_b32",
     "ds_write2_b32",
     "ds_read2_b32",
+    "ds_read_b96",
     "ds_write_b8",
     "ds_read_u8",
     "ds_or_b32",
@@ -283,6 +284,9 @@ pub const SUPPORTED: &[&str] = &[
     "v_fmaak_f32",
     "v_fmamk_f32",
     "v_mul_u32_u24_e32",
+    "v_min_u32_e32",
+    "v_max_u32_e32",
+    "v_mad_u32_u24",
     "v_mad_u32_u16",
     "v_mad_i32_i24",
     "v_mul_lo_u32",
@@ -3020,8 +3024,10 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_lshl_or_b32" => shift_or(model, instruction),
         _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
-        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_or3_b32" | "v_mul_lo_u32"
-        | "v_mul_hi_u32" | "v_msad_u8" | "v_bfe_u32" => integer_long_form(model, instruction, name),
+        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_mad_u32_u24" | "v_and_or_b32" | "v_or3_b32"
+        | "v_mul_lo_u32" | "v_mul_hi_u32" | "v_msad_u8" | "v_bfe_u32" => {
+            integer_long_form(model, instruction, name)
+        }
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
@@ -3099,7 +3105,9 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_xor_b32_e32"
         | "v_and_b32_e32"
         | "v_mac_f32_e32"
-        | "v_mul_u32_u24_e32" => short_form_arithmetic(model, instruction, name),
+        | "v_mul_u32_u24_e32"
+        | "v_min_u32_e32"
+        | "v_max_u32_e32" => short_form_arithmetic(model, instruction, name),
 
         // Float minimum and maximum, emitted as `GLSL.std.450` FMax/FMin because the core opcode
         // set has none.
@@ -3233,18 +3241,14 @@ fn memory_instruction<M: Model + ?Sized>(
                 ),
             })
         }
-        "ds_write_b32" | "ds_read_b32" => {
-            local_share(model, instruction, name)?;
-            model.after_local_access();
-            Ok(())
-        }
-        "ds_write2_b32" | "ds_read2_b32" => {
-            local_share_pair(model, instruction, name)?;
-            model.after_local_access();
-            Ok(())
-        }
-        "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => {
-            local_share_merge(model, instruction, name)?;
+        "ds_write_b32" | "ds_read_b32" | "ds_read_b96" | "ds_write2_b32" | "ds_read2_b32"
+        | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => {
+            match name {
+                "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
+                "ds_read_b96" => local_share_words(model, instruction, 3),
+                "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
+                _ => local_share_merge(model, instruction, name),
+            }?;
             model.after_local_access();
             Ok(())
         }
@@ -3379,6 +3383,16 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             "v_mac_f32_e32" => {
                 let previous = model.read_source(instruction, destination, lane)?;
                 legacy_multiply_add(model, lhs, rhs, previous)
+            }
+            // The unsigned minimum and maximum.
+            "v_min_u32_e32" | "v_max_u32_e32" => {
+                let less = model.compare(op::ULESS_THAN, lhs, rhs);
+                let (smaller, larger) = (lhs, rhs);
+                if name == "v_min_u32_e32" {
+                    model.select(less, smaller, larger)
+                } else {
+                    model.select(less, larger, smaller)
+                }
             }
             // The low 32 bits of the product of each source's low 24 bits.
             "v_mul_u32_u24_e32" => {
@@ -5901,6 +5915,41 @@ fn local_share<M: Model + ?Sized>(
 
 /// `ds_read_b32`.
 const DS_READ: &str = "ds_read_b32";
+
+/// `ds_read_b96 d, address offset`: `words` consecutive words from the address plus the byte
+/// offset into `d` and the registers after it (AMD's published RDNA instruction set,
+/// `DS_READ_B96`). The local share only: a global-share form is refused before it gets here.
+fn local_share_words<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    words: u32,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let (destination, address, offset) = three_operands(instruction)?;
+    let (Operand::Vector(register), Operand::Immediate(offset)) = (destination, offset) else {
+        return Err(refuse(
+            "a multi-word local-data-share read did not decode to a register and a byte offset",
+        ));
+    };
+    let offset =
+        u32::try_from(*offset).map_err(|_| refuse("a negative local-data-share offset"))?;
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let base = model.read_source(instruction, address, lane)?;
+        for word in 0..words {
+            let byte_offset = model.constant(offset + 4 * word);
+            let byte_address = model.add(base, byte_offset);
+            let index = model.local_word_index(byte_address);
+            let value = model.read_local(index)?;
+            model.write_vector_lane(register + word, lane, value);
+        }
+    }
+    model.count();
+    Ok(())
+}
 
 /// Whether a global-data-share word at `byte_address` lies within the share `m0` declares: for a
 /// GDS access `m0` is the share's size in bytes, as LLVM sets it from `amdgpu-gds-size` (D789). A
@@ -9131,6 +9180,14 @@ fn integer_long_form<M: Model + ?Sized>(
                 };
                 let a = half(model, a, op_sel & 1 != 0);
                 let b = half(model, b, op_sel & 2 != 0);
+                let product = model.binary(op::IMUL, a, b);
+                model.add(product, c)
+            }
+            // The low 32 bits of the product of each source's low 24 bits, plus the third.
+            "v_mad_u32_u24" => {
+                let low_24 = model.constant(0x00FF_FFFF);
+                let a = model.binary(op::BITWISE_AND, a, low_24);
+                let b = model.binary(op::BITWISE_AND, b, low_24);
                 let product = model.binary(op::IMUL, a, b);
                 model.add(product, c)
             }

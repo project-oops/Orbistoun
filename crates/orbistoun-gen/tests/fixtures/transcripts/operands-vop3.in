@@ -588,3 +588,8 @@ v_cmpx_ge_u32_e32 v255, v150
 v_cmpx_ge_u32_e32 5, v61
 v_cmpx_ge_u32_e32 s99, v222
 v_cmpx_ge_u32_e32 v130, v12
+v_mad_u32_u24 v3, v4, v5, v6
+v_mad_u32_u24 v255, v130, v12, v200
+v_mad_u32_u24 v200, s5, v9, 1
+v_mad_u32_u24 v9, -1, v77, s100
+v_mad_u32_u24 v130, v88, 4, s101

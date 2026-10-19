@@ -179,6 +179,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "the quad mask, which no compiled fixture produces",
     ),
     (
+        "vector-unsigned",
+        "the unsigned minimum, maximum and multiply-add and the three-word read, which no compiled fixture produces",
+    ),
+    (
         "vector-or3",
         "the three-source or and the float not-less-than compare, which no compiled fixture produces",
     ),

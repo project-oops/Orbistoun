@@ -63,6 +63,13 @@ samples = 5
 operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
+family = "DS"
+opcode = 254
+mnemonic = "ds_read_b96"
+samples = 5
+operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
 family = "EXP"
 opcode = 0
 mnemonic = "exp"
@@ -1107,6 +1114,20 @@ operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { wor
 
 [[opcode_operands]]
 family = "VOP2"
+opcode = 19
+mnemonic = "v_min_u32_e32"
+samples = 5
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP2"
+opcode = 20
+mnemonic = "v_max_u32_e32"
+samples = 5
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP2"
 opcode = 22
 mnemonic = "v_lshrrev_b32_e32"
 samples = 6
@@ -1396,6 +1417,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 family = "VOP3"
 opcode = 322
 mnemonic = "v_mad_i32_i24"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 323
+mnemonic = "v_mad_u32_u24"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
 

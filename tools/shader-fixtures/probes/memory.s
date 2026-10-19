@@ -211,6 +211,11 @@ ds_read_b32 v1, v2 offset:16
 ds_read_b32 v100, v200 offset:65535
 ds_read_b32 v255, v190 offset:1
 ds_read_b32 v9, v77 offset:32768
+ds_read_b96 v[0:2], v0
+ds_read_b96 v[4:6], v9 offset:16
+ds_read_b96 v[253:255], v200 offset:65535
+ds_read_b96 v[100:102], v1 offset:1
+ds_read_b96 v[30:32], v77 offset:32768
 ds_write_b32 v3, v4 offset:32
 ds_write_b32 v200, v255 offset:65535
 ds_write_b32 v190, v12 offset:1

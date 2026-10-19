@@ -7802,6 +7802,42 @@ fn the_local_share_takes_pairs_bytes_and_ors() {
     assert_eq!(vector(&registers, 6), 0xab, "byte 5 alone");
 }
 
+/// Grand Theft Auto V's scene compute program clamps indices with the unsigned minimum and
+/// maximum (VOP2 19 and 20), forms an address with the 24-bit unsigned multiply-add (VOP3 323,
+/// `v_mad_u32_u24 v0, 12, v6, 0x600`) and reads a three-word element from the local share
+/// (`ds_read_b96`, DS 254). `-1` is the largest unsigned word, so the minimum with 5 is 5 and the
+/// maximum is `-1`; the multiply-add takes only the low 24 bits of `0x0100_0005`.
+#[test]
+fn grand_theft_auto_v_clamps_unsigned_and_reads_three_words() {
+    if !device_or_skip("grand_theft_auto_v_clamps_unsigned_and_reads_three_words") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 0)];
+    program.extend(v_mov_literal(1, 0x11));
+    program.extend(v_mov_literal(2, 0x22));
+    program.extend(v_mov_literal(3, 0x33));
+    program.extend(ds("ds_write2_b32", [1, 2], [0, 1, 2, 0]));
+    program.extend(ds("ds_write_b32", [12, 0], [0, 3, 0, 0]));
+    program.extend(ds("ds_read_b96", [4, 0], [0, 0, 0, 4]));
+    program.extend(v_mov_literal(7, 0xffff_ffff));
+    program.push(v_mov_inline(1, 5));
+    program.push(vop2_vv("v_min_u32_e32", 2, 7, 1));
+    program.push(vop2_vv("v_max_u32_e32", 3, 7, 1));
+    program.extend(v_mov_literal(7, 0x0100_0005));
+    // v_mad_u32_u24 v1, v7, 3, 7: inline 3 is code 131 and 7 is 135.
+    program.extend(vop3("v_mad_u32_u24", 1, [VGPR_0 + 7, 131, 135], 0, 0));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [4, 5, 6].map(|n| vector(&registers, n)),
+        [0x11, 0x22, 0x33],
+        "three words from byte 4"
+    );
+    assert_eq!(vector(&registers, 2), 5, "the unsigned minimum");
+    assert_eq!(vector(&registers, 3), 0xffff_ffff, "the unsigned maximum");
+    assert_eq!(vector(&registers, 1), 22, "5 * 3 + 7");
+}
+
 /// radeonsi's NGG culling sums its waves' packed counts as `v_msad_u8 d, 0, packed, 0`
 /// (ac_nir.c:846): every non-zero byte of the second source, summed, since the hardware's
 /// second source is the reference that masks (aco_select_nir_alu.cpp:3303).
