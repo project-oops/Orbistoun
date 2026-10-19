@@ -227,6 +227,69 @@ fn dispatch_direct(
     Ok(())
 }
 
+/// `DISPATCH_INDIRECT`: a dispatch whose grid, three group counts, is read from memory - past the
+/// base the last `SET_BASE` before it set by the packet's offset (the graphics form, two body words),
+/// or at the address the packet holds (the compute form, three), the initiator last
+/// (`si_compute.c:763-775`, `radv_cmd_buffer.c:14752-14770`). A grid with no groups runs nothing.
+fn dispatch_indirect(
+    stream: &[u8],
+    offset: u32,
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let (at, initiator) = match *body {
+        [past, initiator] => (
+            indirect_base(stream, offset).ok_or(Stop::Malformed)? + u64::from(past),
+            initiator,
+        ),
+        [low, high, initiator] => (address(low, high), initiator),
+        _ => return Err(Stop::Malformed),
+    };
+    let read = memory.read(at, 12).ok_or(Stop::OutOfBounds(at))?;
+    let mut groups = [0u32; 3];
+    for (group, word) in groups.iter_mut().zip(read.chunks_exact(4)) {
+        *group = u32::from_le_bytes(word.try_into().map_err(|_| Stop::Malformed)?);
+    }
+    if groups.contains(&0) {
+        return Ok(());
+    }
+    let dispatch = Dispatch {
+        stream,
+        offset,
+        groups,
+        initiator,
+    };
+    if !memory.run_dispatch(&dispatch) {
+        return Err(Stop::NeedsGpu);
+    }
+    result.dispatches += 1;
+    Ok(())
+}
+
+/// The address the last `SET_BASE` before byte `before` set for the indirect arguments (base index
+/// 1), if one did.
+fn indirect_base(stream: &[u8], before: u32) -> Option<u64> {
+    packet::walk(stream)
+        .packets
+        .iter()
+        .take_while(|packet| packet.offset < before)
+        .filter(|packet| {
+            matches!(packet.kind, PacketKind::Command { opcode } if opcode == measured::SET_BASE)
+        })
+        .filter_map(|packet| {
+            let start = packet.body_offset() as usize;
+            let word = |at: usize| {
+                stream
+                    .get(start + at * 4..start + at * 4 + 4)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes)
+            };
+            (word(0)? == 1).then(|| Some(address(word(1)?, word(2)?)))?
+        })
+        .last()
+}
+
 /// `STRMOUT_BUFFER_UPDATE`: sets a streamout buffer's offset - from the packet or from a filled
 /// size in memory - or stores it, in bytes, where the end of a pass keeps it (D861).
 fn streamout_update(
@@ -604,6 +667,9 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
                     dispatch_direct(stream, offset, &body, memory, &mut result)
                 })
             }
+            measured::DISPATCH_INDIRECT => crate::perf::span(crate::perf::Span::CpDispatch, || {
+                dispatch_indirect(stream, offset, &body, memory, &mut result)
+            }),
             WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 write_data(&body, memory, &mut result)
             }),
@@ -2558,6 +2624,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An indirect dispatch reads its grid from memory: three group counts at the base the last
+    /// `SET_BASE` set plus the packet's offset (the graphics form), or at the address the packet
+    /// holds (the compute form), as radeonsi and RADV write them (`si_compute.c:763-775`,
+    /// `radv_cmd_buffer.c:14752-14770`). A grid with no groups runs nothing; one that cannot be read
+    /// stops the stream.
+    #[test]
+    fn an_indirect_dispatch_reads_its_grid_from_memory() {
+        use crate::packet::build::{
+            dispatch_indirect_args, dispatch_indirect_offset, set_base_indirect_args,
+        };
+        let grid = |memory: &mut Dispatching, at: u64, groups: [u32; 3]| {
+            let bytes: Vec<u8> = groups.iter().flat_map(|g| g.to_le_bytes()).collect();
+            assert!(memory.inner.write(at, &bytes));
+        };
+        let mut memory = Dispatching {
+            inner: Fake::default(),
+            runs: true,
+            seen: Vec::new(),
+        };
+        grid(&mut memory, 0x4008, [3, 2, 1]);
+        grid(&mut memory, 0x5000, [4, 5, 6]);
+        grid(&mut memory, 0x6000, [0, 5, 6]);
+        let mut stream = set_base_indirect_args(1, 0x4000).to_vec();
+        let graphics = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(dispatch_indirect_offset(8, 0x21));
+        let compute = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(dispatch_indirect_args(0x5000, 1));
+        stream.extend(dispatch_indirect_args(0x6000, 1));
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(
+            memory.seen,
+            vec![(graphics, [3, 2, 1], 0x61), (compute, [4, 5, 6], 0x41)]
+        );
+        assert_eq!(memory.inner.word(0x1000), 0xbeef_cafe);
+
+        let unread = dispatch_indirect_args(0xdead_0000, 1);
+        let done = execute(&bytes(&unread), &mut memory);
+        assert_eq!(
+            done.stopped,
+            Stopped::OutOfBounds {
+                offset: 0,
+                opcode: measured::DISPATCH_INDIRECT,
+                address: 0xdead_0000
+            }
+        );
     }
 
     /// The register wait a streamout flush ends with, as `ac_cmdbuf_flush_vgt_streamout` writes it

@@ -590,16 +590,56 @@ pub mod build {
         ]
     }
 
-    /// A `SET_BASE` skeleton for the indirect-args base - the packet reserved, cursor real, body
-    /// zeroed. Four dwords, 16 bytes.
+    /// The `SET_BASE` `sceAgcDcbSetBaseIndirectArgs(dcb, shader_type, address)` writes: header
+    /// `0xc0021100` with the shader type in bit 1, the base-index selector `1`, then the address.
     ///
-    /// Header and extent are measured (`166-agc/dcb-set-base-indirect-args`): `0xc0021100`, 16
-    /// bytes. The one pass carried `1` in the first body dword (the base-index selector for the
-    /// draw-indirect base) and then an address; one pass cannot separate a constant selector from
-    /// an argument, so the whole body is zeroed (D696).
+    /// Measured (`166-agc/dcb-set-base-indirect-args`, report-20261013-172400): a zero argument pass
+    /// wrote `0xc0021100 1 0 0`, and a first argument of 1 set the header's bit 1, the selector
+    /// unchanged. The address is the third argument, as Grand Theft Auto V's wrappers at
+    /// image+0x1e0120 and +0x1e0130 pass it (`mov rdx, rsi` then the shader type in `esi`), and its
+    /// place is radeonsi's (`si_compute.c:763-766`).
     #[must_use]
-    pub fn set_base_indirect_args_skeleton() -> [u32; 4] {
-        [command_header(measured::SET_BASE, 3), 0, 0, 0]
+    pub fn set_base_indirect_args(shader_type: u32, address: u64) -> [u32; 4] {
+        [
+            command_header(measured::SET_BASE, 3) | ((shader_type & 1) << 1),
+            1,
+            address as u32,
+            (address >> 32) as u32,
+        ]
+    }
+
+    /// The initiator an indirect dispatch's modifier makes: `0x41` with the modifier's bits
+    /// `0xa038`, as obSCEne measured three modifiers (0 to `0x41`, `0x20` to `0x61`, all ones to
+    /// `0xa079`; `166-agc/dcb-dispatch-indirect`).
+    const fn indirect_initiator(modifier: u32) -> u32 {
+        0x41 | (modifier & 0xa038)
+    }
+
+    /// The `DISPATCH_INDIRECT` `sceAgcDcbDispatchIndirect(dcb, offset, modifier)` writes: header
+    /// `0xc0011600`, the offset past the base [`set_base_indirect_args`] set, and the initiator.
+    /// Measured (`166-agc/dcb-dispatch-indirect`): `0xc0011600 0 0x41`, and `0x1000` for the offset
+    /// on the second pass.
+    #[must_use]
+    pub fn dispatch_indirect_offset(offset: u32, modifier: u32) -> [u32; 3] {
+        [
+            command_header(measured::DISPATCH_INDIRECT, 2),
+            offset,
+            indirect_initiator(modifier),
+        ]
+    }
+
+    /// The `DISPATCH_INDIRECT` `sceAgcAcbDispatchIndirect(acb, args, modifier)` writes: header
+    /// `0xc0021600`, the arguments' address, and the initiator. Measured
+    /// (`166-agc/acb-dispatch-indirect`): `0xc0021600 0 0 0x41`, and `0x1000` for the address's low
+    /// half on the second pass.
+    #[must_use]
+    pub fn dispatch_indirect_args(address: u64, modifier: u32) -> [u32; 4] {
+        [
+            command_header(measured::DISPATCH_INDIRECT, 3),
+            address as u32,
+            (address >> 32) as u32,
+            indirect_initiator(modifier),
+        ]
     }
 
     /// An `EVENT_WRITE` for `event_type`. Two dwords.
@@ -759,6 +799,38 @@ mod tests {
 
     fn register_write(base: u16, body_dwords: u32) -> u32 {
         ((body_dwords - 1) << 16) | u32::from(base)
+    }
+
+    /// The indirect-dispatch builders write the bytes obSCEne measured (report-20261013-172400
+    /// `166-agc/dcb-set-base-indirect-args`, `dcb-dispatch-indirect`, `acb-dispatch-indirect`): the
+    /// base-index selector 1 then the address, its shader type the header's bit 1; the offset or the
+    /// arguments' address, then the initiator `0x41` with the modifier's bits `0xa038`.
+    #[test]
+    fn the_indirect_dispatch_builders_write_what_was_measured() {
+        use super::build::{
+            dispatch_indirect_args, dispatch_indirect_offset, set_base_indirect_args,
+        };
+        assert_eq!(set_base_indirect_args(0, 0), [0xc002_1100, 1, 0, 0]);
+        assert_eq!(set_base_indirect_args(1, 0), [0xc002_1102, 1, 0, 0]);
+        assert_eq!(
+            set_base_indirect_args(0, 0x0001_2345_6789_0000),
+            [0xc002_1100, 1, 0x6789_0000, 0x0001_2345]
+        );
+        assert_eq!(dispatch_indirect_offset(0, 0), [0xc001_1600, 0, 0x41]);
+        assert_eq!(
+            dispatch_indirect_offset(0x1000, 0),
+            [0xc001_1600, 0x1000, 0x41]
+        );
+        assert_eq!(dispatch_indirect_offset(0, 0x20), [0xc001_1600, 0, 0x61]);
+        assert_eq!(
+            dispatch_indirect_offset(0, 0xffff_ffff),
+            [0xc001_1600, 0, 0xa079]
+        );
+        assert_eq!(dispatch_indirect_args(0, 0), [0xc002_1600, 0, 0, 0x41]);
+        assert_eq!(
+            dispatch_indirect_args(0x1000, 0),
+            [0xc002_1600, 0x1000, 0, 0x41]
+        );
     }
 
     #[test]

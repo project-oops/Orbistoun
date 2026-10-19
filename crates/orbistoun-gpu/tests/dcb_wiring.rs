@@ -493,29 +493,48 @@ fn the_eop_data_patch_writes_the_value_the_action_stores() {
     assert_eq!(w.written(), 32, "the patch amends in place");
 }
 
-/// The skeleton measured by header and extent reserves its measured length with the measured
-/// header and a zero body (D696). The argument in `arg1` must not leak into the body.
+/// The indirect-dispatch builders write their measured packets with the arguments in place: the
+/// base's shader type in the header and its address after the selector, the offset or the
+/// arguments' address, and the initiator the modifier makes (obSCEne `166-agc/*-indirect*`).
 #[test]
-fn the_measured_skeletons_reserve_their_extent_with_a_zero_body() {
-    let name = "sceAgcDcbSetBaseIndirectArgs";
-    let w = Writer::new(0x400);
-    let mut args = [0u64; GUEST_ARG_REGISTERS];
-    args[0] = w.handle();
-    args[1] = 0x1111_1111; // an argument that must not appear in the packet
-    args[2] = 0x2222_2222;
-
-    let at = w.cursor();
-    assert_eq!(call(name, args), at, "{name} returns the packet address");
-    assert_eq!(w.written(), 16, "{name} reserves its measured extent");
-    assert_eq!(
-        &w.bytes()[..4],
-        &[0x00, 0x11, 0x02, 0xc0],
-        "{name} writes its measured header, little-endian"
-    );
-    assert!(
-        w.bytes()[4..].iter().all(|b| *b == 0),
-        "{name} leaves the body zero, not a guessed encoding of the argument"
-    );
+fn the_indirect_dispatch_builders_carry_their_arguments() {
+    let dword = |bytes: &[u8], i: usize| {
+        u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("a word"))
+    };
+    for (name, extent, arg1, arg2, words) in [
+        (
+            "sceAgcDcbSetBaseIndirectArgs",
+            16usize,
+            1u64,
+            0x0001_2222_3333_4444u64,
+            vec![0xc002_1102u32, 1, 0x3333_4444, 0x0001_2222],
+        ),
+        (
+            "sceAgcDcbDispatchIndirect",
+            12,
+            0x40,
+            0x21,
+            vec![0xc001_1600, 0x40, 0x61],
+        ),
+        (
+            "sceAgcAcbDispatchIndirect",
+            16,
+            0x0001_2222_3333_4440,
+            1,
+            vec![0xc002_1600, 0x3333_4440, 0x0001_2222, 0x41],
+        ),
+    ] {
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        args[1] = arg1;
+        args[2] = arg2;
+        let at = w.cursor();
+        assert_eq!(call(name, args), at, "{name} returns the packet address");
+        assert_eq!(w.written(), extent, "{name} writes its measured extent");
+        let written: Vec<u32> = (0..extent / 4).map(|i| dword(w.bytes(), i)).collect();
+        assert_eq!(written, words, "{name}");
+    }
 }
 
 /// A skeleton refuses a null handle with the measured code, like every other builder.
@@ -620,9 +639,7 @@ fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
 #[test]
 fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     for (name, extent, header) in [
-        ("sceAgcDcbDispatchIndirect", 12usize, 0xc001_1600u32),
-        ("sceAgcAcbDispatchIndirect", 16, 0xc002_1600),
-        ("sceAgcDcbDrawIndirect", 20, 0xc003_2400),
+        ("sceAgcDcbDrawIndirect", 20usize, 0xc003_2400u32),
         ("sceAgcDcbDrawIndexIndirect", 20, 0xc003_2500),
         ("sceAgcDcbStallCommandBufferParser", 8, 0xc000_4200),
         ("sceAgcAcbAcquireMem", 32, 0xc006_5800),

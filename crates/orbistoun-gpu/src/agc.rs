@@ -1251,13 +1251,13 @@ fn dcb_dma_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::dma_data(&builder_arguments(args)))
 }
 
-/// `sceAgcDcbSetBaseIndirectArgs(dcb, ...)` - reserves the 16-byte SET_BASE packet, cursor real,
-/// body zero.
-///
-/// Header (`0xc0021100`) and extent are measured (`166-agc/dcb-set-base-indirect-args`); the body
-/// carries a base-index selector and an address one pass cannot separate, so it is zeroed.
+/// `sceAgcDcbSetBaseIndirectArgs(dcb, shader_type, address)`: the 16-byte `SET_BASE` an indirect
+/// dispatch's offset is read past ([`packet::build::set_base_indirect_args`]).
 fn dcb_set_base_indirect_args(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::set_base_indirect_args_skeleton())
+    dcb_append(
+        args[0],
+        &packet::build::set_base_indirect_args(args[1] as u32, args[2]),
+    )
 }
 
 /// `sceAgcDcbResetQueue(dcb, ...)` - reserves the measured 32-byte queue-reset stream and hands
@@ -1384,20 +1384,22 @@ fn rewind_patch_set_rewind_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// `sceAgcDcbDispatchIndirect(dcb, ...)`. Header `0xc0011600`, 12 bytes.
+/// `sceAgcDcbDispatchIndirect(dcb, offset, modifier)`: 12 bytes
+/// ([`packet::build::dispatch_indirect_offset`]).
 fn dcb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::reservation(measured::DISPATCH_INDIRECT, 2),
+        &packet::build::dispatch_indirect_offset(args[1] as u32, args[2] as u32),
     )
 }
 
-/// `sceAgcAcbDispatchIndirect(acb, ...)`. Header `0xc0021600`, 16 bytes: the measured Acb form is
-/// one dword longer than the Dcb form.
+/// `sceAgcAcbDispatchIndirect(acb, args, modifier)`: 16 bytes, the measured Acb form one dword
+/// longer than the Dcb form as it holds the arguments' address
+/// ([`packet::build::dispatch_indirect_args`]).
 fn acb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::reservation(measured::DISPATCH_INDIRECT, 3),
+        &packet::build::dispatch_indirect_args(args[1], args[2] as u32),
     )
 }
 
