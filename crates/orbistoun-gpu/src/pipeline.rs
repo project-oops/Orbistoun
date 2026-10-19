@@ -3651,6 +3651,13 @@ fn dispatch_descriptor_words(
     Ok(words)
 }
 
+/// `SQ_IMG_RSRC_WORD4`'s `DEPTH` (bits 0-12, an array's last layer) and `BASE_ARRAY` (bits 16-28),
+/// `gfx10-rsrc.json`: both zero for a view of one layer, the first.
+const ARRAY_FIELDS: u32 = 0x1FFF | 0x1FFF << 16;
+
+/// `SQ_RSRC_IMG_2D_ARRAY`, `SQ_IMG_RSRC_WORD3`'s `TYPE` for a 2D array (`gfx10-rsrc.json`).
+const IMAGE_TYPE_2D_ARRAY: u32 = 13;
+
 fn dispatch_image_surface(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
@@ -3671,7 +3678,17 @@ fn dispatch_image_surface(
     // A volume where the program addresses one, three coordinates to its texel (D823); a 2D image
     // otherwise.
     let volume = words[3] >> 28 == IMAGE_TYPE_3D;
-    if (words[3] >> 28 != IMAGE_TYPE_2D && !volume) || volume != source.volume {
+    // A program may address a one-layer image as a 2D array, reaching only its layer zero (D895):
+    // the descriptor it reads must view one layer, the first.
+    if source.layered && words[4] & ARRAY_FIELDS != 0 {
+        return Err(format!(
+            "a 2D array access to a view of more than one layer, or of a later one (D895): format {}",
+            describe_dispatch_image(&descriptor, words)
+        ));
+    }
+    let flat = words[3] >> 28 == IMAGE_TYPE_2D
+        || (source.layered && words[3] >> 28 == IMAGE_TYPE_2D_ARRAY);
+    if (!flat && !volume) || volume != source.volume {
         return Err(format!(
             "a dispatch image that is not the shape its program addresses ({}): format {}",
             if source.volume { "3D" } else { "2D" },
@@ -6183,6 +6200,7 @@ fn bind_textures(
                     compare: false,
                     saturated: [false; 2],
                     level_user_data: None,
+                    layered: false,
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -9248,6 +9266,7 @@ mod tests {
                 compare: false,
                 saturated: [false; 2],
                 level_user_data: None,
+                layered: false,
             }],
         )]);
         let mut commands = vec![
@@ -9330,6 +9349,7 @@ mod tests {
                     compare: false,
                     saturated: [false; 2],
                     level_user_data: None,
+                    layered: false,
                 }],
             )]);
             let mut commands = vec![
@@ -9393,6 +9413,7 @@ mod tests {
                 compare: false,
                 saturated: [false; 2],
                 level_user_data: None,
+                layered: false,
             }],
         )]);
         let mut commands = vec![
@@ -9477,6 +9498,7 @@ mod tests {
                     compare: false,
                     saturated,
                     level_user_data: None,
+                    layered: false,
                 }],
             )]);
             let mut commands = vec![
@@ -9690,6 +9712,7 @@ mod tests {
             compare: true,
             saturated: [false; 2],
             level_user_data: None,
+            layered: false,
         };
         let bound = user_data_texture(&source, 8, &user, &Memory, &mut super::TexelCache::new());
         let Some(RenderCommand::BindDepthTexture {
@@ -9789,6 +9812,7 @@ mod tests {
                 compare: true,
                 saturated: [false; 2],
                 level_user_data: None,
+                layered: false,
             }],
         )]);
         let draw = RenderCommand::Draw {
@@ -9872,6 +9896,7 @@ mod tests {
             compare: true,
             saturated: [false; 2],
             level_user_data: None,
+            layered: false,
         };
         let bound = user_data_texture(
             &source,
@@ -10699,6 +10724,7 @@ mod tests {
             volume: false,
             compare: false,
             level_user_data: None,
+            layered: false,
         };
         assert!(super::shaped_for(command, &source(true)));
         assert!(
@@ -11076,6 +11102,7 @@ mod tests {
                     compare: false,
                     saturated: [true; 2],
                     level_user_data: None,
+                    layered: false,
                 }],
             )]);
             let mut commands = vec![
@@ -11790,6 +11817,7 @@ mod tests {
             compare: false,
             saturated: [false; 2],
             level_user_data: None,
+            layered: false,
         };
         let cube = TextureSource { cube: true, ..flat };
         let compared = TextureSource {

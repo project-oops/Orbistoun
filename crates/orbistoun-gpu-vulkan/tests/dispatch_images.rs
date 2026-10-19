@@ -244,6 +244,85 @@ fn a_dispatch_stores_to_two_images() {
     assert_eq!(done.stored, [source.clone(), source]);
 }
 
+/// A one-layer image addressed as a 2D array is its layer zero, and any other layer is out of
+/// bounds - nothing read, nothing written (D895): Grand Theft Auto V's compute copy rewrites its
+/// descriptors' type to `2D_ARRAY` and takes the layer from its user data. The copy at layer 0 copies
+/// the source; at layer 1 the destination keeps every texel it held.
+#[test]
+fn a_one_layer_image_addressed_as_an_array_is_its_layer_zero() {
+    if !device_or_skip("an array access to a one-layer image") {
+        return;
+    }
+    // v_mov_b32 v2, s16 (the layer); image_load v[4:7], v[0:2], s[0:7] dmask:0xf dim:2D_ARRAY;
+    // s_waitcnt; image_store v[4:7], v[0:2], s[8:15] dmask:0xf dim:2D_ARRAY; s_endpgm.
+    let program = [
+        0x7e04_0210_u32,
+        0xf000_1f28,
+        0x0000_0400,
+        0xbf8c_0000,
+        0xf020_1f28,
+        0x0002_0400,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, (textures, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 17,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("an array access translates");
+    assert!(
+        textures.first().is_some_and(|t| t.layered),
+        "the fetch is layered"
+    );
+    assert!(
+        storage.first().is_some_and(|t| t.layered),
+        "the store is layered"
+    );
+    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0102_0304_u32 ^ i).collect();
+    let destination = vec![0xdead_beef_u32; (SIDE * SIDE) as usize];
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba8,
+        width: SIDE,
+        height: SIDE,
+        depth: None,
+    };
+    for (layer, expected) in [(0, &source), (1, &destination)] {
+        let mut push = [0; 17];
+        push[16] = layer;
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&push, [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(image(&source)),
+                stored: &[image(&destination)],
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        assert_eq!(done.stored.first(), Some(expected), "layer {layer}");
+    }
+}
+
 /// Threads a partial last group runs along x.
 const RUN: u32 = 3;
 

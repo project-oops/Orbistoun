@@ -2499,9 +2499,10 @@ impl Wavefront<'_> {
             saturated: [false; 2],
             user_data,
             sampler_user_data: None,
-            cube: shape.cube,
-            volume: shape.volume,
+            cube: shape.cube(),
+            volume: shape.volume(),
             compare: shape.compare,
+            layered: shape.layered(),
             level_user_data: None,
         })
     }
@@ -5341,8 +5342,9 @@ impl Model for Wavefront<'_> {
     fn storage_image(
         &mut self,
         descriptor: u32,
-        (volume, level): (bool, Option<u32>),
+        (shape, level): (model::ImageShape, Option<u32>),
     ) -> Result<model::Stored, &'static str> {
+        let volume = shape.volume();
         // The fragment stage only: the harness binds its storage image with fragment stage flags,
         // and the `vec4` texel type comes from the colour output, which only a fragment module has.
         if self.stage == Stage::Mesh {
@@ -5363,7 +5365,9 @@ impl Model for Wavefront<'_> {
             if was != descriptor {
                 continue;
             }
-            let same_level = source.is_none_or(|source| source.level_user_data == level);
+            let same_level = source.is_none_or(|source| {
+                source.level_user_data == level && source.layered == shape.layered()
+            });
             if stored.volume != volume || !same_level {
                 return Err(concat!(
                     "this shader stores to one image as two shapes or two levels, and a binding ",
@@ -5398,7 +5402,7 @@ impl Model for Wavefront<'_> {
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
             let shape = model::ImageShape {
-                volume,
+                dimension: shape.dimension,
                 ..model::ImageShape::default()
             };
             let mut source = self.new_texture_source(descriptor, (None, shape))?;
@@ -6045,6 +6049,10 @@ pub type ImageSources = (Vec<TextureSource>, Vec<TextureSource>);
 /// the module did not load it from a table; a pipeline then reads offset zero of the table at the
 /// stage's first two user-data words.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a kept translation's record, each flag its own serde default so a store written               before one existed still loads"
+)]
 pub struct TextureSource {
     /// 0 for the first texture the module samples, 1 for a second, up to
     /// [`orbistoun_spirv::MAX_TEXTURES`].
@@ -6084,6 +6092,10 @@ pub struct TextureSource {
     /// Whether the module samples this texture as depth compared against a reference (D816).
     #[serde(default)]
     pub compare: bool,
+    /// Whether the module addresses this image as a 2D array, reaching only its layer zero, which
+    /// the host binds only for a one-layer view of layer zero (D895).
+    #[serde(default)]
+    pub layered: bool,
     /// The stage's user-data word holding the level a store writes, counted from the descriptor's
     /// base level: an `image_store_mip` whose level the program copied from its user data. The
     /// host binds that level's own surface. `None` for a store to the level the view names.
@@ -6110,9 +6122,9 @@ const DIM_3D: u32 = 2;
 /// The SPIR-V dimensionality a sampled binding of `shape` is declared with, and how many float
 /// components its sampling coordinate has.
 const fn image_dim(shape: model::ImageShape) -> (u32, u32) {
-    if shape.cube {
+    if shape.cube() {
         (DIM_CUBE, 3)
-    } else if shape.volume {
+    } else if shape.volume() {
         (DIM_3D, 3)
     } else {
         (DIM_2D, 2)

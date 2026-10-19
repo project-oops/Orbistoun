@@ -433,6 +433,9 @@ const IMAGE_DIMENSION_3D: u32 = 2;
 /// The dimensionality code for a cube, fourth in the same order (`dim:SQ_RSRC_IMG_CUBE`).
 const IMAGE_DIMENSION_CUBE: u32 = 3;
 
+/// The dimensionality code for a 2D array, sixth in the same order (`dim:SQ_RSRC_IMG_2D_ARRAY`).
+const IMAGE_DIMENSION_2D_ARRAY: u32 = 5;
+
 /// Each dimensionality code's name, in the same order.
 const IMAGE_DIMENSION_NAMES: [&str; 8] = [
     "1D",
@@ -993,7 +996,7 @@ pub trait Model {
     fn storage_image(
         &mut self,
         _descriptor: u32,
-        (_volume, _level): (bool, Option<u32>),
+        (_shape, _level): (ImageShape, Option<u32>),
     ) -> Result<Stored, &'static str> {
         Err(concat!(
             "this model has no storage image to write - one is bound by a graphics pipeline, ",
@@ -10105,12 +10108,46 @@ struct ImageAccess {
 /// The shape of image an access samples, beyond a flat image's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImageShape {
-    /// A cube, its address a face's two coordinates and the face (D811).
-    pub cube: bool,
-    /// A three-dimensional image, its address three coordinates (D823).
-    pub volume: bool,
+    /// What its coordinates address beyond a flat image's two.
+    pub dimension: Dimension,
     /// A depth texture compared against a reference, the first address element (D816).
     pub compare: bool,
+}
+
+/// What an image access's coordinates address beyond a flat image's two: one of these at most.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Dimension {
+    /// Nothing: two coordinates.
+    #[default]
+    Flat,
+    /// A cube, its address a face's two coordinates and the face (D811).
+    Cube,
+    /// A three-dimensional image, its address three coordinates (D823).
+    Volume,
+    /// A 2D array addressed with its layer, the address element after the two coordinates, of a
+    /// one-layer image: layer zero is the image, any other out of bounds (D895). Fetches and stores
+    /// only.
+    Layered,
+}
+
+impl ImageShape {
+    /// Whether it is a cube.
+    #[must_use]
+    pub const fn cube(self) -> bool {
+        matches!(self.dimension, Dimension::Cube)
+    }
+
+    /// Whether it is a three-dimensional image.
+    #[must_use]
+    pub const fn volume(self) -> bool {
+        matches!(self.dimension, Dimension::Volume)
+    }
+
+    /// Whether it is a 2D array of one layer, addressed with its layer.
+    #[must_use]
+    pub const fn layered(self) -> bool {
+        matches!(self.dimension, Dimension::Layered)
+    }
 }
 
 /// `A16` and `D16`: whether an image access's address elements, and its components, are sixteen
@@ -10146,8 +10183,10 @@ const MAX_ADDRESS_REGISTERS: usize = 6;
 /// the level is one of them: the assembler refuses an address operand whose register count does not
 /// match the instruction's dimensionality field. Sixteen-bit elements pack two to a register.
 const fn address_registers(levelled: bool, a16: bool, shape: ImageShape) -> u32 {
-    let elements: u32 =
-        2 + (shape.cube || shape.volume) as u32 + levelled as u32 + shape.compare as u32;
+    let elements: u32 = 2
+        + (shape.cube() || shape.volume() || shape.layered()) as u32
+        + levelled as u32
+        + shape.compare as u32;
     if a16 { elements.div_ceil(2) } else { elements }
 }
 
@@ -10255,14 +10294,14 @@ fn address_form(
         return Err("a sample whose position is sixteen-bit halves, which is not translated");
     }
     let offset = name.ends_with("_o");
-    if offset && (shape.cube || shape.volume || shape.compare || a16 || fetches) {
+    if offset && (shape.cube() || shape.volume() || shape.compare || a16 || fetches) {
         return Err(concat!(
             "a sample with texel offsets of a cube, a volume, a compare or sixteen-bit positions ",
             "is not translated"
         ));
     }
     if name == "image_sample_d" {
-        if shape.cube || shape.volume || shape.compare {
+        if shape.cube() || shape.volume() || shape.compare {
             return Err("a gradient sample of a cube, a volume or a compare is not translated");
         }
         return Ok(Ahead::Gradients);
@@ -10281,6 +10320,19 @@ fn takes_its_level(name: &str) -> bool {
         name,
         "image_sample_l" | "image_load_mip" | "image_store_mip"
     )
+}
+
+/// What an access of dimensionality code `dimension` addresses, where it is translated: a cube or a
+/// volume sampled, a volume stored to, a 2D array fetched or stored (D895); flat otherwise, which the
+/// caller refuses for any code but 2D.
+const fn shape_dimension(dimension: u32, (is_sample, name): (bool, &str)) -> Dimension {
+    let stores = matches!(name.as_bytes(), b"image_store");
+    match dimension {
+        IMAGE_DIMENSION_CUBE if is_sample => Dimension::Cube,
+        IMAGE_DIMENSION_3D if is_sample || stores => Dimension::Volume,
+        IMAGE_DIMENSION_2D_ARRAY if !is_sample => Dimension::Layered,
+        _ => Dimension::Flat,
+    }
 }
 
 /// Reads a texture access's operands, refusing anything it cannot use.
@@ -10302,12 +10354,11 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // A compare's reference comes first, as ACO places it ahead of the coordinates
     // (`aco_select_nir.cpp`, the MIMG address after any offset and bias).
     let shape = ImageShape {
-        cube: dimension == IMAGE_DIMENSION_CUBE && is_sample,
-        volume: dimension == IMAGE_DIMENSION_3D && (is_sample || name == "image_store"),
+        dimension: shape_dimension(dimension, (is_sample, name)),
         compare: matches!(name, "image_sample_c_lz" | "image_sample_c"),
     };
-    let (cube, volume, compare) = (shape.cube, shape.volume, shape.compare);
-    if dimension != IMAGE_DIMENSION_2D && !cube && !volume {
+    let (cube, volume, compare) = (shape.cube(), shape.volume(), shape.compare);
+    if dimension != IMAGE_DIMENSION_2D && shape.dimension == Dimension::Flat {
         return Err(TranslateError::ImageDimension {
             offset: instruction.offset,
             mnemonic: name.to_owned(),
@@ -10495,12 +10546,12 @@ fn image_sample<M: Model + ?Sized>(
         ahead,
     } = image_access(instruction, name)?;
     let (offset, gradients) = (ahead == Ahead::Offsets, ahead == Ahead::Gradients);
-    let (cube, compare, a16) = (shape.cube, shape.compare, halves.address);
+    let (cube, compare, a16) = (shape.cube(), shape.compare, halves.address);
 
     let texture = model
         .sampled_image(descriptor, sampler, (instruction.offset, shape))
         .map_err(refuse)?;
-    if (cube || shape.volume) && texture.saturate != [false; 2] {
+    if (cube || shape.volume()) && texture.saturate != [false; 2] {
         return Err(refuse(
             "a cube or volume through a half-border clamp is not translated",
         ));
@@ -10521,7 +10572,7 @@ fn image_sample<M: Model + ?Sized>(
         // The level, where the instruction takes one from a register: the last address element. A
         // fetch's level is an integer, a sample's a float.
         let level = if levelled {
-            let at = 2 + u32::from(cube || shape.volume);
+            let at = 2 + u32::from(cube || shape.volume() || shape.layered());
             let bits = address_element(model, instruction, (&addresses, a16), at, lane)?;
             if fetches { bits } else { model.as_float(bits) }
         } else if fetches {
@@ -10576,6 +10627,14 @@ fn image_sample<M: Model + ?Sized>(
             )
         };
 
+        let texel = layer_zero_only(
+            model,
+            instruction,
+            (&addresses, a16),
+            (&texture, texel, shape),
+            lane,
+        )?;
+
         write_components(
             model,
             instruction,
@@ -10587,6 +10646,42 @@ fn image_sample<M: Model + ?Sized>(
 
     model.count();
     Ok(())
+}
+
+/// `texel` as a fetch of `shape` answers it: as it is, or - fetched from a one-layer image at the
+/// layer the address's third element names - itself at layer zero and zero at any other, which is
+/// out of bounds (D895).
+fn layer_zero_only<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
+    (texture, texel, shape): (&Texture, Id, ImageShape),
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    let Some(first) = layer_is_zero(model, instruction, (addresses, a16), shape, lane)? else {
+        return Ok(texel);
+    };
+    let builder = model.builder();
+    let none = builder.id();
+    builder.declare(op::CONSTANT_NULL, &[texture.result.0, none.0]);
+    Ok(model.select(first, texel, none))
+}
+
+/// Whether the layer a layered access names, its address's third element, is zero, the only layer a
+/// one-layer image has (D895); `None` for any other shape.
+fn layer_is_zero<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
+    shape: ImageShape,
+    lane: u32,
+) -> Result<Option<Id>, TranslateError> {
+    if !shape.layered() {
+        return Ok(None);
+    }
+    let layer = address_element(model, instruction, (addresses, a16), 2, lane)?;
+    let zero = model.constant(0);
+    Ok(Some(model.compare(op::IEQUAL, layer, zero)))
 }
 
 /// `image_get_resinfo`: the size of a two-dimensional image's level, the level an integer in the one
@@ -10764,7 +10859,7 @@ fn sample_coordinate<M: Model + ?Sized>(
         cube_direction(model, across, down, face)
             .map(|bits| model.as_float(bits))
             .to_vec()
-    } else if texture.shape.volume && !fetches {
+    } else if texture.shape.volume() && !fetches {
         // A volume's position, across, down and deep, each as the guest gave it (D823).
         let deep = address_element(model, instruction, (addresses, a16), 2, lane)?;
         [across, down, deep].map(|at| model.as_float(at)).to_vec()
@@ -11037,7 +11132,7 @@ fn image_store<M: Model + ?Sized>(
     // that level's own surface, so the level has to be one it can read for the dispatch: a
     // user-data word the program copied into the register, as PPSA04263's copy into a level does.
     let level = if name == "image_store_mip" {
-        let register = addresses[2];
+        let register = addresses[2 + usize::from(shape.layered())];
         Some(model.vector_user_data(register).ok_or_else(|| {
             refuse(concat!(
                 "a store to a level the program computes rather than takes from its user data - ",
@@ -11048,7 +11143,7 @@ fn image_store<M: Model + ?Sized>(
         None
     };
     let stored = model
-        .storage_image(descriptor, (shape.volume, level))
+        .storage_image(descriptor, (shape, level))
         .map_err(refuse)?;
     if stored.integer && d16 {
         return Err(refuse(
@@ -11118,7 +11213,9 @@ fn image_store<M: Model + ?Sized>(
         // An inactive lane stores nothing. Its registers hold whatever an earlier write left there,
         // often nothing at all: radeonsi's one-texel readback copy runs a single thread of 64, and
         // the other 63, whose coordinates were never computed, would store zero over its texel.
-        let merge = open_if_active(model, lane);
+        // Any layer but zero of a one-layer image is out of bounds, and stores nothing (D895).
+        let in_layer = layer_is_zero(model, instruction, (&addresses, a16), shape, lane)?;
+        let merge = open_if_active(model, lane, in_layer);
         let builder = model.builder();
         let bound = builder.id();
         builder.function(op::LOAD, &[stored.image.0, bound.0, stored.variable.0]);
@@ -11130,12 +11227,18 @@ fn image_store<M: Model + ?Sized>(
     Ok(())
 }
 
-/// Opens a block that runs only while `lane` is active in the execution mask, returning the merge
-/// [`close_if_active`] closes it at; `None`, opening nothing, for a model with no execution mask,
-/// whose every lane runs.
-fn open_if_active<M: Model + ?Sized>(model: &mut M, lane: u32) -> Option<Id> {
-    let (low, high) = model.read_lane_mask(EXEC_LOW_HALF).ok()?;
-    let active = model.lane_bit(low, high, lane);
+/// Opens a block that runs only while `lane` is active in the execution mask and `and` holds, where
+/// given, returning the merge [`close_if_active`] closes it at; `None`, opening nothing, for a model
+/// with no execution mask, whose every lane runs, and no condition.
+fn open_if_active<M: Model + ?Sized>(model: &mut M, lane: u32, and: Option<Id>) -> Option<Id> {
+    let active = match (model.read_lane_mask(EXEC_LOW_HALF).ok(), and) {
+        (Some((low, high)), and) => {
+            let active = model.lane_bit(low, high, lane);
+            and.map_or(active, |and| model.both(active, and))
+        }
+        (None, Some(and)) => and,
+        (None, None) => return None,
+    };
     let b = model.builder();
     let (body, merge) = (b.id(), b.id());
     b.function(op::SELECTION_MERGE, &[merge.0, 0]);
