@@ -874,18 +874,25 @@ pub fn execute_dispatch(
         &[orbistoun_gpu::dispatch::BufferBefore],
     ),
 ) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
-    let more: Vec<_> = images
-        .more_fetched
-        .iter()
-        .map(|(texels, _)| dispatch_image(texels))
-        .collect();
-    let stored: Vec<_> = images
-        .stored
-        .iter()
-        .map(|image| dispatch_image(&image.texels))
-        .collect();
+    on_device(|| execute_dispatch_here(module, memory, (push, groups), (images, buffers)))
+        .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
+}
+
+/// [`execute_dispatch`] on the device thread.
+fn execute_dispatch_here(
+    module: (&[u32], u64),
+    memory: &[u32],
+    (push, groups): (&[u32], [u32; 3]),
+    (images, buffers): (
+        &orbistoun_gpu::pipeline::DispatchImages,
+        &[orbistoun_gpu::dispatch::BufferBefore],
+    ),
+) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
+    let (fetched, more_fetched, stored_before) = with_depths(images)?;
+    let more: Vec<_> = more_fetched.iter().map(dispatch_image).collect();
+    let stored: Vec<_> = stored_before.iter().map(dispatch_image).collect();
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
-        fetched: images.fetched.as_ref().map(dispatch_image),
+        fetched: fetched.as_ref().map(dispatch_image),
         more_fetched: &more,
         stored: &stored,
     };
@@ -901,32 +908,121 @@ pub fn execute_dispatch(
             }
         })
         .collect();
-    on_device(|| {
-        perf::span(perf::Span::DispatchOnDevice, || {
-            orbistoun_gpu_vulkan::dispatch_guest_hashed(
-                module,
-                memory,
-                (push, groups),
-                &bound,
-                &buffers,
-            )
-        })
-        .map(|done| {
-            let buffers = done
-                .buffers
-                .into_iter()
-                .map(|out| orbistoun_gpu::dispatch::BufferAfter {
-                    words: out.words,
-                    written: out.written,
-                    listed: out.stored,
-                    whole: out.whole,
-                })
-                .collect();
-            (done.memory, done.escaped, done.stored, buffers)
-        })
-        .map_err(|e| format!("the device refused it: {e:?}"))
+    let done = perf::span(perf::Span::DispatchOnDevice, || {
+        orbistoun_gpu_vulkan::dispatch_guest_hashed(
+            module,
+            memory,
+            (push, groups),
+            &bound,
+            &buffers,
+        )
     })
-    .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
+    .map_err(|e| format!("the device refused it: {e:?}"))?;
+    write_depths(images, &done.stored)?;
+    let buffers = done
+        .buffers
+        .into_iter()
+        .map(|out| orbistoun_gpu::dispatch::BufferAfter {
+            words: out.words,
+            written: out.written,
+            listed: out.stored,
+            whole: out.whole,
+        })
+        .collect();
+    Ok((done.memory, done.escaped, done.stored, buffers))
+}
+
+/// The images a dispatch binds, fetched and stored to: each that is a depth target the host holds
+/// filled with its depths as the draws before left them (D894). Refused for a depth target the host
+/// never drew, or one whose extent is not the image's.
+type BoundTexels = (
+    Option<orbistoun_gpu::pipeline::DispatchTexels>,
+    Vec<orbistoun_gpu::pipeline::DispatchTexels>,
+    Vec<orbistoun_gpu::pipeline::DispatchTexels>,
+);
+
+/// [`BoundTexels`] for `images`.
+fn with_depths(images: &orbistoun_gpu::pipeline::DispatchImages) -> Result<BoundTexels, String> {
+    let mut fetched = images.fetched.clone();
+    let mut more: Vec<_> = images
+        .more_fetched
+        .iter()
+        .map(|(texels, _)| texels.clone())
+        .collect();
+    let mut stored: Vec<_> = images
+        .stored
+        .iter()
+        .map(|image| image.texels.clone())
+        .collect();
+    let stored_depth: Vec<(usize, orbistoun_gpu::ResourceId)> = images
+        .stored
+        .iter()
+        .enumerate()
+        .filter_map(|(n, image)| image.depth.map(|target| (n, target)))
+        .collect();
+    if images.fetched_depth.is_empty() && stored_depth.is_empty() {
+        return Ok((fetched, more, stored));
+    }
+    let mut held = live_backend()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let backend = held.get_or_insert_with(VulkanBackend::new);
+    let mut fill = |image: &mut orbistoun_gpu::pipeline::DispatchTexels, target| {
+        let (depths, _, extent) = backend
+            .depth_texels(target)
+            .map_err(|e| format!("its depth target could not be read: {e:?}"))?
+            .ok_or("it reaches a depth target no draw here drew")?;
+        if extent != (image.width, image.height) {
+            return Err(format!(
+                "it reaches a {}x{} depth target as a {}x{} image",
+                extent.0, extent.1, image.width, image.height
+            ));
+        }
+        image.texels = depths;
+        Ok::<(), String>(())
+    };
+    for &(slot, target) in &images.fetched_depth {
+        let image = match slot {
+            0 => fetched.as_mut(),
+            n => more.get_mut(n as usize - 1),
+        }
+        .ok_or("a depth target's slot is past the images fetched")?;
+        fill(image, target)?;
+    }
+    for (n, target) in stored_depth {
+        fill(&mut stored[n], target)?;
+    }
+    Ok((fetched, more, stored))
+}
+
+/// Writes what a dispatch stored to each depth target the host holds back into that target
+/// (D894): guest memory is not where the host keeps it, so nothing else would carry it there.
+fn write_depths(
+    images: &orbistoun_gpu::pipeline::DispatchImages,
+    stored: &[Vec<u32>],
+) -> Result<(), String> {
+    let mut targets = images
+        .stored
+        .iter()
+        .zip(stored)
+        .filter_map(|(image, texels)| image.depth.map(|target| (target, texels)))
+        .peekable();
+    if targets.peek().is_none() {
+        return Ok(());
+    }
+    let mut held = live_backend()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let backend = held.get_or_insert_with(VulkanBackend::new);
+    for (target, texels) in targets {
+        let written = backend
+            .write_depth_texels(target, texels)
+            .map_err(|e| format!("its depth target could not be written: {e:?}"))?;
+        if !written {
+            return Err("it stores to a depth target no draw here drew".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// One dispatch image as the device takes it, borrowing its texels.

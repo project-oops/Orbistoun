@@ -2832,6 +2832,9 @@ pub struct DispatchImages {
     pub more_fetched: Vec<(DispatchTexels, (u64, u64))>,
     /// The images it stores to, in the order its program first stores to them (D893).
     pub stored: Vec<StoredImage>,
+    /// The texture slots whose image is a depth target the host holds, each with its id: their
+    /// texels are the host's depths, read on the device before the dispatch runs (D894).
+    pub fetched_depth: Vec<(u32, ResourceId)>,
 }
 
 /// One image a dispatch stores to: as it was before the dispatch, and where it lies.
@@ -2842,8 +2845,12 @@ pub struct StoredImage {
     /// Where each of its channels lies in memory, where its descriptor reorders them: its texels,
     /// before and after, are in the shader's order ([`to_memory_channels`]).
     pub order: Option<[u8; 4]>,
-    /// Where it lies, and the bytes it spanned before the dispatch.
-    pub surface: (DispatchSurface, Vec<u8>),
+    /// Where it lies, and the bytes it spanned before the dispatch; `None` for a depth target the
+    /// host holds, which is written back to the host rather than to guest memory (D894).
+    pub surface: Option<(DispatchSurface, Vec<u8>)>,
+    /// The depth target it is, which the host holds: its texels before are the host's depths, and
+    /// what the dispatch writes replaces them (D894).
+    pub depth: Option<ResourceId>,
     /// Its compression keys, when they were all cleared: it was read as the zeros they mean, and
     /// once every texel is written back they are marked uncompressed - expanded, a state the
     /// hardware's own writes leave.
@@ -2857,16 +2864,17 @@ impl DispatchImages {
         self.fetched_span
             .into_iter()
             .chain(self.more_fetched.iter().map(|(_, span)| *span))
-            .chain(self.stored.iter().map(StoredImage::span))
+            .chain(self.stored.iter().filter_map(StoredImage::span))
     }
 }
 
 impl StoredImage {
-    /// Where it lies, as (first byte, bytes).
+    /// Where it lies in guest memory, as (first byte, bytes); `None` for a depth target the host
+    /// holds.
     #[must_use]
-    pub fn span(&self) -> (u64, u64) {
-        let (surface, _) = &self.surface;
-        (surface.base(), surface.bytes() as u64)
+    pub fn span(&self) -> Option<(u64, u64)> {
+        let (surface, _) = self.surface.as_ref()?;
+        Some((surface.base(), surface.bytes() as u64))
     }
 }
 
@@ -3308,7 +3316,21 @@ fn dispatch_images(
     let mut images = DispatchImages::default();
     // Each texture slot's image, bound at its slot's binding as a draw's are (D690).
     for (slot, source) in textures.iter().enumerate() {
-        let (texels, span) = fetched_image(state, source, memory, detiled)?;
+        let words = dispatch_descriptor_words(state, source, memory)
+            .map_err(|e| format!("fetched image {slot}: {e}"))?;
+        let (texels, span) = match dispatch_depth_target(words, source) {
+            // Its texels come from the host's depths; none are read here (D894).
+            Some((id, extent)) => {
+                images
+                    .fetched_depth
+                    .push((u32::try_from(slot).unwrap_or(u32::MAX), id));
+                (
+                    host_depths(extent),
+                    (decode_image_descriptor(words).base, 0),
+                )
+            }
+            None => fetched_image(state, source, memory, detiled)?,
+        };
         if slot == 0 {
             images.fetched = Some(texels);
             images.fetched_span = Some(span);
@@ -3316,70 +3338,107 @@ fn dispatch_images(
             images.more_fetched.push((texels, span));
         }
     }
-    for source in storage {
-        let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
-        let spanned = read_spanned(&surface, memory)?;
-        let (width, height) = surface.extent();
-        let mut keys_to_expand = None;
-        let texels = match surface_keys(&descriptor, format, memory)? {
-            crate::dcc::Keys::Uncompressed => {
-                let texels = detiled.detile(&surface, &spanned);
-                match order {
-                    Some(order) => texels
-                        .iter()
-                        .map(|&texel| to_shader_channels(texel, order))
-                        .collect(),
-                    None => texels,
-                }
-            }
-            crate::dcc::Keys::Clear0000 => {
-                let chain = surface_layout(&descriptor, format).and_then(|layout| {
-                    usize::try_from(layout.chain_bytes(
-                        descriptor.width,
-                        descriptor.height,
-                        descriptor.levels,
-                    ))
-                    .ok()
-                });
-                keys_to_expand = descriptor
-                    .compression
-                    .zip(surface_key_bytes(&descriptor, format))
-                    .zip(chain)
-                    .map(|((dcc, bytes), chain)| KeysToExpand {
-                        keys: (crate::dcc::meta_start(dcc), bytes),
-                        surface: (descriptor.base, chain),
-                    });
-                vec![0; surface.texels() * format.words() as usize].into()
-            }
-            crate::dcc::Keys::Other => {
-                return Err(concat!(
-                    "the stored image's compression keys need per-block addressing, which is not ",
-                    "modelled"
-                )
-                .to_owned());
-            }
-        };
-        let texels = DispatchTexels {
-            texels,
-            format,
-            width,
-            height,
-            depth: volume_depth(&surface),
-        };
-        // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
-        let spanned = if keys_to_expand.is_some() {
-            vec![0; spanned.len()]
-        } else {
-            spanned
-        };
-        images.stored.push(StoredImage {
-            texels,
-            order,
-            surface: (surface, spanned),
-            keys_to_expand,
-        });
+    for (n, source) in storage.iter().enumerate() {
+        let stored = stored_image(state, source, memory, detiled)
+            .map_err(|e| format!("stored image {n}: {e}"))?;
+        images.stored.push(stored);
     }
     Ok(images)
+}
+
+/// The placeholder texels of a depth target the host holds, `extent` across and down: the host's
+/// depths fill them on the device (D894).
+fn host_depths((width, height): (u32, u32)) -> DispatchTexels {
+    DispatchTexels {
+        texels: Vec::new().into(),
+        format: TexelFormat::R32Float,
+        width,
+        height,
+        depth: None,
+    }
+}
+
+/// One image a dispatch stores to, as it was before the dispatch and where it lies.
+fn stored_image(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+    detiled: &mut DetiledImages,
+) -> Result<StoredImage, String> {
+    let words = dispatch_descriptor_words(state, source, memory)?;
+    // A depth target the host holds: its texels before are the host's, and it is written
+    // back there (D894).
+    if let Some((id, extent)) = dispatch_depth_target(words, source) {
+        return Ok(StoredImage {
+            texels: host_depths(extent),
+            order: None,
+            surface: None,
+            keys_to_expand: None,
+            depth: Some(id),
+        });
+    }
+    let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
+    let spanned = read_spanned(&surface, memory)?;
+    let (width, height) = surface.extent();
+    let mut keys_to_expand = None;
+    let texels = match surface_keys(&descriptor, format, memory)? {
+        crate::dcc::Keys::Uncompressed => {
+            let texels = detiled.detile(&surface, &spanned);
+            match order {
+                Some(order) => texels
+                    .iter()
+                    .map(|&texel| to_shader_channels(texel, order))
+                    .collect(),
+                None => texels,
+            }
+        }
+        crate::dcc::Keys::Clear0000 => {
+            let chain = surface_layout(&descriptor, format).and_then(|layout| {
+                usize::try_from(layout.chain_bytes(
+                    descriptor.width,
+                    descriptor.height,
+                    descriptor.levels,
+                ))
+                .ok()
+            });
+            keys_to_expand = descriptor
+                .compression
+                .zip(surface_key_bytes(&descriptor, format))
+                .zip(chain)
+                .map(|((dcc, bytes), chain)| KeysToExpand {
+                    keys: (crate::dcc::meta_start(dcc), bytes),
+                    surface: (descriptor.base, chain),
+                });
+            vec![0; surface.texels() * format.words() as usize].into()
+        }
+        crate::dcc::Keys::Other => {
+            return Err(concat!(
+                "the stored image's compression keys need per-block addressing, which is not ",
+                "modelled"
+            )
+            .to_owned());
+        }
+    };
+    let texels = DispatchTexels {
+        texels,
+        format,
+        width,
+        height,
+        depth: volume_depth(&surface),
+    };
+    // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
+    let spanned = if keys_to_expand.is_some() {
+        vec![0; spanned.len()]
+    } else {
+        spanned
+    };
+    Ok(StoredImage {
+        texels,
+        order,
+        surface: Some((surface, spanned)),
+        keys_to_expand,
+        depth: None,
+    })
 }
 
 /// Whether the images a dispatch stores to hold integers, which its module's storage images are
@@ -3411,7 +3470,8 @@ fn fetched_image(
     memory: &impl GuestMemory,
     detiled: &mut DetiledImages,
 ) -> Result<(DispatchTexels, (u64, u64)), String> {
-    let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
+    let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)
+        .map_err(|e| format!("fetched image {}: {e}", source.slot))?;
     let (width, height) = surface.extent();
     let texels = match surface_keys(&descriptor, format, memory)? {
         crate::dcc::Keys::Uncompressed => {
@@ -3526,11 +3586,38 @@ fn viewed_level(word3: u32, level: u32) -> Result<u32, String> {
     Ok(word3 & !0xF_F000 | at << 12 | at << 16)
 }
 
-fn dispatch_image_surface(
+/// The depth target a dispatch's fetched image is, by its descriptor's eight words, with its extent:
+/// a single-level two-dimensional `32_FLOAT` image in a depth swizzle. The host holds such a target
+/// as its own depth attachment and never writes it to guest memory (D817), so a dispatch reading it
+/// reads the host's depths (D894). `None` for any other image.
+fn dispatch_depth_target(
+    words: [u32; 8],
+    source: &TextureSource,
+) -> Option<(ResourceId, (u32, u32))> {
+    let descriptor = decode_image_descriptor(words);
+    let depth_tiled =
+        matches!(descriptor.tiling, SwizzleMode::Other(mode) if DEPTH_SWIZZLES.contains(&mode));
+    (depth_tiled
+        && descriptor.format == FORMAT_32_FLOAT
+        && words[3] >> 28 == IMAGE_TYPE_2D
+        && !source.volume
+        && descriptor.base_level == 0
+        && descriptor.last_level == 0)
+        .then(|| {
+            (
+                crate::depth::depth_target_id_at(descriptor.base),
+                (descriptor.width, descriptor.height),
+            )
+        })
+}
+
+/// The eight words of the image descriptor `source` names for a dispatch: from its user data, or
+/// from the table its user data points at.
+fn dispatch_descriptor_words(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
     memory: &impl GuestMemory,
-) -> Result<DispatchImageSurface, String> {
+) -> Result<[u32; 8], String> {
     use orbistoun_translate::wavefront::TableWord;
     let user = |index: u32| {
         state
@@ -3559,8 +3646,23 @@ fn dispatch_image_surface(
             *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
     }
+    Ok(words)
+}
+
+fn dispatch_image_surface(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+) -> Result<DispatchImageSurface, String> {
+    let mut words = dispatch_descriptor_words(state, source, memory)?;
     if let Some(index) = source.level_user_data {
-        words[3] = viewed_level(words[3], user(index)?)?;
+        let level = state
+            .user_data
+            .get(index as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| "an image descriptor's user data was never written".to_owned())?;
+        words[3] = viewed_level(words[3], level)?;
     }
     let descriptor = decode_image_descriptor(words);
     let format = dispatch_format(&descriptor, words)?;
@@ -3702,7 +3804,7 @@ pub fn to_memory_channels(texel: u32, order: [u8; 4]) -> u32 {
 /// (Tiled64KbRX, 64x64x32, levels 0..=0, type 10)`.
 fn describe_dispatch_image(descriptor: &ImageDescriptor, words: [u32; 8]) -> String {
     format!(
-        "{} ({:?}, {}x{}x{}, levels {}..={}, type {})",
+        "{} ({:?}, {}x{}x{}, levels {}..={}, type {}) at {:#x}",
         descriptor.format,
         descriptor.tiling,
         descriptor.width,
@@ -3710,7 +3812,8 @@ fn describe_dispatch_image(descriptor: &ImageDescriptor, words: [u32; 8]) -> Str
         (words[4] & DEPTH_FIELD) + 1,
         descriptor.base_level,
         descriptor.last_level,
-        words[3] >> 28
+        words[3] >> 28,
+        descriptor.base
     )
 }
 
@@ -9380,6 +9483,40 @@ mod tests {
         );
     }
 
+    /// A dispatch that fetches a depth target names it, to be read from the host's depths rather
+    /// than from guest memory, which no draw writes it to (D894): Grand Theft Auto V's scene compute
+    /// program reads its `32_FLOAT` depth in `64KB_Z_X` so. The same image in `16_UNORM`, which the
+    /// host does not hold as such, is not one.
+    #[test]
+    fn a_dispatch_fetching_a_depth_target_names_it() {
+        use super::TextureSource;
+        // PPSA03416's depth surface's words, its format field (word 1, bits 28:20) made 22.
+        let mut image: [u32; 8] = [
+            0x00d6_e500,
+            0xc070_0074,
+            0x03ff_c3ff,
+            0x9180_0924,
+            0,
+            0x0070_0000,
+            0,
+            0,
+        ];
+        let sixteen = image;
+        image[1] = image[1] & !(0x1ff << 20) | 22 << 20;
+        let descriptor = super::decode_image_descriptor(image);
+        assert_eq!(
+            super::dispatch_depth_target(image, &TextureSource::default()),
+            Some((
+                crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8),
+                (descriptor.width, descriptor.height)
+            ))
+        );
+        assert_eq!(
+            super::dispatch_depth_target(sixteen, &TextureSource::default()),
+            None
+        );
+    }
+
     /// A depth compare's texture is the depth target at its descriptor's address, named rather than
     /// read (D817): PPSA03416's shadow map, `16_UNORM` in `64KB_Z_X` at 0x7400d6e50000, sampled with
     /// a sampler comparing less-than. A sample that does not compare reads the same target, its
@@ -10859,7 +10996,7 @@ mod tests {
         let descriptor = super::decode_image_descriptor(words);
         let text = super::describe_dispatch_image(&descriptor, words);
         assert!(
-            text.contains("64x32x16") && text.ends_with("type 10)"),
+            text.contains("64x32x16") && text.ends_with("type 10) at 0x10000"),
             "{text}"
         );
     }

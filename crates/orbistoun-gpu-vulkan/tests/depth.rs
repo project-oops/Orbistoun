@@ -381,3 +381,66 @@ fn a_pixel_shader_exporting_a_sample_mask_keeps_only_the_samples_it_names() {
         assert_eq!(centre(&mut backend), expected, "sample mask {mask}");
     }
 }
+
+/// A depth target's depths read back as the draws before left them, for a dispatch that reads the
+/// target as an image (D894): Grand Theft Auto V's scene compute program reads its depth so. The
+/// near triangle covers the centre at 0.25 over a clear to the far plane.
+#[test]
+fn a_depth_target_s_depths_read_back_as_its_draws_left_them() {
+    if !device_or_skip("a_depth_target_s_depths_read_back_as_its_draws_left_them") {
+        return;
+    }
+    let mut backend = backend(Some(DEPTH));
+    run(
+        &mut backend,
+        &[clear_to_far(), RenderCommand::SetDepthStencil(less())],
+    );
+    run(&mut backend, &draw(NEAR, GREEN));
+    let (depths, _, (width, height)) = backend
+        .depth_texels(DEPTH)
+        .expect("read")
+        .expect("a target the draws drew on");
+    let centre = (height / 2 * width + width / 2) as usize;
+    assert_eq!(
+        depths[centre],
+        0.25_f32.to_bits(),
+        "the near triangle's depth"
+    );
+    assert_eq!(depths.len(), (width * height) as usize);
+    assert!(
+        backend.depth_texels(TARGET).expect("read").is_none(),
+        "no depth target"
+    );
+}
+
+/// What a dispatch stores to a depth target replaces its depths (D894): Grand Theft Auto V's scene
+/// compute program writes its depth back so. After the near triangle's 0.25 is written over with
+/// 0.125 everywhere, the target reads back 0.125, and a far triangle at 0.75 under `LESS` no
+/// longer passes where the near one did not either - it is drawn nowhere.
+#[test]
+fn a_dispatch_s_depths_replace_the_target_s() {
+    if !device_or_skip("a_dispatch_s_depths_replace_the_target_s") {
+        return;
+    }
+    let mut backend = backend(Some(DEPTH));
+    run(
+        &mut backend,
+        &[clear_to_far(), RenderCommand::SetDepthStencil(less())],
+    );
+    run(&mut backend, &draw(NEAR, GREEN));
+    let (_, _, (width, height)) = backend.depth_texels(DEPTH).expect("read").expect("drawn");
+    let written = vec![0.125_f32.to_bits(); (width * height) as usize];
+    assert!(
+        backend
+            .write_depth_texels(DEPTH, &written)
+            .expect("written")
+    );
+    let (depths, _, _) = backend.depth_texels(DEPTH).expect("read").expect("drawn");
+    assert_eq!(&*depths, written.as_slice());
+    assert!(
+        !backend
+            .write_depth_texels(TARGET, &written)
+            .expect("refused quietly"),
+        "no depth target"
+    );
+}

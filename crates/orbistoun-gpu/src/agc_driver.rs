@@ -1279,7 +1279,10 @@ fn stored_image_into(
         let (base, bytes) = expand.surface;
         writes.push_repeated(base, 0, bytes);
     }
-    let (surface, spanned_before) = &image.surface;
+    // A depth target the host holds is written back to the host (D894).
+    let Some((surface, spanned_before)) = &image.surface else {
+        return Ok(());
+    };
     let mut before = std::borrow::Cow::Borrowed(&*image.texels.texels);
     // Texels a descriptor reorders were read into the shader's order; memory keeps its own.
     if let Some(order) = image.order {
@@ -1475,7 +1478,7 @@ fn note_dispatch_writes(
     entry.stored = images
         .stored
         .first()
-        .map(crate::pipeline::StoredImage::span)
+        .and_then(crate::pipeline::StoredImage::span)
         .or(entry.stored);
     entry.buffers = ranges
         .iter()
@@ -6621,7 +6624,8 @@ mod tests {
                     depth: None,
                 },
                 order: None,
-                surface: (surface, vec![0; surface.bytes()]),
+                surface: Some((surface, vec![0; surface.bytes()])),
+                depth: None,
                 keys_to_expand: Some(KeysToExpand {
                     keys: (0x9000, 3),
                     surface: (BASE, 0x3_0000),
@@ -6681,8 +6685,9 @@ mod tests {
             stored: vec![StoredImage {
                 texels,
                 order,
-                surface: (surface, spanned.clone()),
+                surface: Some((surface, spanned.clone())),
                 keys_to_expand: None,
+                depth: None,
             }],
             ..DispatchImages::default()
         };

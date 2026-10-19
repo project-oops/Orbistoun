@@ -223,6 +223,148 @@ impl DepthAttachment {
         words
     }
 
+    /// Replaces its depth with `words`, one `f32` a texel, row-major: what a dispatch that stores to
+    /// it wrote (D894). Every draw recorded before is carried out first, and the image is left in
+    /// the attachment layout a depth pass expects.
+    ///
+    /// # Errors
+    ///
+    /// When `words` is not one a texel, there is no device, or a Vulkan call fails.
+    pub(crate) fn write_depth(&self, words: &[u32]) -> Result<(), DispatchError> {
+        let texels = self.width as usize * self.height as usize;
+        if words.len() != texels {
+            return Err(DispatchError::Unsupported(format!(
+                "{} depths for a {}x{} depth target",
+                words.len(),
+                self.width,
+                self.height
+            )));
+        }
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (instance, physical, device) = (&session.instance, session.physical, &session.device);
+        let size = u64::from(self.width) * u64::from(self.height) * 4;
+        let (buffer, memory) = crate::framebuffer::create_host_buffer(
+            instance,
+            physical,
+            device,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+        )?;
+        let written = (|| {
+            // SAFETY: the allocation backs a host-visible, coherent buffer of `size` bytes, and
+            // nothing else holds a mapping of it.
+            let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
+                .map_err(|e| DispatchError::Vulkan("map_memory(depth write)", e))?
+                .cast::<u32>();
+            // SAFETY: the mapping covers `texels` words and `words` is that long; a fresh mapping
+            // cannot overlap the caller's slice.
+            unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), mapped, texels) };
+            // SAFETY: mapped immediately above and no pointer into it is used after this.
+            unsafe { device.unmap_memory(memory) };
+            crate::framebuffer::one_shot(&session, |device, command| {
+                self.record_depth_upload(device, command, buffer);
+            })
+        })();
+        // SAFETY: created above on this device, idle once the one-shot finished, destroyed once.
+        unsafe { device.destroy_buffer(buffer, None) };
+        // SAFETY: as above; the buffer bound to it is destroyed.
+        unsafe { device.free_memory(memory, None) };
+        written
+    }
+
+    /// Records [`Self::write_depth`]'s copy of `buffer` into the depth aspect, from and back to the
+    /// attachment layout a depth pass leaves it in.
+    fn record_depth_upload(
+        &self,
+        device: &ash::Device,
+        command: vk::CommandBuffer,
+        buffer: vk::Buffer,
+    ) {
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(aspects(self.format))
+            .level_count(1)
+            .layer_count(1);
+        let barrier = |old, new, src_access, dst_access| {
+            [vk::ImageMemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(dst_access)
+                .old_layout(old)
+                .new_layout(new)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image)
+                .subresource_range(range)]
+        };
+        let attachment_access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        let fragment_tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let to_destination = barrier(
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            attachment_access,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        // Depth alone, one `f32` a texel, as `read_depth` copies it out; a stencil aspect keeps
+        // what it held.
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        let to_attachment = barrier(
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            vk::AccessFlags::TRANSFER_WRITE,
+            attachment_access,
+        );
+        // SAFETY: recording is open, the image is live, and a depth pass leaves it in the
+        // attachment layout this barrier names.
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command,
+                fragment_tests,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_destination,
+            );
+        }
+        // SAFETY: recording is open, the image is in TRANSFER_DST_OPTIMAL by the barrier above,
+        // and the buffer holds the depth aspect's `width * height` four-byte texels.
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command,
+                buffer,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+        // SAFETY: recording is open and the image is in TRANSFER_DST_OPTIMAL for the copy.
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TRANSFER,
+                fragment_tests,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_attachment,
+            );
+        }
+    }
+
     /// Records [`Self::read_depth`]'s copy of the depth aspect into `buffer`, from and back to
     /// the attachment layout a depth pass leaves it in.
     fn record_depth_copy(

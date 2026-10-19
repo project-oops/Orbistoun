@@ -228,6 +228,10 @@ fn content_hash(words: &[u32]) -> u64 {
 #[derive(Debug, Clone, Copy)]
 struct DrawnOn(Option<ResourceId>);
 
+/// A depth target's depths, one float's bits a texel, with their hash and its extent
+/// ([`VulkanBackend::depth_texels`]).
+pub type DepthTexels = (std::sync::Arc<[u32]>, u64, (u32, u32));
+
 /// A Vulkan render backend.
 ///
 /// Holds the host objects a submission's resources become, keyed by content id; runs compute
@@ -681,6 +685,58 @@ impl VulkanBackend {
         Ok(())
     }
 
+    /// Depth target `target`'s depths as the draws before left it, one float's bits a texel, with
+    /// their hash and its extent: read back once per drawing onto it (D817), for a depth texture
+    /// or a dispatch reading it (D894). `None` for a target this backend never drew.
+    ///
+    /// # Errors
+    ///
+    /// When the device could not read it back.
+    pub fn depth_texels(
+        &mut self,
+        target: ResourceId,
+    ) -> Result<Option<DepthTexels>, BackendError> {
+        let Some(attachment) = self.depths.get(&target) else {
+            return Ok(None);
+        };
+        let extent = attachment.extent();
+        if let Some((read, hash)) = self.depth_reads.get(&target) {
+            return Ok(Some((std::sync::Arc::clone(read), *hash, extent)));
+        }
+        let read: std::sync::Arc<[u32]> = attachment
+            .read_depth()
+            .map_err(|e| BackendError::Device(format!("depth read: {e:?}")))?
+            .into();
+        let hash = orbistoun_gpu::content_hash(&read);
+        self.depth_reads
+            .insert(target, (std::sync::Arc::clone(&read), hash));
+        Ok(Some((read, hash, extent)))
+    }
+
+    /// Replaces depth target `target`'s depths with `texels`, one float's bits a texel: what a
+    /// dispatch that stores to it wrote (D894). Its read-back depths are then these. `false` for a
+    /// target this backend never drew.
+    ///
+    /// # Errors
+    ///
+    /// When `texels` does not fit it, or the device could not write it.
+    pub fn write_depth_texels(
+        &mut self,
+        target: ResourceId,
+        texels: &[u32],
+    ) -> Result<bool, BackendError> {
+        let Some(attachment) = self.depths.get(&target) else {
+            return Ok(false);
+        };
+        attachment
+            .write_depth(texels)
+            .map_err(|e| BackendError::Device(format!("depth write: {e:?}")))?;
+        let written: std::sync::Arc<[u32]> = texels.into();
+        let hash = orbistoun_gpu::content_hash(&written);
+        self.depth_reads.insert(target, (written, hash));
+        Ok(true)
+    }
+
     /// Binds the depth target a [`RenderCommand::BindDepthTexture`] names at its slot (D817): its
     /// attachment's depth as the draws before left it, read back once per drawing onto it and
     /// sampled through a compare by the sampler's function. A target this backend never drew is
@@ -695,24 +751,11 @@ impl VulkanBackend {
         else {
             return Ok(());
         };
-        let Some(attachment) = self.depths.get(&target) else {
+        let Some((texels, hash, (width, height))) = self.depth_texels(target)? else {
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "BindDepthTexture of a depth target this backend never drew",
             });
-        };
-        let (width, height) = attachment.extent();
-        let (texels, hash) = if let Some((read, hash)) = self.depth_reads.get(&target) {
-            (std::sync::Arc::clone(read), *hash)
-        } else {
-            let read: std::sync::Arc<[u32]> = attachment
-                .read_depth()
-                .map_err(|e| BackendError::Device(format!("depth read: {e:?}")))?
-                .into();
-            let hash = orbistoun_gpu::content_hash(&read);
-            self.depth_reads
-                .insert(target, (std::sync::Arc::clone(&read), hash));
-            (read, hash)
         };
         let Some(texture) = usize::try_from(slot)
             .ok()
