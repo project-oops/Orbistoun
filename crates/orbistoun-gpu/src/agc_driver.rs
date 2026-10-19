@@ -4758,6 +4758,86 @@ fn held() -> &'static Mutex<Vec<cp::HeldWrite>> {
     &HELD
 }
 
+/// The writes in `bytes` to any of the `waited` words, each as (address, packet, byte offset).
+#[must_use]
+pub fn fillers_of(bytes: &[u8], waited: &[u64]) -> Vec<(u64, &'static str, u32)> {
+    cp::held_writes(bytes, 0)
+        .into_iter()
+        .filter(|write| waited.contains(&write.address))
+        .map(|write| (write.address, write.packet(), write.offset))
+        .collect()
+}
+
+/// The words the queues wait on as the run stands: where the stopped queue stopped, and where the
+/// compute streams stepped aside stopped.
+fn waited_words() -> Vec<u64> {
+    let mut waited = Vec::new();
+    if let Some(cp::Stopped::WaitNeverSatisfied { address, .. }) = queue_stall()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .map(|stalled| stalled.stopped)
+    {
+        waited.push(address);
+    }
+    waited.extend(
+        stepped_aside()
+            .into_iter()
+            .filter_map(|stopped| match stopped {
+                Some(cp::Stopped::WaitNeverSatisfied { address, .. }) => Some(address),
+                _ => None,
+            }),
+    );
+    waited
+}
+
+/// How many fillers are kept.
+const FILLERS_MOST: usize = 16;
+
+/// Writes submissions held behind the stopped queue would make to a word a queue waits on, each as
+/// (address, packet, byte offset, which held submission - the first held is 0).
+fn fillers_kept() -> &'static Mutex<Vec<(u64, &'static str, u32, u64)>> {
+    static KEPT: Mutex<Vec<(u64, &'static str, u32, u64)>> = Mutex::new(Vec::new());
+    &KEPT
+}
+
+/// Keeps the writes `bytes`, a submission held behind the stopped queue, would make to a word a
+/// queue waits on: a queue the console runs apart from the stopped one would have made them, so
+/// the wait is this run's, not the title's (D710).
+fn note_fillers(bytes: &[u8]) {
+    let waited = waited_words();
+    if waited.is_empty() {
+        return;
+    }
+    let found = fillers_of(bytes, &waited);
+    if found.is_empty() {
+        return;
+    }
+    let held = execution_record()
+        .lock()
+        .map_or(0, |record| record.held_back);
+    let mut kept = fillers_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (address, packet, offset) in found {
+        if kept.len() < FILLERS_MOST {
+            kept.push((address, packet, offset, held));
+        }
+    }
+}
+
+/// What a submission held behind the stopped queue would write to `address`, a word a queue waits
+/// on: each as (packet, byte offset, which held submission).
+#[must_use]
+pub fn held_fillers(address: u64) -> Vec<(&'static str, u32, u64)> {
+    fillers_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|filler| filler.0 == address)
+        .map(|&(_, packet, offset, held)| (packet, offset, held))
+        .collect()
+}
+
 /// Keeps the writes of `bytes` from byte `from` on as held, dropping the oldest past
 /// [`HELD_MOST`].
 fn note_held(bytes: &[u8], from: u32) {
@@ -5619,6 +5699,7 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if stalled.is_some() {
         note_held(bytes, 0);
+        note_fillers(bytes);
         if let Ok(mut record) = execution_record().lock() {
             record.held_back += 1;
         }
@@ -5887,6 +5968,35 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverSubmitAcb", submit_acb),
         ("sceAgcDriverSubmitDcb", submit_dcb),
     ]
+}
+
+#[cfg(test)]
+mod filler_tests {
+    /// A submission held behind the stopped queue that writes a word a queue waits on is named as
+    /// that word's filler: a queue the console runs apart from the stopped one would have written
+    /// it, so the wait need not be the title's (D710).
+    #[test]
+    fn a_held_submission_s_write_to_a_waited_word_is_named() {
+        use crate::packet::build::command_header;
+        // WRITE_DATA to memory at 0x1000, then one at 0x2000.
+        let words = [
+            command_header(0x37, 4),
+            5 << 8,
+            0x1000,
+            0,
+            7,
+            command_header(0x37, 4),
+            5 << 8,
+            0x2000,
+            0,
+            9,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            super::fillers_of(&bytes, &[0x2000, 0x3000]),
+            vec![(0x2000, "WRITE_DATA", 5 * 4)]
+        );
+    }
 }
 
 #[cfg(test)]

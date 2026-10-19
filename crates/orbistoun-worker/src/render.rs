@@ -2822,6 +2822,24 @@ fn report_unsatisfied_wait(address: u64) {
         .to_owned()
     });
     tracing::info!("the word the command processor waited on, {address:#x}: {filled}");
+    for (packet, offset, held) in orbistoun_gpu::agc_driver::held_fillers(address) {
+        tracing::info!(
+            "  a submission held behind the stopped queue would fill it: {packet} at byte {offset:#x} of the {} held - its queue may run apart from the stopped one on the console (D710)",
+            ordinal(held + 1)
+        );
+    }
+}
+
+/// `n` as an English ordinal: 1st, 2nd, 3rd, 4th, 11th, 21st.
+fn ordinal(n: u64) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// How many released labels the report names, most released first.
