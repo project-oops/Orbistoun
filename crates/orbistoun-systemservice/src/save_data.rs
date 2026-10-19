@@ -431,6 +431,10 @@ mod mode {
 /// [`mode::CREATE`] (D792, assumed): not found.
 const SAVE_NOT_FOUND: u64 = 0x809f_0008;
 
+/// `SCE_SAVE_DATA_ERROR_INVALID_ARGUMENT`, measured for an icon path naming no file and for a
+/// bad `sceSaveDataUmount2` mount point (REQ-gt19).
+const SAVE_INVALID_ARGUMENT: u64 = 0x809f_0000;
+
 /// What a mount reports in `result+0x1c` when it created the save (D792, assumed).
 const MOUNT_CREATED: u32 = 1;
 
@@ -696,9 +700,8 @@ pub(crate) fn dir_name_search(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `/data/savedata` and answers 0 (assumed, as the reference emulators delete a local save).
 /// `param` is `{ user u32, _, title id *, name * }` - PPSA04263 fills it so after searching for the
 /// name, with no title id (its own), and raises its error flag on a negative answer. A save that
-/// does not exist answers [`SAVE_NOT_FOUND`], as a mount without the create bit does; the mounted
-/// save, another user's or another title's, and a call before `sceSaveDataInitialize3` answer the
-/// placeholder.
+/// does not exist answers 0 - already gone (REQ-gt19, measured); the mounted save, another user's
+/// or another title's, and a call before `sceSaveDataInitialize3` answer the placeholder.
 pub(crate) fn delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let param = args[0];
     let refuse = u64::from(GuestError::Unimplemented.as_raw());
@@ -722,7 +725,9 @@ pub(crate) fn delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     let guest_path = format!("{SAVE_STORE}/{directory}");
     if !orbistoun_fs::mount::is_directory(&guest_path) {
-        return SAVE_NOT_FOUND;
+        // A save that is not there is already gone: the console answers 0, not an error
+        // (REQ-gt19, measured - delete of an absent directory returned 0x0).
+        return 0;
     }
     let mounted = MOUNTED.load(Ordering::Acquire)
         && orbistoun_fs::mount::resolve_existing(SAVE_MOUNT_POINT)
@@ -912,7 +917,9 @@ pub(crate) fn save_icon_by_path(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return refuse;
     };
     let Some(source) = orbistoun_fs::mount::resolve_existing(&path) else {
-        return refuse;
+        // A path naming no file is an invalid argument, as the console answered for an icon path
+        // that did not exist (REQ-gt19, measured 0x809f0000).
+        return SAVE_INVALID_ARGUMENT;
     };
     let Some(host) = mounted_file_for_write(args[0], ICON_FILE) else {
         return refuse;
@@ -1063,8 +1070,8 @@ mod delete_tests {
         assert!(!root.join("savedata/SAVE0001").exists(), "deleted");
         assert_eq!(
             super::delete(&args),
-            super::SAVE_NOT_FOUND,
-            "nothing left to delete"
+            0,
+            "an absent save is already gone (REQ-gt19)"
         );
 
         std::fs::create_dir_all(root.join("savedata/SAVE0001")).expect("a save");

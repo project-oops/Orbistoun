@@ -82,8 +82,8 @@ edge_cases = [
     "orbistoun mounts the directory of that name under the title's /data/savedata at /savedata0 (D792): created when the mode has bit 2 (4), otherwise 0x809f0008 for a save that does not exist; writable only with bit 1 (2). result takes the mount point at +0x00, 0 at +0x10 and 1 at +0x1c when the mount created the save.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The mode bits, the result layout and the not-found code are the SDK's as public headers give them, not measured: obSCEne could not bind Mount3 from a homebrew process (REQ-sm02). Chosen by the user on 2026-10-11 (D792)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA03416-app0"]
 found_on = "2026-10-11"
 
@@ -96,8 +96,8 @@ edge_cases = [
     "orbistoun releases /savedata0 and answers 0; any other mount point, or none mounted, answers the placeholder (D792).",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The shell's answer (D792), unmeasured."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA03416-app0"]
 found_on = "2026-10-11"
 
@@ -112,8 +112,8 @@ edge_cases = [
     "Before sceSaveDataInitialize3, for another user or another title's saves, it answers the placeholder; a null block answers 0x809f0000.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The condition and result layouts and the order are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -124,11 +124,11 @@ purpose = "(param): deletes one of the user's saves of this title."
 returns = "status"
 edge_cases = [
     "PPSA04263 fills param: +0x00 the user, +0x08 0 (no title id: its own), +0x10 a pointer to the directory name, after searching for that name (image+0x2b3f941); it raises its error flag on a negative answer (`jns` at image+0x2b3f98a).",
-    "orbistoun removes the directory of that name under the title's /data/savedata and answers 0; a save that does not exist answers 0x809f0008, as Mount3 without the create bit does. The mounted save, another user's or title's, and a call before Initialize3 answer the placeholder.",
+    "orbistoun removes the directory of that name under the title's /data/savedata and answers 0; a save that does not exist also answers 0 (REQ-gt19 measured, corrected from the assumed 0x809f0008), as Mount3 without the create bit does. The mounted save, another user's or title's, and a call before Initialize3 answer the placeholder.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The parameter layout and the deletion are those the reference emulators give local saves (one answers 0 for an absent save; orbistoun keeps D792's not-found code); obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -142,8 +142,8 @@ edge_cases = [
     "orbistoun answers identifiers counting from 1; writes reach the title's storage as they are made, so the resource holds nothing. Before Initialize3 it answers the placeholder.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -157,8 +157,8 @@ edge_cases = [
     "orbistoun answers 0 for the mounted save and a live resource, making the save writable until it is unmounted, and the placeholder otherwise. PPSA04263 mounts its save read-only (mode 1, or 5 to create it) and writes only after Prepare.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -171,8 +171,8 @@ edge_cases = [
     "param is { resource u32, mode u32, ... }. orbistoun answers 0 for a live resource - what was written is already in the title's storage - and the placeholder otherwise.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -185,8 +185,8 @@ edge_cases = [
     "orbistoun answers 0 for a live resource and the placeholder for one not made or released already.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The shape and the answer are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -200,8 +200,8 @@ edge_cases = [
     "PPSA04263 sets the whole block (type 0, size 0x530) after writing its profile, and abandons the save on a negative answer (image+0x2b3dd3c).",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The parameter types and layout are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -211,11 +211,11 @@ arity = 2
 purpose = "(mount point, path): saves a PNG as a mounted save's icon."
 returns = "status"
 edge_cases = [
-    "orbistoun copies the file into the save's sce_sys/icon0.png and answers 0; a mount point with no save, or a path naming no file, answers the placeholder.",
+    "orbistoun copies the file into the save's sce_sys/icon0.png and answers 0; a path naming no file answers 0x809f0000 (invalid argument), as the console did for an icon path that did not exist (REQ-gt19 measured); a mount point with no save answers the placeholder.",
     "PPSA04263 saves /app0/sce_sys/save_data.png into a save it has just created, before committing (image+0x2b3d978).",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The parameter types and layout are those the reference emulators give local saves, and PPSA04263's own code agrees with each field it touches; obSCEne has not measured the call."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0755Z-gt19, reports/hardware/report-20261019-gt19-census.log (SHA-256 63be2040650e553f...) lines 5300-5390 (000-boot/gt19-savedata-flow)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
