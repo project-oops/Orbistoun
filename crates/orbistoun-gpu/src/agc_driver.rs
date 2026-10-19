@@ -5697,6 +5697,35 @@ pub fn commands_before(bytes: &[u8], until: u32) -> Vec<(u8, usize)> {
     counts.into_iter().collect()
 }
 
+/// The memory writes of `bytes` before byte `until`, each its packet's name and the address it
+/// wrote ([`cp::held_writes`]): what a stall's report lists, so the label another queue waits on can
+/// be matched against what this one wrote.
+#[must_use]
+pub fn writes_before(bytes: &[u8], until: u32) -> Vec<(&'static str, u64)> {
+    cp::held_writes(bytes, 0)
+        .into_iter()
+        .filter(|write| write.offset < until)
+        .map(|write| (write.packet(), write.address))
+        .collect()
+}
+
+/// The memory writes the stream that stopped its queue made before it stopped
+/// ([`writes_before`]).
+fn stalled_writes_kept() -> &'static Mutex<Vec<(&'static str, u64)>> {
+    static KEPT: Mutex<Vec<(&'static str, u64)>> = Mutex::new(Vec::new());
+    &KEPT
+}
+
+/// The memory writes the stream that stopped its queue made before it stopped; empty while no
+/// stream has stopped one.
+#[must_use]
+pub fn stalled_writes() -> Vec<(&'static str, u64)> {
+    stalled_writes_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// The commands the stream that stopped its queue ran before it stopped ([`commands_before`]).
 fn stalled_commands_kept() -> &'static Mutex<Vec<(u8, usize)>> {
     static KEPT: Mutex<Vec<(u8, usize)>> = Mutex::new(Vec::new());
@@ -5745,6 +5774,9 @@ fn finish(bytes: &[u8], executed: cp::CpExecution) {
             *stalled_commands_kept()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = commands_before(bytes, from);
+            *stalled_writes_kept()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = writes_before(bytes, from);
         }
         *queue_stall()
             .lock()
@@ -5855,6 +5887,41 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverSubmitAcb", submit_acb),
         ("sceAgcDriverSubmitDcb", submit_dcb),
     ]
+}
+
+#[cfg(test)]
+mod stall_write_tests {
+    /// The memory writes a stream made before it stopped are listed with where each wrote, the one
+    /// after the stop left out: a wait on another queue for a label is matched against them.
+    #[test]
+    fn a_stall_lists_the_writes_before_it() {
+        use crate::packet::build::command_header;
+        // WRITE_DATA to memory (DST_SEL 5) at 0x1000, then WAIT_REG_MEM, then another WRITE_DATA.
+        let words = [
+            command_header(0x37, 4),
+            5 << 8,
+            0x1000,
+            0,
+            7,
+            command_header(0x3C, 6),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            command_header(0x37, 4),
+            5 << 8,
+            0x2000,
+            0,
+            9,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            super::writes_before(&bytes, 5 * 4),
+            vec![("WRITE_DATA", 0x1000)]
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2695,6 +2695,17 @@ fn log_execution() {
         "the stream that stopped its queue",
         &orbistoun_gpu::agc_driver::stalled_commands(),
     );
+    let writes = orbistoun_gpu::agc_driver::stalled_writes();
+    if !writes.is_empty() {
+        let listed: Vec<String> = writes
+            .iter()
+            .map(|(packet, address)| format!("{packet} {address:#x}"))
+            .collect();
+        tracing::info!(
+            "the memory the stream that stopped its queue wrote before it stopped: {}",
+            listed.join(", ")
+        );
+    }
     log_flip_origins();
     log_dispatch_writes();
     // The program a refused dispatch runs, to read the refusal against.
