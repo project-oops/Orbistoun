@@ -10,8 +10,8 @@ edge_cases = [
     "A null destination or non-zero options answer 0x80553904.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -21,12 +21,12 @@ arity = 1
 purpose = "A handle for the calls that take one, its identifier written to the argument. sceNpTrophy2CreateHandle(handle *)."
 returns = "status"
 edge_cases = [
-    "Handles carry no state: an offline console has no request in flight to abort.",
-    "A null destination answers 0x80553904.",
+    "Handles carry no state: an offline console has no request in flight to abort, so AbortHandle answers 0 for a live handle (REQ-gt18).",
+    "A null destination to CreateHandle answers 0x80553904 (measured).",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -36,12 +36,12 @@ arity = 3
 purpose = "Opens a context's trophy set from the title's sce_sys/trophy2/trophyNN.ucp, with what the user earned in earlier runs. sceNpTrophy2RegisterContext(context, handle, options)."
 returns = "status"
 edge_cases = [
-    "A title with no pack for the label answers 0x8055391e (title configuration not installed).",
-    "An unknown context answers 0x80553909; a second registration 0x80553921.",
+    "A title with no pack for the label answers 0x8055390c (file not found), measured (REQ-gt18, corrected from the assumed 0x8055391e). An unknown context answers 0x80553909 (measured).",
+    "A second registration of a context that did open a pack answers 0x80553921 (not reached in gt18, whose set had no pack); orbistoun keeps it.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -56,8 +56,8 @@ edge_cases = [
     "PPSA04263's own reader (image+0x2d68c80) zeroes 152 bytes of game details and 24 of game data, reads the trophy count at details+4, zeroes 0x520 bytes of trophy details and 32 of data, and reads the id at +0, the name at +0x20, the description at +0xa0 and the unlocked byte at data+4.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -71,8 +71,8 @@ edge_cases = [
     "PPSA04263's own reader (image+0x2d68c80) zeroes 152 bytes of game details and 24 of game data, reads the trophy count at details+4, zeroes 0x520 bytes of trophy details and 32 of data, and reads the id at +0, the name at +0x20, the description at +0xa0 and the unlocked byte at data+4.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -85,8 +85,8 @@ edge_cases = [
     "A null count, or both arrays null, answers 0x80553904.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -99,8 +99,8 @@ edge_cases = [
     "The callback is kept, not yet called: its arguments are unmeasured.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -110,8 +110,8 @@ arity = 1
 purpose = "Aborts what a handle has in flight - nothing, on an offline console. sceNpTrophy2AbortHandle(handle)."
 returns = "status"
 found_by = "static"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -120,9 +120,12 @@ name = "sceNpTrophy2DestroyHandle"
 arity = 1
 purpose = "Releases a handle. sceNpTrophy2DestroyHandle(handle)."
 returns = "status"
+edge_cases = [
+    "A live handle is released and answers 0; a handle already destroyed, or one no CreateHandle made, answers 0x80553908 (SCE_NP_TROPHY2_ERROR_INVALID_HANDLE) (REQ-gt18).",
+]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -135,7 +138,7 @@ edge_cases = [
     "An unknown context answers 0x80553909.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it: trophies are local and kept without a network account. obSCEne has not probed the library."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T0530Z-gt18, reports/hardware/report-20261019-gt18-census.log (SHA-256 6123d5696cca2be0...) lines 6095-6140 (000-boot/gt18-trophy2): return codes, out-block sizes and strides measured under a title whose set was empty, so success-path contents stay modelled from PPSA04263 image+0x2d68c80."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"

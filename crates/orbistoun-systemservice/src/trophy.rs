@@ -12,7 +12,7 @@
 //! offline console; no obSCEne probe has reached this library. A hardware census replaces any of
 //! them that disagrees.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
@@ -50,14 +50,17 @@ guest_module! {
 const INVALID_ARGUMENT: u64 = 0x8055_3904;
 /// A context no `sceNpTrophy2CreateContext` made, or one destroyed.
 const INVALID_CONTEXT: u64 = 0x8055_3909;
+/// A handle no `sceNpTrophy2CreateHandle` made, or one already destroyed (REQ-gt18).
+const INVALID_HANDLE: u64 = 0x8055_3908;
 /// A trophy the set does not hold.
 const INVALID_TROPHY_ID: u64 = 0x8055_390a;
 /// A second context for the same user and trophy set.
 const CONTEXT_ALREADY_EXISTS: u64 = 0x8055_3910;
 /// A context past the most one title may hold.
 const CONTEXT_EXCEEDS_MAX: u64 = 0x8055_391b;
-/// A title with no trophy pack for the service label it named.
-const TITLE_CONF_NOT_INSTALLED: u64 = 0x8055_391e;
+/// A title with no trophy pack for the service label it named: file not found (REQ-gt18,
+/// measured for a title with no installed pack).
+const PACK_NOT_FOUND: u64 = 0x8055_390c;
 /// A query on a context not yet registered.
 const NOT_REGISTERED: u64 = 0x8055_3920;
 /// A second registration of one context.
@@ -487,6 +490,8 @@ struct Trophies {
     next_context: i32,
     /// The identifier the next handle takes.
     next_handle: i32,
+    /// Each live handle, by identifier: a handle is live from creation until it is destroyed.
+    handles: BTreeSet<i32>,
     /// Each record, by user and service label.
     books: BTreeMap<(u32, u32), Book>,
     /// The callback a title asked to hear of earnings through, and its user data.
@@ -498,6 +503,7 @@ static TROPHIES: Mutex<Trophies> = Mutex::new(Trophies {
     contexts: BTreeMap::new(),
     next_context: 0,
     next_handle: 0,
+    handles: BTreeSet::new(),
     books: BTreeMap::new(),
     unlock_callback: None,
 });
@@ -686,6 +692,7 @@ fn create_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return INVALID_ARGUMENT;
     }
     state.next_handle = handle;
+    state.handles.insert(handle);
     0
 }
 
@@ -705,7 +712,7 @@ fn register(
     let key = (found.user, found.label);
     if let std::collections::btree_map::Entry::Vacant(vacant) = state.books.entry(key) {
         let Some(opened) = book(key.0, key.1) else {
-            return TITLE_CONF_NOT_INSTALLED;
+            return PACK_NOT_FOUND;
         };
         vacant.insert(opened);
     }
@@ -834,10 +841,20 @@ fn register_unlock_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// `sceNpTrophy2AbortHandle(handle)` and `sceNpTrophy2DestroyHandle(handle)`: nothing is pending on
-/// an offline console's handle, so each answers 0.
-fn handle_done(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// `sceNpTrophy2AbortHandle(handle)`: nothing is pending on an offline console's handle, so it
+/// answers 0 (REQ-gt18, measured for a live handle).
+fn abort_handle(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
+}
+
+/// `sceNpTrophy2DestroyHandle(handle)`: releases a live handle and answers 0; a handle already
+/// destroyed, or one no `sceNpTrophy2CreateHandle` made, answers `0x80553908` (REQ-gt18).
+fn destroy_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if trophies().handles.remove(&id(args[0])) {
+        0
+    } else {
+        INVALID_HANDLE
+    }
 }
 
 /// `sceNpTrophy2DestroyContext(context)`: ends a context; its user's record stays open for the next.
@@ -888,8 +905,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceNpTrophy2RegisterUnlockCallback",
             register_unlock_callback,
         ),
-        ("sceNpTrophy2AbortHandle", handle_done),
-        ("sceNpTrophy2DestroyHandle", handle_done),
+        ("sceNpTrophy2AbortHandle", abort_handle),
+        ("sceNpTrophy2DestroyHandle", destroy_handle),
         ("sceNpTrophy2DestroyContext", destroy_context),
     ]
 }
@@ -1125,6 +1142,26 @@ pub(crate) mod tests {
         assert_eq!(&out, b"abc\0");
     }
 
+    /// A handle is live from creation until it is destroyed: destroying it answers 0, and
+    /// destroying it again, or one never created, answers `0x80553908`; aborting answers 0
+    /// (REQ-gt18).
+    #[test]
+    fn a_handle_is_destroyed_once() {
+        let mut handle = 0_u32;
+        let out = std::ptr::from_mut(&mut handle) as u64;
+        assert_eq!(create_handle(&[0, 0, 0, 0, 0, 0]), INVALID_ARGUMENT);
+        assert_eq!(create_handle(&[out, 0, 0, 0, 0, 0]), 0);
+        let made = u64::from(handle);
+        assert_ne!(made, 0);
+        assert_eq!(abort_handle(&[made, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(destroy_handle(&[made, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(destroy_handle(&[made, 0, 0, 0, 0, 0]), INVALID_HANDLE);
+        assert_eq!(
+            destroy_handle(&[0xdead_beef, 0, 0, 0, 0, 0]),
+            INVALID_HANDLE
+        );
+    }
+
     /// A context is made once per user and set, registers once with its record, answers queries only
     /// when registered, and is gone once destroyed. One test: the trophies are the process's.
     #[test]
@@ -1151,7 +1188,7 @@ pub(crate) mod tests {
         assert_eq!(get_game_info(&[made, 1, 0, 0, 0, 0]), INVALID_ARGUMENT);
         assert_eq!(
             register(&mut trophies(), id(made), |_, _| None),
-            TITLE_CONF_NOT_INSTALLED
+            PACK_NOT_FOUND
         );
         assert_eq!(
             register(&mut trophies(), id(made), |_, _| Some(sample_book())),
