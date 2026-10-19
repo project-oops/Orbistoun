@@ -50,6 +50,8 @@ pub const SUPPORTED: &[&str] = &[
     "ds_write2_b32",
     "ds_read2_b32",
     "ds_read_b96",
+    "ds_write_b96",
+    "ds_write_b128",
     "ds_write_b8",
     "ds_read_u8",
     "ds_or_b32",
@@ -105,6 +107,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_cselect_b32",
     "s_bitcmp1_b32",
     "s_and_saveexec_b64",
+    "s_andn1_saveexec_b64",
     "s_and_saveexec_b32",
     "s_bcnt1_i32_b64",
     "v_rndne_f32_e32",
@@ -286,6 +289,11 @@ pub const SUPPORTED: &[&str] = &[
     "v_mul_u32_u24_e32",
     "v_min_u32_e32",
     "v_max_u32_e32",
+    "v_min_i32_e32",
+    "v_max_i32_e32",
+    "v_cvt_rpi_i32_f32_e32",
+    "v_cvt_flr_i32_f32_e32",
+    "v_cvt_f16_f32_e32",
     "v_mad_u32_u24",
     "v_mad_u32_u16",
     "v_mad_i32_i24",
@@ -737,6 +745,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_lshl4_add_u32"
             | "s_bitcmp1_b32"
             | "s_and_saveexec_b64"
+            | "s_andn1_saveexec_b64"
             | "s_and_saveexec_b32"
             | "s_bcnt1_i32_b64"
     )
@@ -2944,7 +2953,8 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
-        "s_and_saveexec_b64" => and_save_exec(model, instruction),
+        "s_and_saveexec_b64" => and_save_exec(model, instruction, false),
+        "s_andn1_saveexec_b64" => and_save_exec(model, instruction, true),
         "s_and_saveexec_b32" => and_save_exec_32(model, instruction),
         "s_bcnt1_i32_b64" => scalar_bit_count_64(model, instruction),
 
@@ -3033,14 +3043,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
 
         // Integer conversions.
-        "v_cvt_f32_u32_e32"
-        | "v_cvt_f32_i32_e32"
-        | "v_cvt_i32_f32_e32"
-        | "v_cvt_u32_f32_e32"
-        | "v_cvt_f32_ubyte0_e32"
-        | "v_cvt_f32_ubyte1_e32"
-        | "v_cvt_f32_ubyte2_e32"
-        | "v_cvt_f32_ubyte3_e32" => integer_conversion(model, instruction, name),
+        _ if INTEGER_CONVERSIONS.contains(&name) => integer_conversion(model, instruction, name),
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
@@ -3129,7 +3132,9 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_mac_f32_e32"
         | "v_mul_u32_u24_e32"
         | "v_min_u32_e32"
-        | "v_max_u32_e32" => short_form_arithmetic(model, instruction, name),
+        | "v_max_u32_e32"
+        | "v_min_i32_e32"
+        | "v_max_i32_e32" => short_form_arithmetic(model, instruction, name),
 
         // Float minimum and maximum, emitted as `GLSL.std.450` FMax/FMin because the core opcode
         // set has none.
@@ -3264,10 +3269,12 @@ fn memory_instruction<M: Model + ?Sized>(
             })
         }
         "ds_write_b32" | "ds_read_b32" | "ds_read_b96" | "ds_write2_b32" | "ds_read2_b32"
-        | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => {
+        | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" | "ds_write_b96" | "ds_write_b128" => {
             match name {
                 "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
                 "ds_read_b96" => local_share_words(model, instruction, 3),
+                "ds_write_b96" => local_share_write_words(model, instruction, 3),
+                "ds_write_b128" => local_share_write_words(model, instruction, 4),
                 "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
                 _ => local_share_merge(model, instruction, name),
             }?;
@@ -3406,11 +3413,17 @@ fn short_form_arithmetic<M: Model + ?Sized>(
                 let previous = model.read_source(instruction, destination, lane)?;
                 legacy_multiply_add(model, lhs, rhs, previous)
             }
-            // The unsigned minimum and maximum.
-            "v_min_u32_e32" | "v_max_u32_e32" => {
-                let less = model.compare(op::ULESS_THAN, lhs, rhs);
+            // The unsigned and signed minimum and maximum.
+            "v_min_u32_e32" | "v_max_u32_e32" | "v_min_i32_e32" | "v_max_i32_e32" => {
+                let signed = name.contains("_i32");
+                let compare = if signed {
+                    op::SLESS_THAN
+                } else {
+                    op::ULESS_THAN
+                };
+                let less = model.compare(compare, lhs, rhs);
                 let (smaller, larger) = (lhs, rhs);
-                if name == "v_min_u32_e32" {
+                if name.starts_with("v_min") {
                     model.select(less, smaller, larger)
                 } else {
                     model.select(less, larger, smaller)
@@ -5650,6 +5663,7 @@ fn scalar_bit_test<M: Model + ?Sized>(
 fn and_save_exec<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    inverted: bool,
 ) -> Result<(), TranslateError> {
     let [destination, source] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
@@ -5669,6 +5683,17 @@ fn and_save_exec<M: Model + ?Sized>(
         });
     }
     let (source_low, source_high) = sixty_four_bit_source(model, instruction, source)?;
+    // `s_andn1_saveexec_b64` inverts its source (GFX11's `s_and_not0_saveexec`,
+    // `aco_opcodes.py:656`).
+    let (source_low, source_high) = if inverted {
+        let all = model.constant(u32::MAX);
+        (
+            model.binary(op::BITWISE_XOR, source_low, all),
+            model.binary(op::BITWISE_XOR, source_high, all),
+        )
+    } else {
+        (source_low, source_high)
+    };
     let (exec_low, exec_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
     let low = model.binary(op::BITWISE_AND, source_low, exec_low);
     let high = model.binary(op::BITWISE_AND, source_high, exec_high);
@@ -5967,6 +5992,46 @@ fn local_share_words<M: Model + ?Sized>(
             let index = model.local_word_index(byte_address);
             let value = model.read_local(index)?;
             model.write_vector_lane(register + word, lane, value);
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// `ds_write_b96 address, d offset` and `ds_write_b128`: `words` consecutive words from `d` and the
+/// registers after it to the address plus the byte offset (AMD's published RDNA instruction set,
+/// `DS_WRITE_B96`, `DS_WRITE_B128`). The local share only: a global-share form is refused before it
+/// gets here.
+fn local_share_write_words<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    words: u32,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let (address, data, offset) = three_operands(instruction)?;
+    let (Operand::Vector(register), Operand::Immediate(offset)) = (data, offset) else {
+        return Err(refuse(
+            "a multi-word local-data-share write did not decode to a register and a byte offset",
+        ));
+    };
+    let offset =
+        u32::try_from(*offset).map_err(|_| refuse("a negative local-data-share offset"))?;
+    let register = *register;
+    for lane in running_lanes(model) {
+        let base = model.read_source(instruction, address, lane)?;
+        for word in 0..words {
+            let byte_offset = model.constant(offset + 4 * word);
+            let byte_address = model.add(base, byte_offset);
+            let index = model.local_word_index(byte_address);
+            let value = model.read_source(
+                instruction,
+                &Operand::Vector(register + u16::try_from(word).unwrap_or(0)),
+                lane,
+            )?;
+            model.write_local(index, value, lane)?;
         }
     }
     model.count();
@@ -7492,12 +7557,19 @@ pub const SDWA_COMPARE: &[&str] = &[
     "v_cmp_nge_f32_e32",
     "v_cmp_nlg_f32_e32",
     "v_cmp_nle_f32_e32",
-    // The forms whose answer narrows the execution mask.
+    // The forms whose answer narrows the execution mask: every float compare above's.
     "v_cmpx_lt_f32_e32",
     "v_cmpx_eq_f32_e32",
+    "v_cmpx_le_f32_e32",
     "v_cmpx_gt_f32_e32",
+    "v_cmpx_ge_f32_e32",
     "v_cmpx_neq_f32_e32",
+    "v_cmpx_ngt_f32_e32",
     "v_cmpx_nlt_f32_e32",
+    "v_cmpx_lg_f32_e32",
+    "v_cmpx_nge_f32_e32",
+    "v_cmpx_nlg_f32_e32",
+    "v_cmpx_nle_f32_e32",
 ];
 
 /// A compare in its SDWA form, as ACO encodes one (`aco_assembler.cpp`, its SDWA emission): the
@@ -9771,6 +9843,19 @@ fn integer_conversion<M: Model + ?Sized>(
             integer_to_float(model, bits, name == "v_cvt_f32_i32_e32")
         } else if name == "v_cvt_u32_f32_e32" {
             float_to_unsigned_saturated(model, bits)
+        } else if name == "v_cvt_f16_f32_e32" {
+            float_to_half(model, bits)
+        } else if name == "v_cvt_flr_i32_f32_e32" {
+            // Toward negative infinity (`V_CVT_FLR_I32_F32`).
+            let floored = model.f32_ext_unary(GLSL_FLOOR, bits);
+            float_to_signed_saturated(model, floored)
+        } else if name == "v_cvt_rpi_i32_f32_e32" {
+            // To nearest, a half rounding up: the floor of the value plus a half
+            // (`V_CVT_RPI_I32_F32`).
+            let half = model.constant(0.5_f32.to_bits());
+            let raised = model.f32_binary(op::FADD, bits, half);
+            let floored = model.f32_ext_unary(GLSL_FLOOR, raised);
+            float_to_signed_saturated(model, floored)
         } else {
             float_to_signed_saturated(model, bits)
         };
@@ -9779,6 +9864,42 @@ fn integer_conversion<M: Model + ?Sized>(
     model.count();
     Ok(())
 }
+
+/// The conversions [`integer_conversion`] translates, between integers and floats.
+const INTEGER_CONVERSIONS: [&str; 11] = [
+    "v_cvt_f32_u32_e32",
+    "v_cvt_f32_i32_e32",
+    "v_cvt_i32_f32_e32",
+    "v_cvt_u32_f32_e32",
+    "v_cvt_f32_ubyte0_e32",
+    "v_cvt_f32_ubyte1_e32",
+    "v_cvt_f32_ubyte2_e32",
+    "v_cvt_f32_ubyte3_e32",
+    "v_cvt_rpi_i32_f32_e32",
+    "v_cvt_flr_i32_f32_e32",
+    "v_cvt_f16_f32_e32",
+];
+
+/// A float's bits as a half rounded to nearest, in the low sixteen bits with the high ones zero
+/// (`V_CVT_F16_F32`): `GLSL.std.450` `PackHalf2x16` of the value and zero.
+fn float_to_half<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
+    let (u32_type, f32_type, set) = (model.u32_type(), model.f32_type(), model.glsl_set());
+    let zero = model.constant(0);
+    let b = model.builder();
+    let vec2 = b.declare_type(op::TYPE_VECTOR, &[f32_type.0, 2]);
+    let (value, nought) = (b.id(), b.id());
+    b.function(op::BITCAST, &[f32_type.0, value.0, bits.0]);
+    b.function(op::BITCAST, &[f32_type.0, nought.0, zero.0]);
+    let pair = b.id();
+    b.function(
+        op::COMPOSITE_CONSTRUCT,
+        &[vec2.0, pair.0, value.0, nought.0],
+    );
+    b.ext_inst(u32_type, set, GLSL_PACK_HALF_2X16, &[pair])
+}
+
+/// GLSL.std.450 instruction number for `PackHalf2x16`.
+const GLSL_PACK_HALF_2X16: u32 = 58;
 
 /// An integer to a float's bits, signed or unsigned, rounding to nearest as SPIR-V's conversion does.
 fn integer_to_float<M: Model + ?Sized>(model: &mut M, bits: Id, signed: bool) -> Id {

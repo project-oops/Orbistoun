@@ -1878,6 +1878,32 @@ fn an_sdwa_compare_into_exec_narrows_the_lanes() {
     }
 }
 
+/// Every float compare into the execution mask has the SDWA form its plain compare has, its word's
+/// negate on the second source as well: Grand Theft Auto V's compute program does
+/// `v_cmpx_ge_f32_sdwa v0, -v3` (words 0x7c2c06f9 0x16060000). -0.5 >= -(1.0) keeps every lane
+/// writing; -2.0 >= -(1.0) stops them all.
+#[test]
+fn every_sdwa_float_compare_into_exec_narrows_the_lanes() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("every_sdwa_float_compare_into_exec_narrows_the_lanes") {
+        return;
+    }
+    let compare = head("v_cmpx_ge_f32_e32") | SDWA_MARKER;
+    assert_eq!(
+        compare | 3 << 9,
+        0x7c2c_06f9,
+        "Grand Theft Auto V's first word"
+    );
+    for (first, expected) in [(-0.5f32, 63), (-2.0, 0)] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, 1.0f32.to_bits()));
+        program.extend(v_mov_literal(1, first.to_bits()));
+        program.extend([compare, 0x1606_0001, v_mov_inline(2, 63), s_endpgm()]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        assert_eq!(vector(&registers, 2), expected, "{first} >= -(1.0)");
+    }
+}
+
 /// A float comparison compares floats, not their bits.
 #[test]
 fn a_comparison_compares_floats_not_the_bits() {
@@ -5709,6 +5735,113 @@ fn whole_quad_mode_32_lights_the_quad_of_every_set_bit_and_nothing_else() {
             "seed {seed:#b}; registers were {registers:?}"
         );
     }
+}
+
+/// Grand Theft Auto V's scene shaders' signed minimum and maximum (VOP2 17, 18), rounding
+/// conversions to integers (VOP1 13, floor; VOP1 12, nearest with a half rounding up) and half
+/// conversion (VOP1 10): the minimum of -3 and 5 is -3 and the maximum 5; 2.5 floors to 2 and
+/// rounds to 3, -2.5 floors to -3 and rounds to -2; 2.5 as a half is `0x4100`, its high half zero.
+#[test]
+fn the_scene_s_signed_extremes_and_rounding_conversions() {
+    if !device_or_skip("the_scene_s_signed_extremes_and_rounding_conversions") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, (-3_i32).cast_unsigned()));
+    program.extend(v_mov_literal(2, 5));
+    program.push(vop2_vv("v_min_i32_e32", 3, 1, 2));
+    program.push(vop2_vv("v_max_i32_e32", 4, 1, 2));
+    program.extend(v_mov_literal(5, 2.5_f32.to_bits()));
+    program.push(vop1_vv("v_cvt_flr_i32_f32_e32", 6, 5));
+    program.push(vop1_vv("v_cvt_rpi_i32_f32_e32", 7, 5));
+    program.push(vop1_vv("v_cvt_f16_f32_e32", 0, 5));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        (-3_i32).cast_unsigned(),
+        "the minimum"
+    );
+    assert_eq!(vector(&registers, 4), 5, "the maximum");
+    assert_eq!(vector(&registers, 6), 2, "2.5 floored");
+    assert_eq!(vector(&registers, 7), 3, "2.5 rounded");
+    assert_eq!(vector(&registers, 0), 0x4100, "2.5 as a half");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(5, (-2.5_f32).to_bits()));
+    program.push(vop1_vv("v_cvt_flr_i32_f32_e32", 6, 5));
+    program.push(vop1_vv("v_cvt_rpi_i32_f32_e32", 7, 5));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 6),
+        (-3_i32).cast_unsigned(),
+        "-2.5 floored"
+    );
+    assert_eq!(
+        vector(&registers, 7),
+        (-2_i32).cast_unsigned(),
+        "-2.5 rounded"
+    );
+}
+
+/// The inverted save of the execution mask (SOP1 55, `s_andn1_saveexec_b64`, GFX11's
+/// `s_and_not0_saveexec`, `aco_opcodes.py:656`): its destination takes the mask, and the mask
+/// becomes the source inverted, anded with it. A source of lane 0 alone leaves every other lane
+/// the mask had.
+#[test]
+fn the_inverted_mask_save_keeps_the_lanes_its_source_does_not_name() {
+    if !device_or_skip("the_inverted_mask_save_keeps_the_lanes_its_source_does_not_name") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let program = vec![
+        sop1("s_mov_b64", 4, 126),
+        sop1("s_mov_b32", 2, 129),
+        sop1("s_mov_b32", 3, 128),
+        sop1("s_andn1_saveexec_b64", 0, 2),
+        sop1("s_mov_b64", 6, 126),
+        sop1("s_mov_b64", 126, 4),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    let (low, high) = (scalar(&registers, 4), scalar(&registers, 5));
+    assert_eq!(
+        (scalar(&registers, 0), scalar(&registers, 1)),
+        (low, high),
+        "the mask saved"
+    );
+    assert_eq!(
+        (scalar(&registers, 6), scalar(&registers, 7)),
+        (low & !1, high),
+        "the mask without lane 0"
+    );
+}
+
+/// The scene's three- and four-word local writes (DS 222, 223): consecutive words from the address
+/// plus the byte offset, read back a word at a time.
+#[test]
+fn three_and_four_word_local_writes_read_back() {
+    if !device_or_skip("three_and_four_word_local_writes_read_back") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 16)];
+    for (register, value) in (1..=7).zip([11_u32, 22, 33, 44, 55, 66, 77]) {
+        program.extend(v_mov_literal(register, value));
+    }
+    program.extend([head("ds_write_b96"), 1 << 8]);
+    program.extend([head("ds_write_b128") | 32, 4 << 8]);
+    program.push(s_waitcnt());
+    for register in 1..=7 {
+        program.push(v_mov_inline(register, 0));
+    }
+    for (dst, offset) in (1..).zip([0, 4, 8, 32, 36, 40, 44]) {
+        program.extend(ds_read(dst, 0, offset));
+    }
+    program.push(s_waitcnt());
+    program.push(s_endpgm());
+    let registers = run(&program);
+    let read: Vec<u32> = (1..=7).map(|n| vector(&registers, n)).collect();
+    assert_eq!(read, [11, 22, 33, 44, 55, 66, 77]);
 }
 
 /// `ds_write_b32 vAddr, vData offset:N`.
