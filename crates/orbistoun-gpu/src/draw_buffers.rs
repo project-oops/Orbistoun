@@ -544,7 +544,8 @@ fn evaluate_computed_now(
     };
     let unknown = |register: usize| -> Refusal {
         let mut why = format!(
-            "{UNKNOWN}: {} is unknown {}",
+            "{UNKNOWN}, the access at {:#x}: {} is unknown {}",
+            computed.at,
             spelled(register),
             cause(register)
         );

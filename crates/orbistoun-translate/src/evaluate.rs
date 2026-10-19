@@ -246,25 +246,15 @@ fn prefix_path(
             (decode, until),
             (&mut decided, read),
         )?;
-        // A scalar load writes its destination whatever it held: one it leaves unknown is unknown
-        // because of it, though nothing had set it before.
-        let loaded = (family == "SMEM").then(|| {
-            let first = (instruction.word >> 6 & 0x7f) as usize;
-            let words = name
-                .rsplit_once("dwordx")
-                .and_then(|(_, count)| count.parse().ok())
-                .unwrap_or(1);
-            first..first + words
-        });
+        // An instruction writes its destination whatever it held: one it leaves unknown is unknown
+        // because of it, though it was unknown before - a scalar load's, and a scalar or lane-read
+        // destination's.
+        let loaded = scalar_destination_codes(instruction, (family, name));
         for (register, (was, now)) in before.iter().zip(model.scalars).enumerate() {
             match (was, now) {
                 (Some(_), None) => unknowns[register] = Some(Unknown::LeftBy(instruction.offset)),
                 (_, Some(_)) => unknowns[register] = None,
-                (None, None)
-                    if loaded
-                        .as_ref()
-                        .is_some_and(|range| range.contains(&register)) =>
-                {
+                (None, None) if loaded.contains(&register) => {
                     unknowns[register] = Some(Unknown::LeftBy(instruction.offset));
                 }
                 (None, None) => {}
@@ -387,6 +377,20 @@ fn widen(model: &mut Concrete<'_>, unknowns: &mut Unknowns, state: &LoopState) {
         *now = agreed;
     }
     model.condition = state.1;
+}
+
+/// The scalar register codes an instruction of `family` named `name` writes: a scalar load's
+/// words, else what [`written_scalars`] says its destination and carry are.
+fn scalar_destination_codes(instruction: &Instruction, (family, name): (&str, &str)) -> Vec<usize> {
+    if family == "SMEM" {
+        let first = (instruction.word >> 6 & 0x7f) as usize;
+        let words = name
+            .rsplit_once("dwordx")
+            .and_then(|(_, count)| count.parse().ok())
+            .unwrap_or(1);
+        return (first..first + words).collect();
+    }
+    written_scalars(instruction, name)
 }
 
 /// Where a step of [`prefix_path`] leaves the walk.
@@ -3367,6 +3371,41 @@ mod tests {
         assert_eq!(
             long_wave_lane_addresses(&program, &[4], (64, &wave), &mut |_| None).ok(),
             model.ok()
+        );
+    }
+
+    /// A register an instruction writes and leaves unknown is unknown because of that instruction,
+    /// though it was unknown before: Grand Theft Auto V's compute program takes a buffer offset in
+    /// `vcc_lo` from `v_readfirstlane_b32` after a carry left it unknown, and the refusal named the
+    /// carry, 0x280, rather than the lane read, 0x914.
+    #[test]
+    fn a_register_written_unknown_is_unknown_because_of_its_last_writer() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            0xd70f_0401_u32, // v_add_co_u32 v1, s4, v2, v3: a per-lane carry into s4
+            0x0002_0702,
+            short_form(&encodings, "v_readfirstlane_b32", 4, 256, 0), // s4 = v0's first lane
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let (scalars, unknowns) = super::scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (0, &[]),
+            &[],
+            &mut |_| None,
+        )
+        .expect("evaluated")
+        .expect("reached");
+        assert_eq!(scalars[4], None);
+        assert_eq!(
+            unknowns[4],
+            Some(super::Unknown::LeftBy(8)),
+            "the lane read"
         );
     }
 
