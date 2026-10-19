@@ -5693,11 +5693,12 @@ mod command_processor {
 /// Carries out one prepared submission: the command processor's memory work, its draws, its
 /// flips' release, and the record of what ran.
 fn run_submission(bytes: &[u8], submission: Submission) {
-    // A queue an earlier submission stopped retires nothing more (D710).
+    // A queue an earlier submission stopped retires nothing more (D710); an asynchronous compute
+    // ring is a queue of its own (D891).
     let stalled = *queue_stall()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if stalled.is_some() {
+    if stalled.is_some() && !submission.asynchronous_compute {
         note_held(bytes, 0);
         note_fillers(bytes);
         if let Ok(mut record) = execution_record().lock() {
@@ -7260,8 +7261,58 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        super::aside()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         super::set_pending(None);
         guard
+    }
+
+    /// A stream handed to an asynchronous compute ring is carried out though the graphics queue has
+    /// stopped: the console runs each ring on a queue of its own (D891). Grand Theft Auto V's
+    /// compute streams wait on a label a later compute submission writes, and that one was held
+    /// behind the graphics queue's wait.
+    #[test]
+    fn a_compute_stream_runs_though_the_graphics_queue_has_stopped() {
+        use crate::packet::build::command_header;
+        let _guard = serial();
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; 0x100].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        allow_writes_to(base, 0x100);
+        *super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(crate::cp::CpExecution {
+            stopped: crate::cp::Stopped::WaitNeverSatisfied {
+                offset: 0,
+                address: base + 0x80,
+                reference: 1,
+                observed: 0,
+            },
+            ..crate::cp::CpExecution::default()
+        });
+        // WRITE_DATA to memory (DST_SEL 5) at the label.
+        let words = [
+            command_header(0x37, 4),
+            5 << 8,
+            u32::try_from(base & 0xffff_ffff).expect("low half"),
+            u32::try_from(base >> 32).expect("high half"),
+            7,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        super::run_submission(
+            &bytes,
+            super::Submission {
+                asynchronous_compute: true,
+                ..super::Submission::default()
+            },
+        );
+        assert_eq!(
+            u32::from_le_bytes(memory[..4].try_into().expect("a word")),
+            7,
+            "the compute stream wrote its label"
+        );
     }
 
     /// A target whose own frame is still deferred onto it from its flip is held by the drawer
