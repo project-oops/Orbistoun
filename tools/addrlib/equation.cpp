@@ -116,9 +116,12 @@ UINT_32 log2_of(UINT_32 value) {
 
 int main(int argc, char **argv) {
   const bool three_d = argc >= 4 && std::strcmp(argv[argc - 1], "3d") == 0;
-  const int counted = three_d ? argc - 1 : argc;
+  // A two-dimensional array: what a layer adds beyond its slice's place is the question.
+  const bool array = argc >= 4 && std::strcmp(argv[argc - 1], "array") == 0;
+  const int counted = three_d || array ? argc - 1 : argc;
   if (counted != 3 && counted != 4) {
-    std::fprintf(stderr, "usage: equation <swizzle mode> <bytes per texel> [blocks] [3d]\n");
+    std::fprintf(stderr,
+                 "usage: equation <swizzle mode> <bytes per texel> [blocks] [3d | array]\n");
     return 1;
   }
   const Mode *chosen = nullptr;
@@ -186,9 +189,10 @@ int main(int argc, char **argv) {
   const UINT_32 side_blocks = three_d ? 2 : most_blocks;
   const UINT_32 x_bits = x_block_bits + log2_of(side_blocks);
   const UINT_32 y_bits = y_block_bits + log2_of(side_blocks);
-  // A two-dimensional surface has one slice, and no bit of `z`.
-  const UINT_32 z_bits = three_d ? z_block_bits + log2_of(most_blocks) : 0;
-  const UINT_32 most_depth = three_d ? most_blocks * block_depth : 1;
+  // A two-dimensional surface has one slice, and no bit of `z`; an array has `blocks` layers.
+  const UINT_32 z_bits =
+      three_d ? z_block_bits + log2_of(most_blocks) : (array ? log2_of(most_blocks) : 0);
+  const UINT_32 most_depth = three_d ? most_blocks * block_depth : (array ? most_blocks : 1);
   const Surface widest = {created.hLib,
                           chosen->mode,
                           bytes * 8,
@@ -220,7 +224,7 @@ int main(int argc, char **argv) {
   // third is a quarter of a block across and down, padded to one - a small volume lies so.
   const Surface shapes[] = {widest,
                             {created.hLib, chosen->mode, bytes * 8, 5 * block_width,
-                             3 * block_height, three_d ? 3 * block_depth : 1, three_d},
+                             3 * block_height, three_d ? 3 * block_depth : most_depth, three_d},
                             {created.hLib, chosen->mode, bytes * 8, block_width / 4,
                              block_height / 4, most_depth, three_d}};
   UINT_64 wrong = 0;
@@ -269,7 +273,8 @@ int main(int argc, char **argv) {
     std::printf("]\n");
   };
   std::printf("%s%s at %u bytes a texel: %u x %u x %u-texel blocks of %llu bytes\n", chosen->name,
-              three_d ? " (3D)" : "", bytes, block_width, block_height, block_depth,
+              three_d ? " (3D)" : (array ? " (2D array)" : ""), bytes, block_width, block_height,
+              block_depth,
               static_cast<unsigned long long>(block_bytes));
   print_terms("x in the block", x_basis, 0, x_block_bits);
   print_terms("y in the block", y_basis, 0, y_block_bits);
@@ -278,8 +283,9 @@ int main(int argc, char **argv) {
   }
   print_terms("x above the block", x_basis, x_block_bits, x_bits);
   print_terms("y above the block", y_basis, y_block_bits, y_bits);
-  if (three_d) {
-    print_terms("z above the block", z_basis, z_block_bits, z_bits);
+  if (three_d || array) {
+    print_terms(array ? "layer beyond its slice" : "z above the block", z_basis, z_block_bits,
+                z_bits);
   }
   std::printf("%llu of %llu texels disagree with row-major blocks under these terms\n",
               static_cast<unsigned long long>(wrong), static_cast<unsigned long long>(checked));
