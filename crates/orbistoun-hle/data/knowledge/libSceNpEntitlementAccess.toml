@@ -8,9 +8,10 @@ returns = "status"
 edge_cases = [
     "Answers 0, as an offline console's does: the library starts, and only calls that would reach the network fail later. orbistoun implements no online service (crate offline.rs).",
     "PPSA04263 takes its online start-up's failure path on a non-zero answer, shutting down the thread that delivers its user's sign-in state.",
+    "MEASURED (REQ-gt20, offline): a valid call with two 32-byte blocks answers 0 and zeroes the 32-byte out block, the in block unchanged; a second call answers 0x817d0003 (ALREADY_INITIALIZED); a null or dirty param answers 0x817d0002 (INVALID_ARGUMENT). orbistoun's shared initialiser answers 0 - the first-call path PPSA04263 takes - and does not yet model the second-call or param-validation answers.",
 ]
-known_by = "assumed"
-assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne could not load the module unprivileged (census 20261007, module-load 0x80020002). REQ-gt05/gt09 ask the console to confirm."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T1620Z-gt20, reports/hardware/report-20261019-gt20-census.log (SHA-256 725260ca228054f2...) lines 6549-6595 (000-boot/gt20-entitlement-access)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -20,12 +21,13 @@ arity = 1
 purpose = "(flag *): the installed application's SKU - 3 a full game, 1 a trial."
 returns = "status"
 edge_cases = [
-    "orbistoun writes 3 (full) and answers 0: the SKU is the console's local licence, which an offline console reads. A null destination answers the placeholder.",
+    "orbistoun writes 3 (full) and answers 0: the SKU is the console's local licence, which an offline console reads. A null destination answers 0x817d0002 (INVALID_ARGUMENT), measured (REQ-gt20).",
+    "MEASURED (REQ-gt20): rc 0 and a 32-bit flag written; the probe title (a dev title with no store SKU) wrote 0. The full-game value 3 is still assumed - gt20 could not run PPSA04263 itself, and the probe's 0 is the no-SKU case, not a full retail licence.",
     "PPSA04263 seeds its flag with 1 (trial) at image+0x4dfc92, keeps it on a non-zero answer (`jne` at image+0x4dfca0), and treats anything but 1 as the full game.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["The full-game value and the local answer are those the reference emulators give an installed full game; obSCEne could not load the module unprivileged (census 20261007)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T1620Z-gt20, reports/hardware/report-20261019-gt20-census.log (SHA-256 725260ca228054f2...) lines 6549-6595 (000-boot/gt20-entitlement-access). The full-game flag value 3 remains assumed (the probe measured 0 for a dev title with no store SKU)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
@@ -35,11 +37,12 @@ arity = 4
 purpose = "(label, list *, room, hits *): the add-on entitlements installed for the title."
 returns = "status"
 edge_cases = [
-    "orbistoun reports none - *hits 0, the list untouched - and answers 0; a null hit count answers the placeholder.",
+    "orbistoun reports none - *hits 0, the list untouched - and answers 0; a null hit count answers 0x817d0002 (INVALID_ARGUMENT), measured (REQ-gt20).",
+    "MEASURED (REQ-gt20, console with no add-content): rc 0 and hits 0 for a count query, a list query with room, and service label 1; an entry is 0x1c (28) bytes.",
     "PPSA04263 asks with no list for the count (image+0x4dfcca) and marks its entitlement check done on 0 hits.",
 ]
 found_by = "static"
-known_by = "assumed"
-assumptions = ["No add-on is installed, as the reference emulators answer a title with no add-on inventory; obSCEne could not load the module unprivileged (census 20261007)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261019T1620Z-gt20, reports/hardware/report-20261019-gt20-census.log (SHA-256 725260ca228054f2...) lines 6549-6595 (000-boot/gt20-entitlement-access)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"

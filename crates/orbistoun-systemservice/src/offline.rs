@@ -68,8 +68,9 @@ pub(crate) fn started(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The SKU flag of a full game, as `sceNpEntitlementAccessGetSkuFlag` reports it; a trial is 1.
 const SKU_FULL: u32 = 3;
 
-/// The answer to an entitlement query whose destination is null: unmeasured, so the placeholder.
-const ENTITLEMENT_PARAMETER: u64 = orbistoun_core::GuestError::Unimplemented.as_raw() as u64;
+/// The answer to an entitlement query with a null destination or a bad parameter:
+/// `SCE_NP_ENTITLEMENT_ACCESS_ERROR_INVALID_ARGUMENT` (REQ-gt20, measured on hardware).
+const ENTITLEMENT_PARAMETER: u64 = 0x817d_0002;
 
 /// `sceNpEntitlementAccessGetSkuFlag(flag *)`: the installed application's SKU, a full game, written
 /// to `*flag`. It is the console's local licence, not a store query, so an offline console
