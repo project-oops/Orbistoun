@@ -51,6 +51,9 @@ pub const SUPPORTED: &[&str] = &[
     "ds_read2_b32",
     "ds_read_b96",
     "ds_write_b96",
+    "ds_min_u32",
+    "ds_max_u32",
+    "ds_add_rtn_u32",
     "ds_write_b128",
     "ds_write_b8",
     "ds_read_u8",
@@ -1215,6 +1218,15 @@ pub trait Model {
     fn merge_local(&mut self, word_index: Id, (keep, set): (Id, Id), lane: u32) -> bool {
         let _ = (word_index, keep, set, lane);
         false
+    }
+
+    /// Applies the SPIR-V atomic `opcode` (`OpAtomicUMin`, `OpAtomicUMax`, `OpAtomicIAdd`) to one
+    /// local-data-share word with `value`, as one indivisible step, where `lane` runs, answering what
+    /// the word held before. `None` where the model runs the wave's lanes in order in one
+    /// invocation of its own, and the step is a read and a write.
+    fn atomic_local(&mut self, opcode: u16, word_index: Id, value: Id, lane: u32) -> Option<Id> {
+        let _ = (opcode, word_index, value, lane);
+        None
     }
 
     /// Writes one word of guest memory, honouring the execution mask.
@@ -3269,8 +3281,12 @@ fn memory_instruction<M: Model + ?Sized>(
             })
         }
         "ds_write_b32" | "ds_read_b32" | "ds_read_b96" | "ds_write2_b32" | "ds_read2_b32"
-        | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" | "ds_write_b96" | "ds_write_b128" => {
+        | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" | "ds_write_b96" | "ds_write_b128"
+        | "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" => {
             match name {
+                "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" => {
+                    local_share_atomic(model, instruction, name)
+                }
                 "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
                 "ds_read_b96" => local_share_words(model, instruction, 3),
                 "ds_write_b96" => local_share_write_words(model, instruction, 3),
@@ -5996,6 +6012,85 @@ fn local_share_words<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `ds_min_u32 address, d offset`, `ds_max_u32` and `ds_add_rtn_u32 r, address, d offset`: each
+/// running lane's `d` folded into the word at the address plus the byte offset - its unsigned
+/// minimum, maximum or sum - as one indivisible step, `r` taking what the word held before (AMD's
+/// published RDNA instruction set, `DS_MIN_U32`, `DS_MAX_U32`, `DS_ADD_RTN_U32`). The local share
+/// only: a global-share form is refused before it gets here.
+fn local_share_atomic<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let returning = name == "ds_add_rtn_u32";
+    let (returned, address, data, offset) = match instruction.operands.as_slice() {
+        [Operand::Vector(returned), address, data, offset] if returning => {
+            (Some(u32::from(*returned)), address, data, offset)
+        }
+        [address, data, offset] if !returning => (None, address, data, offset),
+        _ => {
+            return Err(refuse(
+                "a local-data-share atomic did not decode to its operands",
+            ));
+        }
+    };
+    let Operand::Immediate(offset) = offset else {
+        return Err(refuse("a local-data-share atomic carries no byte offset"));
+    };
+    let offset =
+        u32::try_from(*offset).map_err(|_| refuse("a negative local-data-share offset"))?;
+    let opcode = match name {
+        "ds_min_u32" => op::ATOMIC_U_MIN,
+        "ds_max_u32" => op::ATOMIC_U_MAX,
+        _ => op::ATOMIC_I_ADD,
+    };
+    for lane in running_lanes(model) {
+        let base = model.read_source(instruction, address, lane)?;
+        let byte_offset = model.constant(offset);
+        let byte_address = model.add(base, byte_offset);
+        let index = model.local_word_index(byte_address);
+        let value = model.read_source(instruction, data, lane)?;
+        let before = if let Some(before) = model.atomic_local(opcode, index, value, lane) {
+            before
+        } else {
+            fold_in_order(model, (opcode, index), value, lane)?
+        };
+        if let Some(returned) = returned {
+            model.write_vector_lane(returned, lane, before);
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// [`local_share_atomic`]'s step where one invocation runs the wave: the word read, `value` folded in
+/// by `opcode` - the unsigned minimum, maximum or sum - and written back, lane after lane. Answers
+/// what the word held before.
+fn fold_in_order<M: Model + ?Sized>(
+    model: &mut M,
+    (opcode, index): (u16, Id),
+    value: Id,
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    let before = model.read_local(index)?;
+    let after = if opcode == op::ATOMIC_I_ADD {
+        model.add(before, value)
+    } else {
+        let less = model.compare(op::ULESS_THAN, value, before);
+        if opcode == op::ATOMIC_U_MIN {
+            model.select(less, value, before)
+        } else {
+            model.select(less, before, value)
+        }
+    };
+    model.write_local(index, after, lane)?;
+    Ok(before)
 }
 
 /// `ds_write_b96 address, d offset` and `ds_write_b128`: `words` consecutive words from `d` and the

@@ -5844,6 +5844,51 @@ fn three_and_four_word_local_writes_read_back() {
     assert_eq!(read, [11, 22, 33, 44, 55, 66, 77]);
 }
 
+/// The scene's local atomics (DS 7, 8, 32): `ds_min_u32` and `ds_max_u32` keep the unsigned
+/// minimum and maximum of the word and every running lane's value, and `ds_add_rtn_u32` adds each
+/// lane's value, answering what the word held before. Every lane of the wave takes part: the word
+/// starting at 100 ends at the smallest and largest lane value, and at 100 plus the sum.
+#[test]
+fn local_atomics_take_the_minimum_maximum_and_sum() {
+    if !device_or_skip("local_atomics_take_the_minimum_maximum_and_sum") {
+        return;
+    }
+    // Each lane's value: its index plus 50, so 50 to 113 across the wave.
+    let mut program: Vec<u32> = lane_index_into(1).to_vec();
+    program.extend(v_mov_literal(2, 50));
+    program.push(vop2_vv("v_add_nc_u32_e32", 1, 1, 2));
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(3, 100));
+    for offset in [0, 4, 8] {
+        program.extend(ds_write(0, 3, offset));
+    }
+    program.push(s_waitcnt());
+    program.extend([head("ds_min_u32"), 1 << 8]);
+    program.extend([head("ds_max_u32") | 4, 1 << 8]);
+    // ds_add_rtn_u32 v4, v0, v1 offset:8.
+    program.extend([head("ds_add_rtn_u32") | 8, 1 << 8 | 4 << 24]);
+    program.push(s_waitcnt());
+    for (dst, offset) in [(5, 0), (6, 4), (7, 8)] {
+        program.extend(ds_read(dst, 0, offset));
+    }
+    program.push(s_waitcnt());
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 5), 50, "the minimum of 100 and 50..=113");
+    assert_eq!(vector(&registers, 6), 113, "the maximum");
+    let sum: u32 = (50..114).sum();
+    assert_eq!(
+        vector(&registers, 7),
+        100 + sum,
+        "100 and every lane's value"
+    );
+    let returned = vector(&registers, 4);
+    assert!(
+        (100..100 + sum).contains(&returned),
+        "lane 0's answer, what the word held before its add: {returned}"
+    );
+}
+
 /// `ds_write_b32 vAddr, vData offset:N`.
 ///
 /// The opcode sits at bit 17, not 18 as in the flat families; the wrong shift decodes as a

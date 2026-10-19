@@ -5092,6 +5092,54 @@ impl Model for Wavefront<'_> {
         Some(read)
     }
 
+    fn atomic_local(&mut self, opcode: u16, word_index: Id, value: Id, lane: u32) -> Option<Id> {
+        // Waves of one workgroup share the words (D892), and lanes of one wave each have an
+        // invocation where the wave is wider than the host's subgroup (D760): either way another
+        // invocation may change the word at once. An idle lane folds in what changes nothing.
+        if self.invocation.is_none() && self.group_waves() <= 1 {
+            return None;
+        }
+        let identity = match opcode {
+            op::ATOMIC_U_MIN => u32::MAX,
+            _ => 0,
+        };
+        let value = match self.lane_known(lane) {
+            Some(true) => value,
+            Some(false) => Self::constant(self, identity),
+            None => {
+                let active = self.lane_active(lane);
+                let identity = Self::constant(self, identity);
+                self.select(active, value, identity)
+            }
+        };
+        let (pointer_type, array, u32_type) = (self.local_ptr, self.local, self.u32_type);
+        let scope = Self::constant(self, orbistoun_spirv::scope::WORKGROUP);
+        let semantics = Self::constant(
+            self,
+            orbistoun_spirv::semantics::ACQUIRE_RELEASE
+                | orbistoun_spirv::semantics::WORKGROUP_MEMORY,
+        );
+        let b = &mut self.builder;
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[pointer_type.0, pointer.0, array.0, word_index.0],
+        );
+        let before = b.id();
+        b.function(
+            opcode,
+            &[
+                u32_type.0,
+                before.0,
+                pointer.0,
+                scope.0,
+                semantics.0,
+                value.0,
+            ],
+        );
+        Some(before)
+    }
+
     fn merge_local(&mut self, word_index: Id, (keep, set): (Id, Id), lane: u32) -> bool {
         if self.invocation.is_none() || self.lane_known(lane) == Some(false) {
             return self.invocation.is_some();

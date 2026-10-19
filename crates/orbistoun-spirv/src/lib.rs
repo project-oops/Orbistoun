@@ -97,6 +97,12 @@ pub mod op {
     pub const ATOMIC_OR: u16 = 241;
     /// Adds a value to the word a pointer names, as one indivisible step, answering what it held.
     pub const ATOMIC_I_ADD: u16 = 234;
+    /// Keeps the unsigned minimum of the word a pointer names and a value, as one indivisible step,
+    /// answering what it held.
+    pub const ATOMIC_U_MIN: u16 = 237;
+    /// Keeps the unsigned maximum of the word a pointer names and a value, as one indivisible step,
+    /// answering what it held.
+    pub const ATOMIC_U_MAX: u16 = 239;
     /// A floating-point type.
     pub const TYPE_FLOAT: u16 = 22;
     /// A function type.
@@ -2510,6 +2516,20 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     (
         op::ATOMIC_OR,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_U_MIN,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_U_MAX,
         Some(1),
         &[0, 2, 3, 4, 5],
         None,
