@@ -5446,10 +5446,11 @@ impl Model for Wavefront<'_> {
         } else {
             (self.f32_type, self.vec4)
         };
-        let image = self.builder.declare_type(
-            op::TYPE_IMAGE,
-            &[element.0, 1 + u32::from(volume), 0, 0, 0, 2, 0],
-        );
+        // A 2D array is stored to as one, at the layer the address names (D897).
+        let (dim, layered) = (1 + u32::from(volume), u32::from(shape.layered()));
+        let image = self
+            .builder
+            .declare_type(op::TYPE_IMAGE, &[element.0, dim, 0, layered, 0, 2, 0]);
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, image.0]);
         self.builder
@@ -5458,7 +5459,7 @@ impl Model for Wavefront<'_> {
         // volume.
         let texel = self
             .builder
-            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2 + u32::from(volume)]);
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, dim + 1 + layered]);
 
         let stored = model::Stored {
             variable,
@@ -5467,6 +5468,7 @@ impl Model for Wavefront<'_> {
             value,
             integer,
             volume,
+            layered: layered == 1,
         };
         self.images.stored[slot] = Some((stored, descriptor));
         Ok(stored)
@@ -5554,9 +5556,11 @@ impl Model for Wavefront<'_> {
         let ((dim, components), depth) = (image_dim(shape), u32::from(shape.compare));
         // A second texture of the same shape shares these types: each is declared once per module,
         // and only the pointer and variable are the texture's own.
+        // A 2D array is fetched as one, at the layer the address names (D897).
+        let arrayed = u32::from(shape.layered());
         let image = self
             .builder
-            .declare_type(op::TYPE_IMAGE, &[element.0, dim, depth, 0, 0, 1, 0]);
+            .declare_type(op::TYPE_IMAGE, &[element.0, dim, depth, arrayed, 0, 1, 0]);
         let combined = self
             .builder
             .declare_type(op::TYPE_SAMPLED_IMAGE, &[image.0]);
@@ -5571,7 +5575,7 @@ impl Model for Wavefront<'_> {
         // image. Declared alongside the sample's type because the unused one costs one declaration.
         let texel = self
             .builder
-            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2]);
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2 + arrayed]);
 
         let texture = model::Texture {
             variable,

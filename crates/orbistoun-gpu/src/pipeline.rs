@@ -2961,15 +2961,18 @@ impl TexelFormat {
 pub enum DispatchSurface {
     /// A tiled level, at four bytes a texel or - in the one-byte layout - one.
     Tiled(ColourTarget),
-    /// A tiled volume (D823): `depth` slices, each laid out as `slice` is and a slice's surface
-    /// after the one before, with the slice's XOR on its in-block offsets
-    /// ([`crate::tiling::slice_xor_64kb_rx_bpp4`]). Only a 32-bpp `64KB_R_X` volume's slice terms
-    /// are read.
+    /// A tiled volume (D823), or a 2D array's layers (D897): `depth` slices, each laid out as
+    /// `slice` is and a slice's surface after the one before, with the slice's XOR on its in-block
+    /// offsets ([`crate::tiling::slice_xor_64kb_rx_bpp4`]). Only a 32-bpp `64KB_R_X` volume's slice
+    /// terms are read, and a 16- or 32-bit `64KB_Z_X` or 32-bit `64KB_R_X` array's layer terms,
+    /// which are the same.
     Volume {
         /// The first slice, placed as a 2D level of the volume's width and height.
         slice: ColourTarget,
         /// Slices.
         depth: u32,
+        /// Whether its slices are a 2D array's layers rather than a volume's.
+        layered: bool,
     },
     /// A linear image's level.
     Linear {
@@ -3041,7 +3044,7 @@ impl DispatchSurface {
     pub fn bytes(&self) -> usize {
         match self {
             Self::Tiled(target) => target.words() * 4,
-            Self::Volume { slice, depth } => slice.words() * 4 * *depth as usize,
+            Self::Volume { slice, depth, .. } => slice.words() * 4 * *depth as usize,
             Self::Linear {
                 width,
                 height,
@@ -3286,13 +3289,36 @@ pub struct DispatchTexels {
     pub height: u32,
     /// A volume's slices, its texels slice after slice (D823); `None` for a 2D image.
     pub depth: Option<u32>,
+    /// A 2D array's layers where the program addresses it as one, its texels layer after layer
+    /// (D895, D897); `None` where it does not.
+    pub layers: Option<u32>,
 }
 
-/// A volume's slices, for its texels; `None` for a 2D surface.
+/// A volume's slices, for its texels; `None` for a 2D surface or an array.
 const fn volume_depth(surface: &DispatchSurface) -> Option<u32> {
     match surface {
-        DispatchSurface::Volume { depth, .. } => Some(*depth),
-        DispatchSurface::Tiled(_) | DispatchSurface::Linear { .. } => None,
+        DispatchSurface::Volume {
+            depth,
+            layered: false,
+            ..
+        } => Some(*depth),
+        DispatchSurface::Volume { .. }
+        | DispatchSurface::Tiled(_)
+        | DispatchSurface::Linear { .. } => None,
+    }
+}
+
+/// An array's layers, for its texels: its slices, or one for a 2D level; `None` for a volume or a
+/// linear surface.
+const fn surface_layers(surface: &DispatchSurface) -> Option<u32> {
+    match surface {
+        DispatchSurface::Volume {
+            depth,
+            layered: true,
+            ..
+        } => Some(*depth),
+        DispatchSurface::Tiled(_) => Some(1),
+        DispatchSurface::Volume { .. } | DispatchSurface::Linear { .. } => None,
     }
 }
 
@@ -3358,6 +3384,7 @@ fn host_depths((width, height): (u32, u32)) -> DispatchTexels {
         width,
         height,
         depth: None,
+        layers: None,
     }
 }
 
@@ -3428,6 +3455,11 @@ fn stored_image(
         width,
         height,
         depth: volume_depth(&surface),
+        layers: if source.layered {
+            surface_layers(&surface)
+        } else {
+            None
+        },
     };
     // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
     let spanned = if keys_to_expand.is_some() {
@@ -3503,6 +3535,11 @@ fn fetched_image(
             width,
             height,
             depth: volume_depth(&surface),
+            layers: if source.layered {
+                surface_layers(&surface)
+            } else {
+                None
+            },
         },
         (surface.base(), surface.bytes() as u64),
     ))
@@ -3651,9 +3688,9 @@ fn dispatch_descriptor_words(
     Ok(words)
 }
 
-/// `SQ_IMG_RSRC_WORD4`'s `DEPTH` (bits 0-12, an array's last layer) and `BASE_ARRAY` (bits 16-28),
-/// `gfx10-rsrc.json`: both zero for a view of one layer, the first.
-const ARRAY_FIELDS: u32 = 0x1FFF | 0x1FFF << 16;
+/// `SQ_IMG_RSRC_WORD4`'s `BASE_ARRAY` (bits 16-28), `gfx10-rsrc.json`: zero for a view from the
+/// first layer.
+const BASE_ARRAY_FIELD: u32 = 0x1FFF << 16;
 
 /// `SQ_RSRC_IMG_2D_ARRAY`, `SQ_IMG_RSRC_WORD3`'s `TYPE` for a 2D array (`gfx10-rsrc.json`).
 const IMAGE_TYPE_2D_ARRAY: u32 = 13;
@@ -3678,16 +3715,16 @@ fn dispatch_image_surface(
     // A volume where the program addresses one, three coordinates to its texel (D823); a 2D image
     // otherwise.
     let volume = words[3] >> 28 == IMAGE_TYPE_3D;
-    // A program may address a one-layer image as a 2D array, reaching only its layer zero (D895):
-    // the descriptor it reads must view one layer, the first.
-    if source.layered && words[4] & ARRAY_FIELDS != 0 {
+    // A program may address an image as a 2D array, its layers from the first to the last the
+    // descriptor views (D895, D897): a 2D image, an array, or a cube's six faces.
+    if source.layered && words[4] & BASE_ARRAY_FIELD != 0 {
         return Err(format!(
-            "a 2D array access to a view of more than one layer, or of a later one (D895): format {}",
+            "a 2D array access to a view from a later layer (D897): format {}",
             describe_dispatch_image(&descriptor, words)
         ));
     }
     let flat = words[3] >> 28 == IMAGE_TYPE_2D
-        || (source.layered && words[3] >> 28 == IMAGE_TYPE_2D_ARRAY);
+        || (source.layered && matches!(words[3] >> 28, IMAGE_TYPE_2D_ARRAY | IMAGE_TYPE_CUBE));
     if (!flat && !volume) || volume != source.volume {
         return Err(format!(
             "a dispatch image that is not the shape its program addresses ({}): format {}",
@@ -3708,6 +3745,17 @@ fn dispatch_image_surface(
     if descriptor.last_level != descriptor.base_level {
         return Err("a dispatch image view of more than one level".to_owned());
     }
+    let layers = if source.layered {
+        (words[4] & DEPTH_FIELD) + 1
+    } else {
+        1
+    };
+    if descriptor.tiling == SwizzleMode::Linear && layers > 1 {
+        return Err(format!(
+            "a linear 2D array of more than one layer: format {}",
+            describe_dispatch_image(&descriptor, words)
+        ));
+    }
     if descriptor.tiling == SwizzleMode::Linear {
         let surface = linear_surface(&descriptor, words[4], format.bytes()).ok_or_else(|| {
             format!(
@@ -3727,7 +3775,12 @@ fn dispatch_image_surface(
         })?;
         return Ok((surface, descriptor, format, channel_order(format, words[3])));
     }
-    let surface = tiled_surface(&descriptor, words, format, volume).ok_or_else(|| {
+    let surface = if layers > 1 {
+        tiled_layers(&descriptor, format, layers)
+    } else {
+        tiled_surface(&descriptor, words, format, volume)
+    }
+    .ok_or_else(|| {
         format!(
             "a dispatch image whose layout is not modelled: format {}",
             describe_dispatch_image(&descriptor, words)
@@ -3768,7 +3821,46 @@ fn tiled_surface(
         .then_some(DispatchSurface::Volume {
             slice: surface,
             depth: last_slice + 1,
+            layered: false,
         })
+}
+
+/// Where a tiled 2D array's `layers` lie, each a level of its width and height a slice of blocks
+/// after the one before with the layer's XOR on its in-block offsets (D897). `None` where those
+/// terms were not read: one level of a 16- or 32-bit `64KB_Z_X` or a 32-bit `64KB_R_X` array with no
+/// pipe-bank XOR of its own, no more layers than the terms go (`tools/addrlib/equation <mode>
+/// <bytes> 32 array`; `gfx10addrlib.cpp:4825-4848`, the slice's place, and 2230, its XOR).
+fn tiled_layers(
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    layers: u32,
+) -> Option<DispatchSurface> {
+    let read = match descriptor.tiling {
+        SwizzleMode::Tiled64KbZX => matches!(format.bytes(), 2 | 4),
+        SwizzleMode::Tiled64KbRX => format.bytes() == 4,
+        _ => false,
+    };
+    if !read
+        || descriptor.levels != 1
+        || crate::tiling::slice_xor_64kb_rx_bpp4(layers - 1).is_none()
+    {
+        return None;
+    }
+    let slice = surface_layout(descriptor, format)
+        .and_then(|layout| {
+            crate::registers::chain_level(
+                (descriptor.base, descriptor.pipe_bank_xor),
+                (descriptor.width, descriptor.height),
+                (descriptor.levels, descriptor.base_level),
+                layout,
+            )
+        })
+        .filter(|surface| surface.pipe_bank_xor == 0 && surface.layout.models(0))?;
+    Some(DispatchSurface::Volume {
+        slice,
+        depth: layers,
+        layered: true,
+    })
 }
 
 /// Where each channel a dispatch reads or writes lies in an `8_8_8_8_UNORM` texel in memory: byte
@@ -10786,7 +10878,11 @@ mod tests {
             .expect("a 32-bpp 64KB_R_X layout");
         let slice = crate::registers::chain_level((0x10_0000, 0), (32, 32), (1, 0), layout)
             .expect("one level");
-        let volume = DispatchSurface::Volume { slice, depth: 3 };
+        let volume = DispatchSurface::Volume {
+            slice,
+            depth: 3,
+            layered: false,
+        };
         assert_eq!(volume.bytes(), 3 * 0x1_0000, "a block a slice");
         assert_eq!(volume.texels(), 32 * 32 * 3);
         let mut spanned = vec![0_u8; volume.bytes()];
@@ -10812,6 +10908,56 @@ mod tests {
         let mut tiled = vec![0_u8; volume.bytes()];
         volume.tile(&texels, &mut tiled).expect("tiled back");
         assert!(tiled == spanned, "tiled back to the same bytes");
+    }
+
+    /// A 2D array's layers lie a slice of blocks apart, each at its 2D place in the block XORed with
+    /// the layer's terms, which are a volume's slice terms (`tools/addrlib/equation 64KB_Z_X 2 32
+    /// array`): a 256 x 128 x 6 16-bit `64KB_Z_X` array is six 64 KiB blocks, layer 1's texels moved
+    /// by `0x800`, layer 2's by `0x400` and layer 3's by both (D897). Grand Theft Auto V's compute
+    /// copy reads a face of a six-layer cube so.
+    #[test]
+    fn an_array_s_layers_lie_slice_after_slice_with_each_layer_s_xor() {
+        use super::{DispatchSurface, SwizzleMode};
+        use crate::tiling::{SurfaceLayout, tiled_byte_offset_64kb_zx_bpp2};
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled64KbZX)
+            .and_then(|layout| layout.at_bytes_per_texel(2))
+            .expect("a 16-bit 64KB_Z_X layout");
+        let slice = crate::registers::chain_level((0x10_0000, 0), (256, 128), (1, 0), layout)
+            .expect("one level");
+        let array = DispatchSurface::Volume {
+            slice,
+            depth: 6,
+            layered: true,
+        };
+        assert_eq!(array.bytes(), 6 * 0x1_0000, "a block a layer");
+        let mut spanned = vec![0_u8; array.bytes()];
+        for layer in 0..6_u32 {
+            let xor = [0, 0x800, 0x400, 0xc00, 0x200, 0xa00][layer as usize];
+            for y in 0..128_u32 {
+                for x in 0..256_u32 {
+                    let at = layer as usize * 0x1_0000
+                        + (tiled_byte_offset_64kb_zx_bpp2(x, y, 256) ^ xor);
+                    let value = u16::try_from(((layer * 128 + y) * 256 + x) & 0xffff)
+                        .expect("sixteen bits");
+                    spanned[at..at + 2].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        let texels = array.detile(&spanned);
+        assert_eq!(texels.len(), 256 * 128 * 6);
+        assert!(
+            texels
+                .iter()
+                .zip(0_u32..)
+                .all(|(&texel, index)| texel == index & 0xffff),
+            "every texel of every layer in order"
+        );
+        assert_eq!(super::surface_layers(&array), Some(6));
+        assert_eq!(
+            super::volume_depth(&array),
+            None,
+            "an array is not a volume"
+        );
     }
 
     /// A one-byte texture's texels are swizzled by a multiply and an or, every select taking the

@@ -191,6 +191,9 @@ pub mod op {
     pub const IMAGE: u16 = 100;
     /// `OpImageQuerySizeLod`: an image's extent at a level, which needs the `ImageQuery` capability.
     pub const IMAGE_QUERY_SIZE_LOD: u16 = 103;
+    /// `OpImageQuerySize`: a storage image's extent, an array's layers last, which needs the
+    /// `ImageQuery` capability.
+    pub const IMAGE_QUERY_SIZE: u16 = 104;
     /// Writes one texel of a storage image by its integer coordinate.
     ///
     /// What a guest's `image_store` is. It has no result: an image write is an effect.
@@ -2683,6 +2686,14 @@ static SHAPES: &[ShapeEntry] = &[
         op::IMAGE_QUERY_SIZE_LOD,
         Some(1),
         &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, and the image whose size it asks.
+    (
+        op::IMAGE_QUERY_SIZE,
+        Some(1),
+        &[0, 2],
         None,
         RestStride::Every,
     ),

@@ -1070,6 +1070,7 @@ fn dispatch_image(
         width: image.width,
         height: image.height,
         depth: image.depth,
+        layers: image.layers,
     }
 }
 

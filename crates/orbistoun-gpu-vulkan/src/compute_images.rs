@@ -88,12 +88,18 @@ pub struct DispatchImage<'a> {
     /// Slices of a three-dimensional image, its texels slice after slice (D823); `None` for a
     /// two-dimensional one.
     pub depth: Option<u32>,
+    /// Layers of a 2D array the program addresses as one, its texels layer after layer (D895,
+    /// D897); `None` for an image it does not.
+    pub layers: Option<u32>,
 }
 
 impl DispatchImage<'_> {
     /// Texels it holds: every slice's.
     fn count(&self) -> usize {
-        self.width as usize * self.height as usize * self.depth.unwrap_or(1) as usize
+        self.width as usize
+            * self.height as usize
+            * self.depth.unwrap_or(1) as usize
+            * self.layers.unwrap_or(1) as usize
     }
 }
 
@@ -123,6 +129,7 @@ struct Bound {
     width: u32,
     height: u32,
     depth: Option<u32>,
+    layers: Option<u32>,
 }
 
 /// A dispatch's images on the device, with the sampler the fetched one is bound with.
@@ -179,6 +186,7 @@ impl BoundImages {
                 width: image.width,
                 height: image.height,
                 depth: image.depth,
+                layers: image.layers,
                 stored,
             };
             let created = match take_spare(device, key, image) {
@@ -203,6 +211,7 @@ impl BoundImages {
                         width: image.width,
                         height: image.height,
                         depth: image.depth,
+                        layers: image.layers,
                     });
                 }
                 Err(e) => {
@@ -298,7 +307,11 @@ impl BoundImages {
                     vk::PipelineStageFlags::TRANSFER,
                 ),
             );
-            let region = [whole(image.width, image.height, image.depth)];
+            let region = [whole(
+                image.width,
+                image.height,
+                (image.depth, image.layers),
+            )];
             // SAFETY: recording is open; the buffer holds the image's texels and the image is in
             // the transfer-destination layout.
             unsafe {
@@ -347,7 +360,11 @@ impl BoundImages {
                     vk::PipelineStageFlags::TRANSFER,
                 ),
             );
-            let region = [whole(image.width, image.height, image.depth)];
+            let region = [whole(
+                image.width,
+                image.height,
+                (image.depth, image.layers),
+            )];
             // SAFETY: recording is open and the barrier above ordered the shader's stores first.
             unsafe {
                 device.cmd_copy_image_to_buffer(
@@ -382,6 +399,7 @@ impl BoundImages {
                 width: image.width,
                 height: image.height,
                 depth: image.depth,
+                layers: image.layers,
                 stored: image.stored,
             };
             let kept = spare_images().lock().is_ok_and(|mut spares| {
@@ -409,7 +427,10 @@ impl BoundImages {
 
 /// One stored image's texels as the dispatch left them, once the recording has completed.
 fn read_back_image(device: &ash::Device, image: &Bound) -> Result<Vec<u32>, DispatchError> {
-    let texels = image.width as usize * image.height as usize * image.depth.unwrap_or(1) as usize;
+    let texels = image.width as usize
+        * image.height as usize
+        * image.depth.unwrap_or(1) as usize
+        * image.layers.unwrap_or(1) as usize;
     let size = image.format.bytes();
     let bytes = (texels * size) as vk::DeviceSize;
     // SAFETY: the memory is host-visible and coherent, holds `bytes`, and is not mapped; the
@@ -453,13 +474,18 @@ const fn layout(stored: bool) -> vk::ImageLayout {
     }
 }
 
-/// The whole of a single-level image, every slice of a volume, tightly packed in its buffer.
-fn whole(width: u32, height: u32, depth: Option<u32>) -> vk::BufferImageCopy {
+/// The whole of a single-level image, every slice of a volume or layer of an array, tightly packed
+/// in its buffer.
+fn whole(
+    width: u32,
+    height: u32,
+    (depth, layers): (Option<u32>, Option<u32>),
+) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .image_subresource(
             vk::ImageSubresourceLayers::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .layer_count(1),
+                .layer_count(layers.unwrap_or(1)),
         )
         .image_extent(vk::Extent3D {
             width,
@@ -489,7 +515,7 @@ fn barrier(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1)
-                .layer_count(1),
+                .layer_count(vk::REMAINING_ARRAY_LAYERS),
         )];
     // SAFETY: recording is open and the image is live.
     unsafe {
@@ -538,12 +564,16 @@ fn create_image(
         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
     };
     // A volume is a three-dimensional image of its slices, seen through a view of the same type,
-    // which is what a module's three-dimensional storage image binds (D823).
+    // which is what a module's three-dimensional storage image binds (D823); an array the program
+    // addresses as one is seen through an array view of its layers (D897).
     let (image_type, view_type) = if texels.depth.is_some() {
         (vk::ImageType::TYPE_3D, vk::ImageViewType::TYPE_3D)
+    } else if texels.layers.is_some() {
+        (vk::ImageType::TYPE_2D, vk::ImageViewType::TYPE_2D_ARRAY)
     } else {
         (vk::ImageType::TYPE_2D, vk::ImageViewType::TYPE_2D)
     };
+    let layers = texels.layers.unwrap_or(1);
     let info = vk::ImageCreateInfo::default()
         .image_type(image_type)
         .format(texels.format.vulkan())
@@ -553,7 +583,7 @@ fn create_image(
             depth: texels.depth.unwrap_or(1),
         })
         .mip_levels(1)
-        .array_layers(1)
+        .array_layers(layers)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(usage)
@@ -587,7 +617,7 @@ fn create_image(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .level_count(1)
-                    .layer_count(1),
+                    .layer_count(layers),
             );
         // SAFETY: the image is live and bound, and the create info outlives the call.
         unsafe { device.create_image_view(&view_info, None) }
@@ -736,6 +766,7 @@ struct SpareKey {
     width: u32,
     height: u32,
     depth: Option<u32>,
+    layers: Option<u32>,
     stored: bool,
 }
 
@@ -745,6 +776,7 @@ impl SpareKey {
         u64::from(self.width)
             * u64::from(self.height)
             * u64::from(self.depth.unwrap_or(1))
+            * u64::from(self.layers.unwrap_or(1))
             * self.format.bytes() as u64
             * 2
     }
@@ -859,6 +891,7 @@ mod tests {
                 width: WIDTH,
                 height: HEIGHT,
                 depth: None,
+                layers: None,
             }),
             stored: &[],
         }

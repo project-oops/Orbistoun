@@ -153,6 +153,7 @@ fn a_dispatch_copies_one_image_into_another() {
                         width: SIDE,
                         height: SIDE,
                         depth: None,
+                        layers: None,
                     }),
                     stored: &[DispatchImage {
                         texels: &destination,
@@ -160,6 +161,7 @@ fn a_dispatch_copies_one_image_into_another() {
                         width: SIDE,
                         height: SIDE,
                         depth: None,
+                        layers: None,
                     }],
                 },
             )
@@ -228,6 +230,7 @@ fn a_dispatch_stores_to_two_images() {
         width: SIDE,
         height: SIDE,
         depth: None,
+        layers: None,
     };
     let done = dispatch_guest(
         &module,
@@ -303,6 +306,7 @@ fn a_one_layer_image_addressed_as_an_array_is_its_layer_zero() {
         width: SIDE,
         height: SIDE,
         depth: None,
+        layers: Some(1),
     };
     for (layer, expected) in [(0, &source), (1, &destination)] {
         let mut push = [0; 17];
@@ -320,6 +324,177 @@ fn a_one_layer_image_addressed_as_an_array_is_its_layer_zero() {
         .expect("dispatched");
         assert!(!done.escaped);
         assert_eq!(done.stored.first(), Some(expected), "layer {layer}");
+    }
+}
+
+/// A 2D array of several layers is fetched at the layer its address names, and a layer past its last
+/// reads zero (D897): Grand Theft Auto V's compute copy reads one face of a six-layer cube through a
+/// `2D_ARRAY` fetch, the layer from its user data, and stores it to a two-dimensional image.
+#[test]
+fn a_dispatch_fetches_the_layer_of_an_array_its_address_names() {
+    if !device_or_skip("a fetch from a layer of an array") {
+        return;
+    }
+    // v_mov_b32 v2, s16 (the layer); image_load v[4:7], v[0:2], s[0:7] dmask:0xf dim:2D_ARRAY;
+    // s_waitcnt; image_store v[4:7], v[0:1], s[8:15] dmask:0xf dim:2D; s_endpgm.
+    let program = [
+        0x7e04_0210_u32,
+        0xf000_1f28,
+        0x0000_0400,
+        0xbf8c_0000,
+        0xf020_1f08,
+        0x0002_0400,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, (textures, _)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 17,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("an array fetch translates");
+    assert!(
+        textures.first().is_some_and(|t| t.layered),
+        "the fetch is layered"
+    );
+    let layers = 3_u32;
+    let texels = SIDE * SIDE;
+    let source: Vec<u32> = (0..texels * layers)
+        .map(|i| 0x0102_0304_u32 ^ (i * 0x0101))
+        .collect();
+    let destination = vec![0xdead_beef_u32; texels as usize];
+    for layer in 0..=layers {
+        let mut push = [0; 17];
+        push[16] = layer;
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&push, [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(DispatchImage {
+                    texels: &source,
+                    format: DispatchFormat::Rgba8,
+                    width: SIDE,
+                    height: SIDE,
+                    depth: None,
+                    layers: Some(layers),
+                }),
+                stored: &[DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba8,
+                    width: SIDE,
+                    height: SIDE,
+                    depth: None,
+                    layers: None,
+                }],
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        let expected: Vec<u32> = if layer < layers {
+            let first = (layer * texels) as usize;
+            source[first..first + texels as usize].to_vec()
+        } else {
+            vec![0; texels as usize]
+        };
+        assert_eq!(done.stored.first(), Some(&expected), "layer {layer}");
+    }
+}
+
+/// A 2D array of several layers is stored to at the layer its address names, and a layer past its
+/// last stores nothing (D897): Grand Theft Auto V's compute copy moves one face of a six-layer cube
+/// into the same face of another through `2D_ARRAY` accesses, the layer from its user data.
+#[test]
+fn a_dispatch_stores_to_the_layer_of_an_array_its_address_names() {
+    if !device_or_skip("a store to a layer of an array") {
+        return;
+    }
+    // v_mov_b32 v2, s16 (the layer); image_load v[4:7], v[0:2], s[0:7] dmask:0xf dim:2D_ARRAY;
+    // s_waitcnt; image_store v[4:7], v[0:2], s[8:15] dmask:0xf dim:2D_ARRAY; s_endpgm.
+    let program = [
+        0x7e04_0210_u32,
+        0xf000_1f28,
+        0x0000_0400,
+        0xbf8c_0000,
+        0xf020_1f28,
+        0x0002_0400,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, _) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 17,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("an array copy translates");
+    let layers = 3_u32;
+    let texels = (SIDE * SIDE) as usize;
+    let source: Vec<u32> = (0..SIDE * SIDE * layers)
+        .map(|i| 0x0102_0304_u32 ^ (i * 0x0101))
+        .collect();
+    let destination = vec![0xdead_beef_u32; texels * layers as usize];
+    let array = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba8,
+        width: SIDE,
+        height: SIDE,
+        depth: None,
+        layers: Some(layers),
+    };
+    for layer in 0..=layers {
+        let mut push = [0; 17];
+        push[16] = layer;
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&push, [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(array(&source)),
+                stored: &[array(&destination)],
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        let mut expected = destination.clone();
+        if layer < layers {
+            let first = layer as usize * texels;
+            expected[first..first + texels].copy_from_slice(&source[first..first + texels]);
+        }
+        assert_eq!(done.stored.first(), Some(&expected), "layer {layer}");
     }
 }
 
@@ -484,6 +659,7 @@ fn an_inactive_thread_stores_nothing() {
                         width: SIDE,
                         height: SIDE,
                         depth: None,
+                        layers: None,
                     }),
                     stored: &[DispatchImage {
                         texels: &destination,
@@ -491,6 +667,7 @@ fn an_inactive_thread_stores_nothing() {
                         width: SIDE,
                         height: SIDE,
                         depth: None,
+                        layers: None,
                     }],
                 },
             )
@@ -536,6 +713,7 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
             width: SIDE,
             height: SIDE,
             depth: None,
+            layers: None,
         };
         // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
         // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
@@ -640,6 +818,7 @@ fn a_dispatch_stores_to_a_volume() {
                     width: EDGE,
                     height: EDGE,
                     depth: Some(EDGE),
+                    layers: None,
                 }],
             },
         )
@@ -717,6 +896,7 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
                     width: EDGE,
                     height: EDGE,
                     depth: Some(EDGE),
+                    layers: None,
                 }],
             },
         )
@@ -756,6 +936,7 @@ fn a_dispatch_copies_a_single_channel_image() {
             width: SIDE,
             height: SIDE,
             depth: None,
+            layers: None,
         };
         let done = dispatch_guest(
             &translated(&COPY_R8),
@@ -792,6 +973,7 @@ fn a_dispatch_copies_an_eight_bit_integer_image() {
             width: SIDE,
             height: SIDE,
             depth: None,
+            layers: None,
         };
         let done = dispatch_guest(
             &translated_for(&COPY_R8, [true, true]),
@@ -911,6 +1093,7 @@ fn a_dispatch_asks_an_image_s_size() {
                     width: 6,
                     height: 4,
                     depth: None,
+                    layers: None,
                 }),
                 stored: &[DispatchImage {
                     texels: &destination,
@@ -918,6 +1101,7 @@ fn a_dispatch_asks_an_image_s_size() {
                     width: SIDE,
                     height: SIDE,
                     depth: None,
+                    layers: None,
                 }],
             },
         )
@@ -1002,6 +1186,7 @@ fn a_dispatch_fetches_from_two_images() {
             width: SIDE,
             height: SIDE,
             depth: None,
+            layers: None,
         };
         let first = vec![0x1111_1111_u32; (SIDE * SIDE) as usize];
         let second: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0a0b_0c00 | i).collect();
@@ -1046,6 +1231,7 @@ fn a_dispatch_copies_a_half_float_image() {
             width: SIDE,
             height: SIDE,
             depth: None,
+            layers: None,
         };
         let done = dispatch_guest(
             &translated(&COPY),

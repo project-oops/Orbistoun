@@ -495,7 +495,7 @@ pub struct Stored {
     pub variable: Id,
     /// The image type a load of [`variable`](Self::variable) produces.
     pub image: Id,
-    /// The unsigned vector a texel coordinate is: two components, or three for a volume.
+    /// The unsigned vector a texel coordinate is: two components, or three for a volume or an array.
     pub texel: Id,
     /// The four-component vector a texel's value is: float, or unsigned for an integer image.
     pub value: Id,
@@ -503,6 +503,8 @@ pub struct Stored {
     pub integer: bool,
     /// Whether the image is three-dimensional, addressed by three coordinates.
     pub volume: bool,
+    /// Whether the image is a 2D array, addressed by two coordinates and a layer (D897).
+    pub layered: bool,
 }
 
 /// How the execution mask's low half arrives from the decoder.
@@ -10638,11 +10640,11 @@ fn image_sample<M: Model + ?Sized>(
             )
         };
 
-        let texel = layer_zero_only(
+        let texel = layer_in_bounds(
             model,
             instruction,
             (&addresses, a16),
-            (&texture, texel, shape),
+            (&texture, bound, texel),
             lane,
         )?;
 
@@ -10659,40 +10661,50 @@ fn image_sample<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `texel` as a fetch of `shape` answers it: as it is, or - fetched from a one-layer image at the
-/// layer the address's third element names - itself at layer zero and zero at any other, which is
-/// out of bounds (D895).
-fn layer_zero_only<M: Model + ?Sized>(
+/// `texel` as a fetch from `texture` answers it: as it is, or - fetched from a 2D array at the layer
+/// the address's third element names - itself where the array has that layer and zero past its
+/// last, which is out of bounds (D895, D897). The layers are the bound image's own, asked of it.
+fn layer_in_bounds<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
-    (texture, texel, shape): (&Texture, Id, ImageShape),
+    (texture, bound, texel): (&Texture, Id, Id),
     lane: u32,
 ) -> Result<Id, TranslateError> {
-    let Some(first) = layer_is_zero(model, instruction, (addresses, a16), shape, lane)? else {
+    if !texture.shape.layered() {
         return Ok(texel);
-    };
-    let builder = model.builder();
-    let none = builder.id();
-    builder.declare(op::CONSTANT_NULL, &[texture.result.0, none.0]);
-    Ok(model.select(first, texel, none))
-}
-
-/// Whether the layer a layered access names, its address's third element, is zero, the only layer a
-/// one-layer image has (D895); `None` for any other shape.
-fn layer_is_zero<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
-    shape: ImageShape,
-    lane: u32,
-) -> Result<Option<Id>, TranslateError> {
-    if !shape.layered() {
-        return Ok(None);
     }
     let layer = address_element(model, instruction, (addresses, a16), 2, lane)?;
     let zero = model.constant(0);
-    Ok(Some(model.compare(op::IEQUAL, layer, zero)))
+    let u32_type = model.u32_type();
+    let builder = model.builder();
+    builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
+    let image = builder.id();
+    builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let size = builder.id();
+    builder.function(
+        op::IMAGE_QUERY_SIZE_LOD,
+        &[texture.texel.0, size.0, image.0, zero.0],
+    );
+    let layers = builder.id();
+    builder.function(op::COMPOSITE_EXTRACT, &[u32_type.0, layers.0, size.0, 2]);
+    let none = builder.id();
+    builder.declare(op::CONSTANT_NULL, &[texture.result.0, none.0]);
+    let held = model.compare(op::ULESS_THAN, layer, layers);
+    Ok(model.select(held, texel, none))
+}
+
+/// Whether `layer` is one the storage image `image` holds, its texel coordinate type `texel`: below
+/// the layers the image is asked for (D897).
+fn layer_held<M: Model + ?Sized>(model: &mut M, (texel, image): (Id, Id), layer: Id) -> Id {
+    let u32_type = model.u32_type();
+    let builder = model.builder();
+    builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
+    let size = builder.id();
+    builder.function(op::IMAGE_QUERY_SIZE, &[texel.0, size.0, image.0]);
+    let layers = builder.id();
+    builder.function(op::COMPOSITE_EXTRACT, &[u32_type.0, layers.0, size.0, 2]);
+    model.compare(op::ULESS_THAN, layer, layers)
 }
 
 /// `image_get_resinfo`: the size of a two-dimensional image's level, the level an integer in the one
@@ -10874,6 +10886,10 @@ fn sample_coordinate<M: Model + ?Sized>(
         // A volume's position, across, down and deep, each as the guest gave it (D823).
         let deep = address_element(model, instruction, (addresses, a16), 2, lane)?;
         [across, down, deep].map(|at| model.as_float(at)).to_vec()
+    } else if fetches && texture.shape.layered() {
+        // A 2D array's texel and layer (D897).
+        let layer = address_element(model, instruction, (addresses, a16), 2, lane)?;
+        vec![across, down, layer]
     } else if fetches {
         vec![across, down]
     } else {
@@ -11200,18 +11216,10 @@ fn image_store<M: Model + ?Sized>(
             read += 1;
         }
 
-        // A volume's third coordinate is its slice (D823).
-        let w = if stored.volume {
-            Some(address_element(
-                model,
-                instruction,
-                (&addresses, a16),
-                2,
-                lane,
-            )?)
-        } else {
-            None
-        };
+        // A volume's third coordinate is its slice (D823), and an array's its layer (D897).
+        let w = (stored.volume || stored.layered)
+            .then(|| address_element(model, instruction, (&addresses, a16), 2, lane))
+            .transpose()?;
         let builder = model.builder();
         let coordinate = builder.id();
         let mut construct = vec![stored.texel.0, coordinate.0, u.0, v.0];
@@ -11224,13 +11232,17 @@ fn image_store<M: Model + ?Sized>(
         // An inactive lane stores nothing. Its registers hold whatever an earlier write left there,
         // often nothing at all: radeonsi's one-texel readback copy runs a single thread of 64, and
         // the other 63, whose coordinates were never computed, would store zero over its texel.
-        // Any layer but zero of a one-layer image is out of bounds, and stores nothing (D895).
-        let in_layer = layer_is_zero(model, instruction, (&addresses, a16), shape, lane)?;
-        let merge = open_if_active(model, lane, in_layer);
         let builder = model.builder();
         let bound = builder.id();
         builder.function(op::LOAD, &[stored.image.0, bound.0, stored.variable.0]);
-        builder.function(op::IMAGE_WRITE, &[bound.0, coordinate.0, value.0]);
+        // A layer past an array's last is out of bounds, and stores nothing (D895, D897).
+        let in_layer = w
+            .filter(|_| stored.layered)
+            .map(|layer| layer_held(model, (stored.texel, bound), layer));
+        let merge = open_if_active(model, lane, in_layer);
+        model
+            .builder()
+            .function(op::IMAGE_WRITE, &[bound.0, coordinate.0, value.0]);
         close_if_active(model, merge);
     }
 
