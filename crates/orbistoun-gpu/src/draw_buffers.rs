@@ -394,7 +394,7 @@ fn word_through_line(
 }
 
 /// What [`evaluate_computed`] answers.
-pub(crate) type Evaluation = Result<Option<([u32; 4], u32)>, Refusal>;
+pub(crate) type Evaluation = Result<Option<([u32; 4], Option<u32>)>, Refusal>;
 
 /// An answer [`evaluate_computed`] gave, with what it was asked and each guest word its replay read
 /// and what that held: asked the same again, it holds while every one of those words does. A
@@ -501,61 +501,6 @@ fn interned(computed: &Computed) -> std::sync::Arc<Computed> {
     shared
 }
 
-/// A raw buffer read as a table of buffer descriptors, sixteen bytes each: how many it holds, how
-/// many name a buffer, and from the first byte of the lowest to the end of the highest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableSpan {
-    /// Descriptors the buffer holds.
-    pub entries: u64,
-    /// Of those, the ones naming a buffer of at least a byte.
-    pub named: u64,
-    /// The lowest base a named buffer has.
-    pub first: u64,
-    /// One past the highest byte a named buffer holds.
-    pub end: u64,
-}
-
-/// How many descriptors a table is read for at most.
-const TABLE_ENTRIES_MOST: u64 = 1 << 16;
-
-/// The buffer `words` describe read as a table of buffer descriptors ([`TableSpan`]), its words
-/// through `read`: a raw buffer's sixteen-byte entries, or a structured one's records, each at least
-/// a descriptor. `None` for a record smaller than one, addressing not modelled, or entries that
-/// cannot all be read.
-pub fn table_span(words: [u32; 4], read: &mut dyn FnMut(u64) -> Option<u32>) -> Option<TableSpan> {
-    let table = decode_buffer_descriptor(words);
-    let (stride, entries) = match table.stride {
-        0 => (16, table.byte_len() / 16),
-        stride if stride >= 16 => (u64::from(stride), u64::from(table.records)),
-        _ => return None,
-    };
-    if table.unsupported {
-        return None;
-    }
-    let entries = entries.min(TABLE_ENTRIES_MOST);
-    let mut span = TableSpan {
-        entries,
-        named: 0,
-        first: u64::MAX,
-        end: 0,
-    };
-    for entry in 0..entries {
-        let at = table.base + entry * stride;
-        let mut entry_words = [0u32; 4];
-        for (step, word) in (0u64..).zip(entry_words.iter_mut()) {
-            *word = read(at + step * 4)?;
-        }
-        let named = decode_buffer_descriptor(entry_words);
-        if named.byte_len() == 0 {
-            continue;
-        }
-        span.named += 1;
-        span.first = span.first.min(named.base);
-        span.end = span.end.max(named.base + named.byte_len());
-    }
-    Some(span)
-}
-
 /// [`evaluate_computed`], replayed: guest memory's words come through `read`.
 fn evaluate_computed_now(
     computed: &Computed,
@@ -646,40 +591,17 @@ fn evaluate_computed_now(
     // The offset field's codes: a scalar register, `null` (125), or an inline integer, 128 to 192
     // counting up from zero and 193 to 208 down from -1.
     let soffset = match computed.soffset {
-        125 => 0,
-        code @ 128..=192 => u32::from(code - 128),
-        code @ 193..=208 => 0u32.wrapping_sub(u32::from(code - 192)),
-        code => {
-            let Some(soffset) = scalars.get(usize::from(code)).copied().flatten() else {
-                let why = unknown(usize::from(code));
-                let table = if count == 4 {
-                    table_note(words, read)
-                } else {
-                    String::new()
-                };
-                return Err(format!("{why}{table}").into());
-            };
-            soffset
-        }
+        125 => Some(0),
+        code @ 128..=192 => Some(u32::from(code - 128)),
+        code @ 193..=208 => Some(0u32.wrapping_sub(u32::from(code - 192))),
+        code => match scalars.get(usize::from(code)).copied().flatten() {
+            Some(soffset) => Some(soffset),
+            // A descriptor's offset the host cannot know: its buffer is bound whole (D901).
+            None if count == 4 => None,
+            None => return Err(unknown(usize::from(code))),
+        },
     };
     Ok(Some((words, soffset)))
-}
-
-/// The buffer `words` describe, read at an offset nobody knows, measured as a table of descriptors
-/// ([`table_span`]): what binding all of it, and every buffer it names, would take. Empty where it
-/// is not one.
-fn table_note(words: [u32; 4], read: &mut dyn FnMut(u64) -> Option<u32>) -> String {
-    table_span(words, read).map_or_else(String::new, |span| {
-        format!(
-            "; the buffer it reads, at {:#x}, holds {} descriptor(s), {} naming a buffer, spanning {:#x}..{:#x} ({} bytes)",
-            decode_buffer_descriptor(words).base,
-            span.entries,
-            span.named,
-            span.first,
-            span.end,
-            span.end.saturating_sub(span.first)
-        )
-    })
 }
 
 /// [`decode_prefix`], kept by the prefix's words: a draw resolves its descriptors from the same
@@ -1383,16 +1305,25 @@ fn resolve_range_now(
             else {
                 return Ok((0, 0));
             };
-            match computed.through {
-                ComputedAccess::Descriptor { reads, .. } => (
-                    crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base),
+            let base = crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base);
+            match (computed.through, soffset) {
+                (ComputedAccess::Descriptor { reads, .. }, Some(soffset)) => (
+                    base,
                     u64::from(soffset) + descriptor_extent_to(values, reads, last_index(reads))?,
                 ),
+                // At an offset the host cannot know, the whole buffer, wherever the access lands
+                // in it (D901).
+                (ComputedAccess::Descriptor { .. }, None) => {
+                    (base, decode_buffer_descriptor(values).byte_len())
+                }
                 // A scalar load reads its words from the base plus the scalar offset, which the
                 // translated load does not add: the range starts there.
-                ComputedAccess::Pointer { end, .. } => {
+                (ComputedAccess::Pointer { end, .. }, Some(soffset)) => {
                     let base = u64::from(values[0]) | u64::from(values[1] & 0xffff) << 32;
                     (base.wrapping_add(u64::from(soffset)), u64::from(end))
+                }
+                (ComputedAccess::Pointer { .. }, None) => {
+                    return Err("a scalar load's base at an offset the host cannot know".into());
                 }
             }
         }
@@ -1743,44 +1674,6 @@ mod tests {
             Some(vec![12, 13, 10, 13, 14, 10])
         );
         assert_eq!(super::fan_ids(index, 2, 2, true), None, "past the indices");
-    }
-
-    /// A raw buffer read at an offset the host cannot know is measured as a table of descriptors:
-    /// how many entries it holds, how many name a buffer, and the span those buffers cover - what
-    /// says whether one range could hold every buffer an access through an entry reaches.
-    /// Grand Theft Auto V's compute program at `0x74005b87ce00` picks its store buffer from such a
-    /// table by a lane's index. A structured buffer's records are its entries, where each holds a
-    /// descriptor.
-    #[test]
-    fn a_table_s_entries_span_is_measured() {
-        let raw = |base: u32, bytes: u32| [base, 0, bytes, 0];
-        let mut memory = std::collections::HashMap::new();
-        let entries = [raw(0x9000, 0x100), [0; 4], raw(0x5000, 0x40)];
-        for (index, entry) in entries.iter().enumerate() {
-            for (word, value) in entry.iter().enumerate() {
-                memory.insert(0x1000 + (index * 16 + word * 4) as u64, *value);
-            }
-        }
-        let mut read = |address: u64| memory.get(&address).copied();
-        assert_eq!(
-            super::table_span(raw(0x1000, 48), &mut read),
-            Some(super::TableSpan {
-                entries: 3,
-                named: 2,
-                first: 0x5000,
-                end: 0x9100,
-            })
-        );
-        assert_eq!(
-            super::table_span([0x1000, 16 << 16, 3, 0], &mut read),
-            super::table_span(raw(0x1000, 48), &mut read),
-            "a structured table of three sixteen-byte records"
-        );
-        assert_eq!(
-            super::table_span([0x1000, 8 << 16, 6, 0], &mut read),
-            None,
-            "a record smaller than a descriptor"
-        );
     }
 
     /// A range running past the guest memory that holds it binds the part held (D795): mesa-cube's
@@ -2269,6 +2162,47 @@ mod tests {
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
         assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// A computed descriptor the host finds, read at a scalar offset it cannot know - one the
+    /// program forms from its lanes, as Grand Theft Auto V's compute programs read a descriptor
+    /// table at a lane's index - binds the descriptor's whole buffer (D901): the access adds the
+    /// offset itself, wherever in the buffer it lands. A scalar load's base at such an offset is
+    /// still refused: its range starts at the offset.
+    #[test]
+    fn a_computed_descriptor_at_an_offset_the_host_cannot_know_binds_whole() {
+        use orbistoun_translate::draw_buffers::{BufferSource, Computed, ComputedAccess};
+        let mut table = Vec::new();
+        for word in [0x2000u32, 16 << 16, 4, STRUCTURED] {
+            table.extend(word.to_le_bytes());
+        }
+        let memory = At(0x1000, table);
+        let computed = |through| {
+            BufferSource::Computed(Box::new(Computed {
+                // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0)
+                prefix: vec![0xf408_0002, 0xfa00_0000, 0xbf8c_c07f],
+                at: 12,
+                through,
+                // s8, which nothing before the access sets.
+                soffset: 8,
+                first_register: 4,
+                user_data: 2,
+                program_address: None,
+            }))
+        };
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        user_data[0] = 0x1000;
+        let descriptor = computed(ComputedAccess::Descriptor {
+            first: 0,
+            reads: vector(Some(16), true),
+        });
+        assert_eq!(
+            super::resolve_range(&descriptor, (&user_data, 0, &[]), &memory),
+            Ok((0x2000, 4 * 16)),
+            "the descriptor's four sixteen-byte records, whole"
+        );
+        let pointer = computed(ComputedAccess::Pointer { base: 0, end: 16 });
+        assert!(super::resolve_range(&pointer, (&user_data, 0, &[]), &memory).is_err());
     }
 
     /// Past the most answers kept, the oldest goes and every other stays, rather than all of
