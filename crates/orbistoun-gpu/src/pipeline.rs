@@ -2905,6 +2905,8 @@ pub enum TexelFormat {
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, a texel a word: the guest's `32_UINT`.
     R32Uint,
+    /// One sixteen-bit unsigned channel, a texel half a word: the guest's `16_UINT`.
+    R16Uint,
     /// One thirty-two-bit float channel, a texel a word: the guest's `32_FLOAT`.
     R32Float,
     /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
@@ -2931,6 +2933,7 @@ impl TexelFormat {
             | Self::R32Float
             | Self::Rgba8Uint => 4,
             Self::R8 | Self::R8Uint => 1,
+            Self::R16Uint => 2,
             Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
         }
@@ -2947,7 +2950,7 @@ impl TexelFormat {
     pub const fn is_integer(self) -> bool {
         matches!(
             self,
-            Self::Rgba32Uint | Self::R32Uint | Self::R8Uint | Self::Rgba8Uint
+            Self::Rgba32Uint | Self::R32Uint | Self::R16Uint | Self::R8Uint | Self::Rgba8Uint
         )
     }
 }
@@ -3595,8 +3598,7 @@ fn dispatch_depth_target(
     source: &TextureSource,
 ) -> Option<(ResourceId, (u32, u32))> {
     let descriptor = decode_image_descriptor(words);
-    let depth_tiled =
-        matches!(descriptor.tiling, SwizzleMode::Other(mode) if DEPTH_SWIZZLES.contains(&mode));
+    let depth_tiled = is_depth_swizzle(descriptor.tiling);
     (depth_tiled
         && descriptor.format == FORMAT_32_FLOAT
         && words[3] >> 28 == IMAGE_TYPE_2D
@@ -3839,6 +3841,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         // One channel, read with the constants a one-channel image answers for the others - which
         // the host's one-channel view answers too - or written, where the selects say nothing.
         FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
+        FORMAT_16_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R16Uint),
         FORMAT_8_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R8Uint),
         FORMAT_32_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Float),
         _ => Err(format!(
@@ -6112,6 +6115,8 @@ const FORMAT_8_8_8_8_SRGB: u32 = 130;
 const FORMAT_32_32_32_32_UINT: u32 = 75;
 /// `GFX10_FORMAT_32_UINT` (`gfx10-rsrc.json`, value 20): one thirty-two-bit unsigned channel.
 const FORMAT_32_UINT: u32 = 20;
+/// `16_UINT`, one sixteen-bit unsigned channel (`gfx10-rsrc.json`, enum `GFX10_FORMAT` 11).
+const FORMAT_16_UINT: u32 = 11;
 /// `GFX10_FORMAT_2_10_10_10_UNORM` (`gfx10-rsrc.json`): red, green and blue ten bits each from the
 /// low end, alpha two.
 const FORMAT_2_10_10_10_UNORM: u32 = 50;
@@ -6708,6 +6713,25 @@ const SAMPLED_AS_RENDERED: [SwizzleMode; 6] = [
 /// (24), `addrtypes.h`.
 const DEPTH_SWIZZLES: [u32; 5] = [4, 8, 16, 20, 24];
 
+/// Whether `tiling` is one a depth surface is stored under ([`DEPTH_SWIZZLES`]): `64KB_Z_X` by its
+/// name, the rest by their raw values.
+const fn is_depth_swizzle(tiling: SwizzleMode) -> bool {
+    match tiling {
+        SwizzleMode::Tiled64KbZX => true,
+        SwizzleMode::Other(mode) => {
+            let mut at = 0;
+            while at < DEPTH_SWIZZLES.len() {
+                if DEPTH_SWIZZLES[at] == mode {
+                    return true;
+                }
+                at += 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// The image formats a depth target is sampled as: `16_UNORM` (7), `32_FLOAT` (22) and
 /// `X24_8_32_FLOAT` (146), `GFX10_FORMAT` in `gfx10-rsrc.json`.
 const DEPTH_IMAGE_FORMATS: [u32; 3] = [7, 22, 146];
@@ -6805,8 +6829,7 @@ fn depth_texture_from(
 ) -> Option<RenderCommand> {
     let (slot, saturated, compare) = (source.slot, source.saturated, source.compare);
     let descriptor = decode_image_descriptor(words);
-    let depth_tiled =
-        matches!(descriptor.tiling, SwizzleMode::Other(mode) if DEPTH_SWIZZLES.contains(&mode));
+    let depth_tiled = is_depth_swizzle(descriptor.tiling);
     if !depth_tiled
         || !DEPTH_IMAGE_FORMATS.contains(&descriptor.format)
         || words[3] >> 28 != IMAGE_TYPE_2D
@@ -7376,6 +7399,7 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         | TexelFormat::Rgba8Uint
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
+        | TexelFormat::R16Uint
         | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
     }
 }
@@ -7658,6 +7682,7 @@ fn swizzle_texels_by_channel(
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::Rgba16Float
                 | TexelFormat::R32Uint
+                | TexelFormat::R16Uint
                 | TexelFormat::R32Float
                 | TexelFormat::Float11_11_10
                 | TexelFormat::Rgba8Srgb
@@ -7937,6 +7962,8 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::Rx64KbBpp8 => 1 << 28,
         crate::tiling::SurfaceLayout::Rx64KbBpp2 => 1 << 29,
         crate::tiling::SurfaceLayout::Rx64KbBpp16 => 1 << 30,
+        crate::tiling::SurfaceLayout::Zx64Kb => 1 << 23 | 1 << 15,
+        crate::tiling::SurfaceLayout::Zx64KbBpp2 => 1 << 24 | 1 << 15,
     }
 }
 

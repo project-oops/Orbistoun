@@ -2073,6 +2073,8 @@ const ADDR_SW_64KB_S: u32 = 9;
 const ADDR_SW_4KB_S: u32 = 5;
 /// `ADDR_SW_256B_S` (`addrtypes.h:228`): the standard swizzle in 256-byte blocks.
 const ADDR_SW_256B_S: u32 = 1;
+/// `ADDR_SW_64KB_Z_X` (`addrtypes.h:251`): the depth swizzle with pipe XOR in 64 KiB blocks.
+pub const ADDR_SW_64KB_Z_X: u32 = 24;
 
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
@@ -2098,6 +2100,9 @@ pub enum SwizzleMode {
     /// 256B_S (`ADDR_SW_256B_S`), the standard swizzle in 256-byte blocks; modelled at sixteen
     /// bytes an element, a small block-compressed image's blocks.
     Tiled256BS,
+    /// 64KB_Z_X (`ADDR_SW_64KB_Z_X`), the depth swizzle with pipe XOR; a depth target is held by
+    /// the host (D817), and an image another stage wrote in it is read in it.
+    Tiled64KbZX,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
 }
@@ -2118,6 +2123,7 @@ pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
         ADDR_SW_64KB_S => SwizzleMode::Tiled64KbS,
         ADDR_SW_4KB_S => SwizzleMode::Tiled4KbS,
         ADDR_SW_256B_S => SwizzleMode::Tiled256BS,
+        ADDR_SW_64KB_Z_X => SwizzleMode::Tiled64KbZX,
         other => SwizzleMode::Other(other),
     }
 }

@@ -25,6 +25,8 @@ pub enum DispatchFormat {
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, the guest's `32_UINT`: a word a texel.
     R32Uint,
+    /// One sixteen-bit unsigned channel, the guest's `16_UINT`: the low half of a word a texel.
+    R16Uint,
     /// One thirty-two-bit float channel, the guest's `32_FLOAT`: a word a texel, its bits as they are.
     R32Float,
     /// Ten normalised bits each of red, green and blue from the low end and two of alpha, the
@@ -43,6 +45,7 @@ impl DispatchFormat {
             Self::Rgba8Uint => vk::Format::R8G8B8A8_UINT,
             Self::Rgba32Uint => vk::Format::R32G32B32A32_UINT,
             Self::R32Uint => vk::Format::R32_UINT,
+            Self::R16Uint => vk::Format::R16_UINT,
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
             Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
@@ -54,6 +57,7 @@ impl DispatchFormat {
         match self {
             Self::Rgba8 | Self::Rgba8Uint | Self::Rgb10A2 | Self::R32Uint | Self::R32Float => 4,
             Self::R8 | Self::R8Uint => 1,
+            Self::R16Uint => 2,
             Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
         }
