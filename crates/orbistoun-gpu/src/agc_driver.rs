@@ -542,8 +542,8 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
     if report.unbound_export_draws > 0 {
         return Some(format!(
             concat!(
-                "{} draw(s) run a pixel shader that exports to a colour target no colour buffer ",
-                "is bound for, which would draw it nowhere"
+                "{} draw(s) run a pixel shader that exports to a colour target the guest formats ",
+                "and no colour buffer is bound for, which would draw it nowhere"
             ),
             report.unbound_export_draws
         ));

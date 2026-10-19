@@ -882,8 +882,10 @@ pub struct SubmissionReport {
     /// Draws that write a colour channel their pixel shader never exports, which would hold
     /// whatever the shader's output held.
     pub unexported_channel_draws: usize,
-    /// Draws whose pixel shader exports to a colour target (`mrtK`) the submission binds no colour
-    /// buffer for, so what it exports there would be drawn nowhere.
+    /// Draws whose pixel shader exports to a colour target (`mrtK`) the guest formats but the
+    /// submission binds no colour buffer for, so what it exports there would be drawn nowhere. An
+    /// export past the targets the guest formats is not counted: it has no export slot, and the
+    /// hardware drops it (D825).
     pub unbound_export_draws: usize,
     /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
     /// module would read zeros where the guest's data is, and the first such access, by name and
@@ -1224,6 +1226,15 @@ fn set_render_targets(
     (depth_target, buffers)
 }
 
+/// Whether a pixel shader writing `channels` to each target, `mrtK` at `K`, writes one the guest
+/// formats - one of the first `formatted` - that is not one of the first `bound` the submission
+/// binds a colour buffer for. One past those formatted is not: `SPI_SHADER_COL_FORMAT` gives it no
+/// export slot, as ACO gives a `ZERO` one none (`aco_select_ps_epilog.cpp:88-91`), so the hardware
+/// draws it nowhere and the draw is drawn without it (D825).
+fn exports_unbound(channels: &[u8], (bound, formatted): (usize, usize)) -> bool {
+    channels.iter().take(formatted).skip(bound).any(|&c| c != 0)
+}
+
 /// Unbinds the colour attachments after the first that no draw's pixel shader exports to: a
 /// format the guest left set for a buffer its shaders never write binds nothing to draw (D825).
 fn keep_exported_attachments(submission: &mut Submission, exported: usize) {
@@ -1273,6 +1284,21 @@ mod attachment_tests {
         assert_eq!(attachment_buffers(&[write(0xA1C5, 0)]), vec![0]);
         assert_eq!(attachment_buffers(&[write(0xA1C5, 0x44)]), vec![0, 1]);
         assert_eq!(attachment_buffers(&[write(0xA1C5, 0x40)]), vec![1]);
+    }
+
+    /// An export to a target past those `SPI_SHADER_COL_FORMAT` formats has no export slot, so the
+    /// hardware writes it nowhere and the draw is drawn without it: Grand Theft Auto V's scene draws
+    /// export `mrt1` with one target formatted. One to a target it formats but no buffer could be
+    /// bound for is ours to refuse.
+    #[test]
+    fn an_export_past_the_formatted_targets_is_dropped() {
+        let two = [0xf, 0xf, 0, 0, 0, 0, 0, 0];
+        assert!(!super::exports_unbound(&two, (1, 1)), "mrt1 has no slot");
+        assert!(
+            super::exports_unbound(&two, (1, 2)),
+            "mrt1 is formatted and not bound"
+        );
+        assert!(!super::exports_unbound(&two, (2, 2)), "both bound");
     }
 
     /// Attachments stop at the first buffer with no extent, so attachment `K` stays `mrtK`'s.
@@ -4540,10 +4566,12 @@ impl Pipeline {
         keep_exported_attachments(submission, self.exported_attachments(per_draw));
         // The buffers bound from here on: attachment `K` is the `K`th.
         let bound = bound_colour_targets(&submission.commands);
+        let formatted = buffers.len();
         buffers.truncate(bound.max(1));
         submission.report.unexported_channel_draws =
             self.unexported_channel_draws(per_draw, draws, (writes, buffers));
-        submission.report.unbound_export_draws = self.unbound_export_draws(per_draw, bound);
+        submission.report.unbound_export_draws =
+            self.unbound_export_draws(per_draw, (bound, formatted));
     }
 
     /// How many colour attachments the draws' pixel shaders export to: one past the highest target
@@ -4560,9 +4588,9 @@ impl Pipeline {
             .unwrap_or(1)
     }
 
-    /// How many draws run a pixel shader that writes channels to a colour target past the `bound`
-    /// the submission binds colour buffers for: `mrtK` is the `K`th bound one.
-    fn unbound_export_draws(&self, per_draw: &[DrawShaders], bound: usize) -> usize {
+    /// How many draws run a pixel shader that writes channels to a colour target the guest formats
+    /// past the `bound` the submission binds colour buffers for ([`exports_unbound`]).
+    fn unbound_export_draws(&self, per_draw: &[DrawShaders], targets: (usize, usize)) -> usize {
         per_draw
             .iter()
             .filter(|shaders| {
@@ -4571,7 +4599,7 @@ impl Pipeline {
                         && self
                             .colour_channels
                             .get(resource)
-                            .is_some_and(|channels| channels.iter().skip(bound).any(|&c| c != 0))
+                            .is_some_and(|channels| exports_unbound(channels, targets))
                 })
             })
             .count()
