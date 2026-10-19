@@ -860,13 +860,35 @@ fn written_scalars(instruction: &Instruction, name: &str) -> Vec<usize> {
         .operands
         .iter()
         .take(if carry { 2 } else { 1 })
-        .filter_map(|operand| match operand {
-            Operand::Scalar(register) => Some(usize::from(*register)),
-            Operand::Named(named) => mask_code(named),
+        .enumerate()
+        .filter_map(|(at, operand)| match operand {
+            // The destination as wide as the instruction writes it; a carry-out is a mask.
+            Operand::Scalar(register) => Some((
+                usize::from(*register),
+                if at == 0 { destination_width(name) } else { 2 },
+            )),
+            Operand::Named(named) => mask_code(named).map(|code| (code, 2)),
             _ => None,
         })
-        .flat_map(|code| [code, code + 1])
+        .flat_map(|(code, width)| code..code + width)
         .collect()
+}
+
+/// How many scalar registers an instruction's scalar destination spans: a pair for a 64-bit result,
+/// as a `_b64`, `_u64` or `_i64` operation writes unless it counts or finds in a 64-bit source into
+/// a 32-bit result (`s_bcnt1_i32_b64`, `s_ff1_i32_b64`), and for a compare's lane mask; one
+/// register otherwise, as a lane read writes.
+fn destination_width(name: &str) -> usize {
+    let wide = ["_b64", "_u64", "_i64"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+        && !name.contains("_i32_")
+        && !name.contains("_u32_");
+    if wide || name.starts_with("v_cmp") {
+        2
+    } else {
+        1
+    }
 }
 
 /// The step that left a register unknown in a lane run: its offset, its name, and what it read
@@ -2126,7 +2148,7 @@ impl<'a> Concrete<'a> {
         if name.starts_with("s_movrel") {
             self.scalars = [None; SCALAR_CODES];
         }
-        self.forget_operand(instruction.operands.first());
+        self.forget_operand(instruction.operands.first(), destination_width(name));
         if model::writes_condition_code(name) || name.starts_with("s_cmp") {
             self.condition = None;
         }
@@ -2230,13 +2252,15 @@ impl<'a> Concrete<'a> {
             && instruction
                 .second_word
                 .is_some_and(|word| word >> 15 & 1 != 0);
-        for operand in instruction.operands.iter().take(written) {
+        for (at, operand) in instruction.operands.iter().take(written).enumerate() {
             if into_pair
                 && matches!(operand, Operand::Named(named) if mask_code(named) == Some(VCC))
             {
                 continue;
             }
-            self.forget_operand(Some(operand));
+            // The destination as wide as it is written; a second, a carry-out, is a mask.
+            let width = if at == 0 { destination_width(name) } else { 2 };
+            self.forget_operand(Some(operand), width);
         }
         // The short carry forms write their carry into the condition mask, which no operand names.
         if name.contains("_co_") && name.ends_with("_e32") {
@@ -2261,9 +2285,9 @@ impl<'a> Concrete<'a> {
         }
     }
 
-    fn forget_operand(&mut self, operand: Option<&Operand>) {
+    fn forget_operand(&mut self, operand: Option<&Operand>, width: usize) {
         match operand {
-            Some(Operand::Scalar(register)) => self.forget(usize::from(*register), 2),
+            Some(Operand::Scalar(register)) => self.forget(usize::from(*register), width),
             Some(Operand::Named(name)) => {
                 if let Some(code) = mask_code(name) {
                     self.forget(code, 2);
@@ -2581,10 +2605,15 @@ mod tests {
         )
         .expect("evaluated")
         .expect("reached");
-        // A destination the semantics do not run is forgotten as wide as a pair.
-        assert_eq!((scalars[4], scalars[5], scalars[6]), (None, None, Some(3)));
+        // A destination the semantics do not run is forgotten as wide as it writes: a lane read is
+        // one register, and the one after it keeps what it held (Grand Theft Auto V's compute
+        // program reads a lane into `s3` beside a descriptor loaded into `s[4:7]`).
+        assert_eq!(
+            (scalars[4], scalars[5], scalars[6]),
+            (None, Some(2), Some(3))
+        );
         assert_eq!(unknowns[4], Some(Unknown::LeftBy(0)));
-        assert_eq!(unknowns[5], Some(Unknown::LeftBy(0)));
+        assert_eq!(unknowns[5], None);
         assert_eq!(unknowns[6], None);
         assert_eq!(unknowns[9], None, "never set, by nothing");
     }
