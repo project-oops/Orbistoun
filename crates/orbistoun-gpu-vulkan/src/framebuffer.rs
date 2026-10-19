@@ -2876,6 +2876,10 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
         orbistoun_gpu::TextureEncoding::Float11_11_10 => {
             (vk::Format::B10G11R11_UFLOAT_PACK32, as_they_are())
         }
+        // The guest's four half floats, red lowest, as the host's format holds them.
+        orbistoun_gpu::TextureEncoding::Rgba16Float => {
+            (vk::Format::R16G16B16A16_SFLOAT, as_they_are())
+        }
         // The guest's `2_10_10_10_UNORM`, red in the low ten bits, in the same bit order.
         orbistoun_gpu::TextureEncoding::Rgb10A2 => {
             (vk::Format::A2B10G10R10_UNORM_PACK32, as_they_are())

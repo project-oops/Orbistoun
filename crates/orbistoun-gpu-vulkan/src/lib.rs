@@ -573,6 +573,8 @@ impl VulkanBackend {
             orbistoun_gpu::TextureEncoding::Bc1Srgb | orbistoun_gpu::TextureEncoding::Bc1 => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 2
             }
+            // Four half floats, two words a texel.
+            orbistoun_gpu::TextureEncoding::Rgba16Float => (width as usize) * (height as usize) * 2,
             // One byte a texel, four to a word.
             orbistoun_gpu::TextureEncoding::R8 { .. } => {
                 ((width as usize) * (height as usize)).div_ceil(4)

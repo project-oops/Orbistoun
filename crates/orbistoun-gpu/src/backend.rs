@@ -517,6 +517,9 @@ pub enum TextureEncoding {
     /// each from the low end, alpha the top two - which the host samples as
     /// `A2B10G10R10_UNORM_PACK32`. A tiled volume's texels so (D823).
     Rgb10A2,
+    /// Two words a texel, `16_16_16_16_FLOAT`'s four half floats as the guest holds them, red in
+    /// the low half of the first word, which the host samples natively as `R16G16B16A16_SFLOAT`.
+    Rgba16Float,
     /// One word a texel, a depth as an `f32`'s bits, which the host samples as `D32_SFLOAT`: a depth
     /// target read back from the backend's own attachment, its depth read as it is (D817).
     DepthFloat,

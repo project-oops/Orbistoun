@@ -7283,6 +7283,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         crate::backend::TextureEncoding::Float11_11_10 => 1 << 22,
         crate::backend::TextureEncoding::Rgba8Srgb => 1 << 17,
         crate::backend::TextureEncoding::Rgb10A2 => 1 << 21,
+        crate::backend::TextureEncoding::Rgba16Float => 1 << 17 | 1 << 22,
         // Block-compressed blocks carry their format's tag in their own cache keys; one-byte texels
         // are packed at binding from texels read as `Rgba8`, so never read in `R8`.
         crate::backend::TextureEncoding::Rgba8
@@ -7308,6 +7309,7 @@ fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelForm
         FORMAT_8_UNORM => TexelFormat::R8,
         FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
         FORMAT_8_8_8_8_SRGB => TexelFormat::Rgba8Srgb,
+        FORMAT_16_16_16_16_FLOAT => TexelFormat::Rgba16Float,
         _ => return None,
     };
     let selects = destination_selects(word3);
@@ -7343,6 +7345,11 @@ fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
     if format == TexelFormat::Float11_11_10 {
         return matches!(selects, [4, 5, 6, 7 | 1]);
     }
+    // A half-float texel is two words the host samples as they are: its channels cannot be moved
+    // within them.
+    if format == TexelFormat::Rgba16Float {
+        return selects == IDENTITY_SELECTS;
+    }
     // An sRGB texel's colour channels are decoded where they lie, so they are read only as they
     // are: a channel moved into another's place would be decoded, or not, as the wrong one.
     if format == TexelFormat::Rgba8Srgb {
@@ -7362,16 +7369,14 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
-        // A draw's texture is never a dispatch's eight-byte float one: `sampled_format` reads no
-        // such format.
+        TexelFormat::Rgba16Float => crate::backend::TextureEncoding::Rgba16Float,
         TexelFormat::Rgba8
         | TexelFormat::R8
         | TexelFormat::R8Uint
         | TexelFormat::Rgba8Uint
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
-        | TexelFormat::R32Float
-        | TexelFormat::Rgba16Float => crate::backend::TextureEncoding::Rgba8,
+        | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -8031,7 +8036,7 @@ fn read_tiled_base(
     }
     let since = texture_mark(surface.base, span as u64);
     let (hash, shared): (u64, std::sync::Arc<[u32]>) = if cleared {
-        let zeros = vec![0u32; width as usize * height as usize];
+        let zeros = vec![0u32; width as usize * height as usize * format.words() as usize];
         (crate::content_hash(&zeros), zeros.into())
     } else {
         let started = std::time::Instant::now();
@@ -11642,6 +11647,76 @@ mod tests {
         assert_eq!((w, h), (width, height));
         let expected: Vec<u32> = (0..height)
             .flat_map(|y| (0..width).map(move |x| y * 100 + x))
+            .collect();
+        assert_eq!(
+            texels.as_ref(),
+            expected.as_slice(),
+            "row-major after detiling"
+        );
+    }
+
+    /// A `16_16_16_16_FLOAT` texture binds its texels detiled and untouched, two words each, for
+    /// the host to sample as four half floats: Grand Theft Auto V's scene draws sample one in
+    /// `64KB_R_X`. Channels moved within a texel are not read, as for a packed float one.
+    #[test]
+    fn a_half_float_texture_binds_its_words_as_they_are() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
+        let word3 = |selects: u32| (9_u32 << 28) | (27 << 20) | selects;
+        let descriptor = [
+            (texels >> 8) as u32,
+            ((texels >> 40) as u32 & 0xff) | (71 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            word3(0xfac),
+            0,
+            0,
+            0,
+            0,
+        ];
+        for (i, word) in descriptor.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Texel (x, y) holds the words `y * 100 + x` and that with its top bit set, placed where
+        // addrlib's 64-bpp `64KB_R_X` equation puts it.
+        let texel = |x: u32, y: u32| [y * 100 + x, (y * 100 + x) | 1 << 31];
+        for y in 0..height {
+            for x in 0..width {
+                let at = (texels - table) as usize
+                    + crate::tiling::tiled_byte_offset_64kb_rx_bpp8_surface(x, y, width);
+                for (n, word) in texel(x, y).iter().enumerate() {
+                    bytes[at + 4 * n..at + 4 * n + 4].copy_from_slice(&word.to_le_bytes());
+                }
+            }
+        }
+        let mut swapped = bytes.clone();
+        swapped[12..16].copy_from_slice(&word3(0xfa5).to_le_bytes());
+        assert!(
+            read_texture(table, 0, &Memory(swapped), &mut super::TexelCache::new()).is_none(),
+            "channels moved within a texel are not read"
+        );
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: w,
+            height: h,
+            encoding,
+            faces: 1,
+            ..
+        }) = read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
+        else {
+            panic!("a tiled 16_16_16_16 float texture binds");
+        };
+        assert_eq!(encoding, crate::backend::TextureEncoding::Rgba16Float);
+        assert_eq!((w, h), (width, height));
+        let expected: Vec<u32> = (0..height)
+            .flat_map(|y| (0..width).flat_map(move |x| texel(x, y)))
             .collect();
         assert_eq!(
             texels.as_ref(),
