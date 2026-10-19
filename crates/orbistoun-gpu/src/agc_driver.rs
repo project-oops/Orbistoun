@@ -83,12 +83,10 @@ fn destroy_queue(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// header obSCEne measured for `166-agc/driver-create-queue` (`38 00 00 00 03 00 00 00 00 00 02
 /// 00`), so a guest that reads it finds measured bytes rather than zeros.
 fn queue_object() -> u64 {
-    static QUEUE: OnceLock<u64> = OnceLock::new();
-    *QUEUE.get_or_init(|| {
-        let mut object = vec![0u8; 64];
-        object[..12].copy_from_slice(&[0x38, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x02, 0]);
-        Box::leak(object.into_boxed_slice()).as_ptr() as usize as u64
-    })
+    // Each queue its own object, so a submission names which it was handed to (D902).
+    let mut object = vec![0u8; 64];
+    object[..12].copy_from_slice(&[0x38, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0x02, 0]);
+    Box::leak(object.into_boxed_slice()).as_ptr() as usize as u64
 }
 
 /// `SCE_AGC_ERROR_RESOURCE_REGISTRATION_NOT_SUPPORTED`.
@@ -4898,6 +4896,25 @@ pub fn held_fillers(address: u64) -> Vec<(&'static str, u32, u64)> {
         .collect()
 }
 
+/// What a compute stream stepped aside would write to `address` once its wait is satisfied: each
+/// as (which stream - the first stepped aside is 0 - packet, byte offset), from the byte it stopped
+/// at on (D891). A queue waiting on such a word waits on a compute stream that waits in turn.
+#[must_use]
+pub fn aside_fillers(address: u64) -> Vec<(usize, &'static str, u32)> {
+    aside()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .enumerate()
+        .flat_map(|(stream, aside)| {
+            cp::held_writes(&aside.bytes, aside.from)
+                .into_iter()
+                .filter(|write| write.address == address)
+                .map(move |write| (stream, write.packet(), write.offset))
+        })
+        .collect()
+}
+
 /// Keeps the writes of `bytes` from byte `from` on as held, dropping the oldest past
 /// [`HELD_MOST`].
 fn note_held(bytes: &[u8], from: u32) {
@@ -5086,7 +5103,7 @@ fn submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// it written once the compute stream is carried out. Assumed, not measured: the census found the
 /// entry point unbound in obSCEne's own process.
 fn submit_acb(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    submit_described_to(args[1], Ring::AsynchronousCompute)
+    submit_described_to(args[1], Ring::AsynchronousCompute(args[0]))
 }
 
 /// The pipeline a running guest's submissions are prepared through, kept for the run so its shader
@@ -5255,8 +5272,8 @@ pub fn with_every_bound_module(submission: &Submission) -> Submission {
 enum Ring {
     /// The graphics ring: `sceAgcDriverSubmitDcb` and its kin.
     Graphics,
-    /// An asynchronous compute ring: `sceAgcDriverSubmitAcb` (D891).
-    AsynchronousCompute,
+    /// An asynchronous compute ring, by the queue handle `sceAgcDriverSubmitAcb` named (D891, D902).
+    AsynchronousCompute(u64),
 }
 
 /// Reads one submit descriptor, walks the command buffer it names, and keeps the submission - the
@@ -5374,7 +5391,10 @@ fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions, ring: Ring)
             command_processor::preparing(|| prepare_live(&bytes, memory))
         });
     submission.read_ahead_of_draws = read_ahead;
-    submission.asynchronous_compute = ring == Ring::AsynchronousCompute;
+    if let Ring::AsynchronousCompute(queue) = ring {
+        submission.asynchronous_compute = true;
+        submission.compute_queue = queue;
+    }
     // The next submission is prepared from the registers this one leaves, so they are carried here,
     // in submission order, before it is carried out anywhere.
     carry_registers(&bytes, &submission);
@@ -5936,8 +5956,8 @@ struct Aside {
     stopped: Option<cp::Stopped>,
 }
 
-/// The asynchronous compute streams stepped aside, oldest first: the first waits, and the rest wait
-/// behind it in their ring's order (D891).
+/// The asynchronous compute streams stepped aside, oldest first: each queue's first waits, and the
+/// rest of that queue's wait behind it in its order (D891, D902).
 fn aside() -> &'static Mutex<std::collections::VecDeque<Aside>> {
     static ASIDE: Mutex<std::collections::VecDeque<Aside>> =
         Mutex::new(std::collections::VecDeque::new());
@@ -5957,43 +5977,78 @@ pub fn stepped_aside() -> Vec<Option<cp::Stopped>> {
         .collect()
 }
 
-/// Carries the compute streams stepped aside on as far as they go, each in turn from where it
-/// stopped, until one waits again; one that stops for any other reason stops its queue as a
+/// Carries the compute streams stepped aside on as far as they go: each queue's first in turn from
+/// where it stopped, until it waits again, then the next queue's - a queue's later streams wait
+/// behind its first, another queue's do not (D902) - again while any went further, since what one
+/// writes may meet another's wait. One that stops for any other reason stops its queue as a
 /// graphics one does. Answers whether any went further (D891).
 fn resume_aside() -> bool {
     let mut moved = false;
     loop {
-        let Some(Aside {
-            bytes,
-            submission,
-            from,
-            ..
-        }) = aside()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front()
-        else {
-            return moved;
-        };
-        let executed = execute_part(&bytes, from, &submission);
-        if let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped {
-            moved |= offset != from;
-            if let Ok(mut record) = execution_record().lock() {
-                record.bytes_written += executed.bytes_written;
-            }
-            aside()
+        let queues: Vec<u64> = {
+            let aside = aside()
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push_front(Aside {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut queues = Vec::new();
+            for queue in aside.iter().map(|aside| aside.submission.compute_queue) {
+                if !queues.contains(&queue) {
+                    queues.push(queue);
+                }
+            }
+            queues
+        };
+        let mut further = false;
+        for queue in queues {
+            // The queue's first, taken out where it stood and put back there if it waits again.
+            let taken = {
+                let mut aside = aside()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                aside
+                    .iter()
+                    .position(|aside| aside.submission.compute_queue == queue)
+                    .and_then(|at| aside.remove(at).map(|taken| (at, taken)))
+            };
+            let Some((
+                at,
+                Aside {
                     bytes,
                     submission,
-                    from: offset,
-                    stopped: Some(executed.stopped),
-                });
+                    from,
+                    ..
+                },
+            )) = taken
+            else {
+                continue;
+            };
+            let executed = execute_part(&bytes, from, &submission);
+            if let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped {
+                further |= offset != from;
+                if let Ok(mut record) = execution_record().lock() {
+                    record.bytes_written += executed.bytes_written;
+                }
+                let mut aside = aside()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let at = at.min(aside.len());
+                aside.insert(
+                    at,
+                    Aside {
+                        bytes,
+                        submission,
+                        from: offset,
+                        stopped: Some(executed.stopped),
+                    },
+                );
+                continue;
+            }
+            further = true;
+            finish(&bytes, executed);
+        }
+        moved |= further;
+        if !further {
             return moved;
         }
-        moved = true;
-        finish(&bytes, executed);
     }
 }
 
@@ -7235,8 +7290,8 @@ mod tests {
         assert_eq!(destroy(&args), 0x8a6d_0003);
     }
 
-    /// CreateQueue returns the measured success code and hands back the same non-null queue handle
-    /// on every call.
+    /// CreateQueue returns the measured success code and hands back a non-null queue handle, a
+    /// queue of its own on every call, so a submission names which it was handed to (D902).
     #[test]
     fn create_queue_hands_back_a_non_null_handle() {
         let mut queue_out: u64 = 0;
@@ -7252,7 +7307,8 @@ mod tests {
         let first = queue_out;
         queue_out = 0;
         assert_eq!(create_queue(&args), 0);
-        assert_eq!(queue_out, first, "the same object every call");
+        assert_ne!(queue_out, first, "another queue's object");
+        assert_ne!(queue_out, 0);
 
         // A null out-parameter is tolerated - the call still returns success, writing nothing.
         let mut null_args = [0_u64; GUEST_ARG_REGISTERS];
@@ -7383,6 +7439,56 @@ mod tests {
         assert_eq!(passed.len(), 1, "{passed:?}");
         assert!(passed[0].0.starts_with("compute dispatch: "), "{passed:?}");
         assert_eq!(passed[0].1, 1);
+    }
+
+    /// Asynchronous compute queues run apart (D902): a stream waiting on one queue holds back the
+    /// streams handed to that queue after it, and not another queue's. Grand Theft Auto V's
+    /// graphics queue waits on a label its second and third compute streams write, and they were
+    /// held behind its first, which waits on a later graphics submission.
+    #[test]
+    fn a_compute_queue_waits_apart_from_another() {
+        use crate::packet::build::command_header;
+        let _guard = serial();
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; 0x100].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        allow_writes_to(base, 0x100);
+        let low = |address: u64| u32::try_from(address & 0xffff_ffff).expect("low half");
+        let high = |address: u64| u32::try_from(address >> 32).expect("high half");
+        let bytes =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // WAIT_REG_MEM, equal, memory: a label that stays zero, waited on to read one.
+        let label = base + 0x80;
+        let wait = bytes(&[
+            command_header(0x3C, 6),
+            3 | 1 << 4,
+            low(label),
+            high(label),
+            1,
+            0xffff_ffff,
+            4,
+        ]);
+        // WRITE_DATA to memory (DST_SEL 5).
+        let write = bytes(&[command_header(0x37, 4), 5 << 8, low(base), high(base), 7]);
+        for (queue, expected) in [(2, 7), (1, 0)] {
+            memory[..4].copy_from_slice(&[0; 4]);
+            super::aside()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            let on = |compute_queue| super::Submission {
+                asynchronous_compute: true,
+                compute_queue,
+                ..super::Submission::default()
+            };
+            super::run_submission(&wait, on(1));
+            super::run_submission(&write, on(queue));
+            assert_eq!(
+                u32::from_le_bytes(memory[..4].try_into().expect("a word")),
+                expected,
+                "a write on queue {queue}, behind a wait on queue 1"
+            );
+        }
     }
 
     /// A stream handed to an asynchronous compute ring is carried out though the graphics queue has

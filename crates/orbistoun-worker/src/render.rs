@@ -2846,6 +2846,12 @@ fn report_unsatisfied_wait(address: u64) {
             ordinal(held + 1)
         );
     }
+    for (stream, packet, offset) in orbistoun_gpu::agc_driver::aside_fillers(address) {
+        tracing::info!(
+            "  the {} compute stream stepped aside would fill it once its own wait is met: {packet} at byte {offset:#x} (D891)",
+            ordinal(stream as u64 + 1)
+        );
+    }
 }
 
 /// `n` as an English ordinal: 1st, 2nd, 3rd, 4th, 11th, 21st.

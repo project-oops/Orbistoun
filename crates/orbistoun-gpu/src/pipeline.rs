@@ -1041,6 +1041,9 @@ pub struct Submission {
     /// Whether it was handed to an asynchronous compute queue (`sceAgcDriverSubmitAcb`): stopped at
     /// a wait, it steps aside rather than stopping the queue (D891).
     pub asynchronous_compute: bool,
+    /// The asynchronous compute queue it was handed to, the handle `sceAgcDriverCreateQueue` gave:
+    /// a stream waits only behind its own queue's (D902). Zero for a graphics submission.
+    pub compute_queue: u64,
     /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
     /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
