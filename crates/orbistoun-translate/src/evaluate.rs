@@ -113,6 +113,7 @@ pub fn scalar_prefix_explained(
     // decisions taken so far, depth first.
     let mut pending: Vec<Vec<bool>> = vec![Vec::new()];
     let mut merged: Option<(Scalars, Box<Unknowns>)> = None;
+    let mut loops = Loops::new(decode, encodings);
     let mut runs = 0;
     while let Some(decisions) = pending.pop() {
         runs += 1;
@@ -126,6 +127,7 @@ pub fn scalar_prefix_explained(
             (first_register, user_data),
             system,
             (read, &decisions),
+            &mut loops,
         )?;
         match path {
             Path::Reached(reached) => {
@@ -170,7 +172,8 @@ const MOST_PATHS: usize = 1 << 7;
 enum Path {
     /// At the access, with these scalars, and why those unknown are.
     Reached(Box<(Scalars, Unknowns)>),
-    /// Past it, by a branch that jumps over it (D800).
+    /// Past it, by a branch that jumps over it (D800), or at a loop head adding nothing to what
+    /// another path goes on from there with ([`Loops`]).
     Skipped,
     /// At a branch on the execution mask whose way the decisions given do not say.
     Undecided,
@@ -189,6 +192,7 @@ fn prefix_path(
     (first_register, user_data): (u32, &[u32]),
     system: &[(u32, u32)],
     (read, decisions): (&mut dyn FnMut(u64) -> Option<u32>, &[bool]),
+    loops: &mut Loops,
 ) -> Result<Path, PrefixRefusal> {
     let mut decided = decisions.iter().copied();
     let mut model = Concrete::new(encodings, decode.instructions.len());
@@ -207,9 +211,20 @@ fn prefix_path(
     let mut unknowns: Unknowns = [None; SCALAR_CODES];
     // A bound on the steps, since a known branch can go backwards.
     let mut steps = 0usize;
+    // How often this path has arrived at each loop head.
+    let mut arrivals: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     while let Some(instruction) = decode.instructions.get(at) {
         if instruction.offset == until {
             break;
+        }
+        if loops.heads.contains(&at) {
+            let consumed = decisions.len() - decided.len();
+            let arrival = arrivals.entry(at).or_default();
+            *arrival += 1;
+            let arriving = (decisions[..consumed].to_vec(), *arrival);
+            if !loops.arrive((at, decisions), arriving, &mut model, &mut unknowns) {
+                return Ok(Path::Skipped);
+            }
         }
         if instruction.offset > until {
             return Ok(Path::Skipped);
@@ -264,6 +279,116 @@ fn prefix_path(
     Ok(Path::Reached(Box::new((model.scalars, unknowns))))
 }
 
+/// What the paths of one [`scalar_prefix`] arrived at each loop head with, so that a loop on a mask
+/// the host cannot know ends: a path whose decisions differ from the ones that last went on from a
+/// head goes on with what every arrival there agrees on - registers that differed are unknown -
+/// and goes no further when that adds nothing. Every way on from the head is taken by the paths
+/// sharing the decisions of the one that went on, from a state no better known than this one's, so
+/// the path adds nothing they do not (D753). A path arriving again by the same decisions is a loop
+/// the host follows, and goes round as the wave does.
+struct Loops {
+    /// The instruction indices a backward branch goes to.
+    heads: std::collections::BTreeSet<usize>,
+    /// Each head's agreed state, and the arrival that went on with it: the decisions taken before
+    /// it and how many times that path had arrived.
+    agreed: std::collections::BTreeMap<usize, (LoopState, (Vec<bool>, usize))>,
+}
+
+/// The scalars and condition code at a loop head.
+type LoopState = (Scalars, Option<u32>);
+
+impl Loops {
+    fn new(decode: &Decode, encodings: &EncodingTable) -> Self {
+        let heads = decode
+            .instructions
+            .iter()
+            .filter(|i| {
+                named(encodings, i).is_some_and(|(family, name)| family == "SOPP" && branches(name))
+            })
+            .filter_map(|branch| {
+                let Some(Operand::Immediate(jump)) = branch.operands.first() else {
+                    return None;
+                };
+                let target = i64::from(branch.offset) + 4 + 4 * simm16(*jump);
+                (target <= i64::from(branch.offset))
+                    .then(|| {
+                        decode
+                            .instructions
+                            .iter()
+                            .position(|i| i64::from(i.offset) == target)
+                    })
+                    .flatten()
+            })
+            .collect();
+        Self {
+            heads,
+            agreed: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A path taking the decisions `path` arrives at the head at index `at`, by the decisions and
+    /// arrival count `by`: whether it goes on, and with what in `model`.
+    fn arrive(
+        &mut self,
+        (at, path): (usize, &[bool]),
+        by: (Vec<bool>, usize),
+        model: &mut Concrete<'_>,
+        unknowns: &mut Unknowns,
+    ) -> bool {
+        let arriving = (model.scalars, model.condition);
+        let Some((agreed, owner)) = self.agreed.get_mut(&at) else {
+            self.agreed.insert(at, (arriving, by));
+            return true;
+        };
+        if *owner == by {
+            widen(model, unknowns, agreed);
+            return true;
+        }
+        // The same decisions as the arrival that went on: the host follows this loop round.
+        if owner.0 == by.0 {
+            return true;
+        }
+        // One of the paths that go on from the agreed state, not there yet: it goes the way the one
+        // that went on did, and is held to nothing on the way.
+        if path.starts_with(&owner.0) && by.1 < owner.1 {
+            return true;
+        }
+        let mut joined = *agreed;
+        for (kept, now) in joined.0.iter_mut().zip(arriving.0) {
+            if *kept != now {
+                *kept = None;
+            }
+        }
+        if joined.1 != arriving.1 {
+            joined.1 = None;
+        }
+        if joined == *agreed {
+            return false;
+        }
+        *agreed = joined;
+        *owner = by;
+        widen(model, unknowns, &joined);
+        true
+    }
+}
+
+/// Puts `state` into `model`, each register it does not know unknown because the paths there
+/// disagreed.
+fn widen(model: &mut Concrete<'_>, unknowns: &mut Unknowns, state: &LoopState) {
+    for (register, (now, agreed)) in model
+        .scalars
+        .iter_mut()
+        .zip(state.0.iter().copied())
+        .enumerate()
+    {
+        if now.is_some() && agreed.is_none() {
+            unknowns[register] = Some(Unknown::PathsDisagree);
+        }
+        *now = agreed;
+    }
+    model.condition = state.1;
+}
+
 /// Where a step of [`prefix_path`] leaves the walk.
 enum Step {
     /// On to the next instruction.
@@ -290,8 +415,14 @@ fn step_prefix(
             "SOPP" if branches(name) => {
                 let taken = match name {
                     "s_branch" => Some(true),
-                    "s_cbranch_scc0" => model.condition.map(|scc| scc == 0),
-                    "s_cbranch_scc1" => model.condition.map(|scc| scc != 0),
+                    "s_cbranch_scc0" | "s_cbranch_scc1" => match model.condition {
+                        Some(scc) => Some((scc != 0) == (name == "s_cbranch_scc1")),
+                        // One a loop's agreed state does not know, as a mask is followed (D753).
+                        None => match decided.next() {
+                            Some(taken) => Some(taken),
+                            None => return Ok(Step::Ended(Path::Undecided)),
+                        },
+                    },
                     // A condition mask the host cannot know - a vector compare's, from each lane's
                     // data - is followed both ways, as the execution mask is (D753).
                     "s_cbranch_vccz" | "s_cbranch_vccnz" => match vcc_set(&model.scalars) {
@@ -2456,6 +2587,83 @@ mod tests {
             .expect("both ways reach the access");
         assert_eq!(scalars[0], Some(5), "s0 is five either way");
         assert_eq!(scalars[1], None, "s1 is seven one way only");
+    }
+
+    /// A loop counting on a mask the host cannot know never comes back to its head as it was, so its
+    /// paths double each turn: Grand Theft Auto V's scene compute program counts `vcc_hi` up in a
+    /// loop on a vector compare before it reads through `s[12:15]`, loaded ahead of the loop. Each
+    /// head keeps what every arrival agrees on, and an arrival that adds nothing goes no further:
+    /// `s0`, set before, is five on every way out, and the counter `s1` is not known.
+    #[test]
+    fn a_counting_loop_on_an_unknown_mask_is_widened() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            0xbe80_0385_u32, // s_mov_b32 s0, 5
+            0xbe81_0380,     // s_mov_b32 s1, 0
+            0xbf88_0003,     // 0x08: s_cbranch_execz 3 - out to 0x18
+            0x7e02_0281,     // v_mov_b32 v1, 1
+            0x8101_8101,     // s_add_i32 s1, s1, 1
+            0xbf82_fffc,     // 0x14: s_branch -4 - back to 0x08
+            0xbf81_0000,     // 0x18: the access
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("the loop is widened");
+        assert_eq!(scalars[0], Some(5));
+        assert_eq!(scalars[1], None, "the count differs by the way out");
+    }
+
+    /// A loop the host can follow - a known count, no unknown mask - runs as the wave does, and the
+    /// count it leaves is known.
+    #[test]
+    fn a_counting_loop_the_host_follows_keeps_its_count() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            0xbe81_0380_u32, // s_mov_b32 s1, 0
+            0x8101_8101,     // 0x04: s_add_i32 s1, s1, 1
+            0xbf0a_8301,     // s_cmp_lt_u32 s1, 3
+            0xbf85_fffd,     // s_cbranch_scc1 -3 - back to 0x04
+            0xbf81_0000,     // 0x10: the access
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("the loop is followed");
+        assert_eq!(scalars[1], Some(3));
+    }
+
+    /// A loop that comes back to its head with the scalars it last arrived with goes on as it went
+    /// on from there, so that path adds nothing: Grand Theft Auto V's scene pixel shader samples in a
+    /// loop on a mask the host cannot know, reloading the same sampler each time, and reads its
+    /// constants after it. Here `s1` is set inside the loop, so it differs between leaving at once and
+    /// leaving later, and `s0`, set before, is five on every way out.
+    #[test]
+    fn a_loop_whose_scalars_settle_is_followed_to_the_access() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            0xbe80_0385_u32, // s_mov_b32 s0, 5
+            0xbf88_0003,     // 0x04: s_cbranch_execz 3 - out to 0x14
+            0x7e02_0281,     // v_mov_b32 v1, 1
+            0xbe81_0387,     // s_mov_b32 s1, 7
+            0xbf82_fffc,     // 0x10: s_branch -4 - back to 0x04
+            0xbf81_0000,     // 0x14: the access
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("the loop settles");
+        assert_eq!(scalars[0], Some(5));
+        assert_eq!(
+            scalars[1], None,
+            "seven only on the ways out after a turn of the loop"
+        );
     }
 
     /// A branch on a mask the host cannot know that skips only vector work leaves the scalars as they
