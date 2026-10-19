@@ -1378,6 +1378,12 @@ pub trait Model {
     /// because it is written in one arm of the dispatch switch and read in the header.
     fn program_counter(&mut self) -> Id;
 
+    /// How many waves of a compute thread group run as invocations of one workgroup, meeting at
+    /// its `s_barrier`s (D858, D892); one for every other module.
+    fn group_waves(&self) -> u32 {
+        1
+    }
+
     /// How many guest instructions have been translated so far.
     fn instructions(&self) -> usize;
 
@@ -2871,9 +2877,9 @@ pub fn instruction<M: Model + ?Sized>(
         // - `s_waitcnt_depctr` holds issue until named dependency counters drain, covering a
         //   hardware hazard between one instruction's write and the next one's read; the host
         //   orders every result before its use.
-        // - `s_barrier` waits for the workgroup's other waves. Every module here is one invocation
-        //   standing in for one wave, and a workgroup of more than one wave is refused where its
-        //   entry state is built, so there is never another wave to wait for.
+        // - `s_barrier` waits for the workgroup's other waves. A group of one wave has none to wait
+        //   for; a group of several meets in the dispatch loop's own barrier, between the loops
+        //   its blocks are cut into at each `s_barrier` (D892).
         "s_endpgm" | "s_waitcnt" | "s_clause" | "s_nop" | "v_nop" | "s_inst_prefetch"
         | "s_setprio" | "s_waitcnt_vscnt" | "s_waitcnt_depctr" | "s_barrier" => Ok(()),
 

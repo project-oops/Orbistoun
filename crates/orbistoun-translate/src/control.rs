@@ -38,7 +38,9 @@ pub fn emit<M: Model + ?Sized>(
             .encoding
             .and_then(|e| names.get(usize::from(e)).map(|n| (*n).to_owned()))
     };
-    let blocks = blocks::split(decode, family_of)?;
+    // The waves of a group that meet do so between blocks: one ends at each `s_barrier`.
+    let meets = model.group_waves() > 1;
+    let blocks = blocks::split_at_barriers(decode, family_of, meets)?;
     if blocks.is_empty() {
         // Nothing to run. The merge block still exists, because `finish` writes its
         // epilogue into it.
@@ -52,23 +54,128 @@ pub fn emit<M: Model + ?Sized>(
         detail: "a shader with more blocks than a program counter can number",
     })?;
 
+    let segments = if meets {
+        segments(decode, &blocks, &family_of)?
+    } else {
+        std::iter::once(0..blocks.len()).collect()
+    };
+    let mut translated = 0usize;
+    for (n, segment) in segments.into_iter().enumerate() {
+        // Between two loops every invocation stands at the top level, so the workgroup's barrier
+        // is reached by all of them, once each, as the guest's waves reach theirs.
+        if n > 0 {
+            workgroup_barrier(model);
+        }
+        translated += emit_loop(model, decode, (&blocks, segment, n == 0), exit, &family_of)?;
+    }
+    Ok(translated)
+}
+
+/// The blocks cut into runs that each end at an `s_barrier` - the last run at the program's end -
+/// refusing a program with a branch from one run into another: a branch over a barrier, or a loop
+/// around one, where one wave would meet the others a different number of times (D892).
+fn segments(
+    decode: &Decode,
+    blocks: &[Block],
+    family_of: &impl Fn(&Instruction) -> Option<String>,
+) -> Result<Vec<std::ops::Range<usize>>, TranslateError> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (index, block) in blocks.iter().enumerate() {
+        let last = &decode.instructions[block.end - 1];
+        if family_of(last).is_some_and(|family| blocks::is_barrier(last, &family)) {
+            segments.push(start..index + 1);
+            start = index + 1;
+        }
+    }
+    if start < blocks.len() {
+        segments.push(start..blocks.len());
+    }
+    for segment in &segments {
+        for index in segment.clone() {
+            let block = &blocks[index];
+            let targets = match block.terminator {
+                Terminator::End => vec![],
+                // The barrier's own block runs on into the next run, past the barrier.
+                Terminator::Fallthrough { .. } if index + 1 == segment.end => vec![],
+                Terminator::Jump { target } | Terminator::Fallthrough { next: target } => {
+                    vec![target]
+                }
+                Terminator::Branch {
+                    target,
+                    fallthrough,
+                } => vec![target, fallthrough],
+            };
+            let crosses = targets.into_iter().any(|target| {
+                blocks::block_at(blocks, target).is_none_or(|to| !segment.contains(&to))
+            });
+            if crosses {
+                return Err(TranslateError::Unsupported {
+                    offset: block.start,
+                    detail: concat!(
+                        "a thread group of waves branches over an s_barrier or loops around one, ",
+                        "so its waves would not all meet there the same number of times"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(segments)
+}
+
+/// The workgroup's barrier, ordering the local data share's words across it: what `s_barrier`
+/// does for a group's waves.
+fn workgroup_barrier<M: Model + ?Sized>(model: &mut M) {
+    let scope = model.constant(orbistoun_spirv::scope::WORKGROUP);
+    let semantics = model.constant(
+        orbistoun_spirv::semantics::ACQUIRE_RELEASE | orbistoun_spirv::semantics::WORKGROUP_MEMORY,
+    );
+    model
+        .builder()
+        .function(op::CONTROL_BARRIER, &[scope.0, scope.0, semantics.0]);
+}
+
+/// Emits one dispatch loop over the blocks `range` names, running while the program counter is
+/// within it, and leaves the builder in its merge block; `first` stores block zero into the counter
+/// before the loop.
+fn emit_loop<M: Model + ?Sized>(
+    model: &mut M,
+    decode: &Decode,
+    (blocks, range, first): (&[Block], std::ops::Range<usize>, bool),
+    exit: u32,
+    family_of: &impl Fn(&Instruction) -> Option<String>,
+) -> Result<usize, TranslateError> {
     let header = model.builder().id();
     let dispatch = model.builder().id();
     let after = model.builder().id();
     let continue_target = model.builder().id();
     let merge = model.builder().id();
     let default = model.builder().id();
-    let arms: Vec<Id> = (0..blocks.len()).map(|_| model.builder().id()).collect();
+    let arms: Vec<Id> = range.clone().map(|_| model.builder().id()).collect();
 
     // ---- entry: start at block zero -------------------------------------------
-    let zero = model.constant(0);
-    store_counter(model, zero);
+    if first {
+        let zero = model.constant(0);
+        store_counter(model, zero);
+    }
     model.builder().function(op::BRANCH, &[header.0]);
 
     // ---- header: still running? -----------------------------------------------
+    // Within the range: below its end, and - for a later loop - at or past its start, asked as one
+    // unsigned comparison of the counter less the start. A wave that ended holds `exit`, past
+    // every range, and runs none of the later loops.
     model.builder().function(op::LABEL, &[header.0]);
     let current = load_counter(model);
-    let limit = model.constant(exit);
+    let (low, high) = (to_u32(range.start)?, to_u32(range.end)?);
+    let (current, limit) = if low == 0 {
+        (current, model.constant(high))
+    } else {
+        let start = model.constant(low);
+        (
+            model.binary(op::ISUB, current, start),
+            model.constant(high - low),
+        )
+    };
     let bool_type = model.bool_type();
     let running = model.builder().id();
     model.builder().function(
@@ -92,7 +199,7 @@ pub fn emit<M: Model + ?Sized>(
         .builder()
         .function(op::SELECTION_MERGE, &[after.0, NO_SELECTION_CONTROL]);
     let mut switch = vec![selector.0, default.0];
-    for (index, arm) in arms.iter().enumerate() {
+    for (index, arm) in range.clone().zip(&arms) {
         // The literal is a plain word, not an identifier, so `OpSwitch` has its own stride
         // in the builder's shape table.
         switch.push(u32::try_from(index).unwrap_or(u32::MAX));
@@ -102,21 +209,22 @@ pub fn emit<M: Model + ?Sized>(
 
     // ---- the arms ---------------------------------------------------------------
     let mut translated = 0usize;
-    for (index, block) in blocks.iter().enumerate() {
-        model.builder().function(op::LABEL, &[arms[index].0]);
+    for (index, arm) in range.zip(&arms) {
+        let block = &blocks[index];
+        model.builder().function(op::LABEL, &[arm.0]);
         model.enter_block();
         let before = model.instructions();
         for instruction in &decode.instructions[block.first..block.end] {
             // The terminating branch emits nothing here; its target is the program-counter
             // assignment below.
-            if is_terminator(instruction, &family_of) {
+            if is_terminator(instruction, family_of) {
                 continue;
             }
             model::instruction(model, instruction)?;
         }
         translated += model.instructions() - before;
 
-        let next = successor(model, decode, block, &blocks, exit)?;
+        let next = successor(model, decode, block, blocks, exit)?;
         store_counter(model, next);
         model.builder().function(op::BRANCH, &[after.0]);
     }
@@ -139,6 +247,14 @@ pub fn emit<M: Model + ?Sized>(
     // The epilogue goes here, written by the caller.
     model.builder().function(op::LABEL, &[merge.0]);
     Ok(translated)
+}
+
+/// `value` as a program counter value.
+fn to_u32(value: usize) -> Result<u32, TranslateError> {
+    u32::try_from(value).map_err(|_| TranslateError::Unsupported {
+        offset: 0,
+        detail: "a shader with more blocks than a program counter can number",
+    })
 }
 
 /// Whether this instruction is the one that ends its block.

@@ -2230,6 +2230,8 @@ pub struct Wavefront<'a> {
     local_ptr: Id,
     /// The program counter the dispatch loop switches on.
     program_counter: Id,
+    /// How many waves of its thread group a compute module's workgroup runs (D858).
+    group_waves: u32,
     /// The scalar condition code, as a private variable holding 0 or 1.
     condition_code: Id,
     /// The `m0` register, as a private word starting at zero.
@@ -3110,6 +3112,7 @@ impl<'a> Wavefront<'a> {
             local: ids.local,
             local_ptr: ids.local_ptr,
             program_counter: ids.counter,
+            group_waves: if stage == Stage::Compute { waves } else { 1 },
             condition_code: ids.scc,
             m0: ids.m0,
             translated: 0,
@@ -5578,6 +5581,10 @@ impl Model for Wavefront<'_> {
         self.bool_type
     }
 
+    fn group_waves(&self) -> u32 {
+        self.group_waves
+    }
+
     fn program_counter(&mut self) -> Id {
         self.program_counter
     }
@@ -7045,10 +7052,11 @@ fn dispatch_masks(
     let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) else {
         return Ok(None);
     };
-    inputs.check(width.lanes(), group_program(decode, encodings))?;
+    inputs.check()?;
     let Some(subgroup) = user_data.per_invocation else {
         return Ok(None);
     };
+    inputs.refuse_meeting_waves(width.lanes(), group_program(decode, encodings))?;
     // One invocation per lane is exact only for a program that never meets its wave (D880), or
     // meets it only through masks its lanes can exchange (D884).
     let needs = crate::lane_exact::lane_needs(decode, encodings, width.lanes());

@@ -34,6 +34,15 @@ pub enum Terminator {
     },
 }
 
+/// `s_barrier`'s SOPP opcode.
+const BARRIER: u32 = 10;
+
+/// Whether `instruction`, of `family`, is `s_barrier`.
+#[must_use]
+pub fn is_barrier(instruction: &Instruction, family: &str) -> bool {
+    family == "SOPP" && instruction.opcode == BARRIER
+}
+
 /// One basic block.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -132,6 +141,20 @@ pub fn split(
     decode: &Decode,
     family_of: impl Fn(&Instruction) -> Option<String>,
 ) -> Result<Vec<Block>, TranslateError> {
+    split_at_barriers(decode, family_of, false)
+}
+
+/// [`split`], and where `at_barriers` a block also ends at each `s_barrier`, so that the waves of a
+/// group can meet between blocks (D892).
+///
+/// # Errors
+///
+/// As [`split`].
+pub fn split_at_barriers(
+    decode: &Decode,
+    family_of: impl Fn(&Instruction) -> Option<String>,
+    at_barriers: bool,
+) -> Result<Vec<Block>, TranslateError> {
     let instructions = &decode.instructions;
     if instructions.is_empty() {
         return Ok(Vec::new());
@@ -152,6 +175,12 @@ pub fn split(
         let Some(family) = family_of(instruction) else {
             continue;
         };
+        if at_barriers && is_barrier(instruction, &family) {
+            if i + 1 < instructions.len() {
+                starts.insert(i + 1);
+            }
+            continue;
+        }
         if branch_condition(instruction, &family).is_none() {
             continue;
         }

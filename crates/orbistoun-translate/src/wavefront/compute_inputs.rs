@@ -105,16 +105,38 @@ impl ComputeInputs {
 
     /// Refuses a shape translated waves cannot run exactly.
     ///
+    /// A group of more than one wave whose `program` meets - at `s_barrier`, through the local
+    /// data share - runs as invocations of one workgroup sharing its local data share, meeting at
+    /// the workgroup's barrier where no branch crosses an `s_barrier`; the dispatch loop refuses one
+    /// that does (D892).
+    ///
     /// # Errors
     ///
-    /// An empty group, a group of more than one wave whose `program` waits at a barrier or uses
-    /// the local data share - its waves meet there, and separate invocations are not held for one
-    /// another (D858) - or a thread id count outside one to three.
-    pub fn check(self, lanes: u32, program: GroupProgram) -> Result<(), TranslateError> {
+    /// An empty group, or a thread id count outside one to three.
+    pub fn check(self) -> Result<(), TranslateError> {
         let threads = self.group_threads();
         if threads == 0 {
             return Err(refusal("a thread group of no threads"));
         }
+        if !(1..=3).contains(&self.thread_id_components) {
+            return Err(refusal("a thread id of other than one to three components"));
+        }
+        Ok(())
+    }
+
+    /// Refuses a group of more than one wave of `lanes` whose `program` meets - at `s_barrier` or
+    /// through the local data share - when it runs one invocation per lane (D880): its waves are
+    /// then separate workgroups, which share no local data share and meet at no barrier.
+    ///
+    /// # Errors
+    ///
+    /// Such a group, saying how many waves it is and which of the two its program does.
+    pub fn refuse_meeting_waves(
+        self,
+        lanes: u32,
+        program: GroupProgram,
+    ) -> Result<(), TranslateError> {
+        let threads = self.group_threads();
         if threads > lanes && (program.barrier || program.local_share) {
             return Err(TranslateError::WaveGroup {
                 threads,
@@ -122,9 +144,6 @@ impl ComputeInputs {
                 barrier: program.barrier,
                 local_share: program.local_share,
             });
-        }
-        if !(1..=3).contains(&self.thread_id_components) {
-            return Err(refusal("a thread id of other than one to three components"));
         }
         Ok(())
     }
@@ -630,28 +649,29 @@ mod tests {
     /// one to three components are refused.
     #[test]
     fn a_group_runs_in_as_many_waves_as_it_takes() {
-        let plain = GroupProgram::default();
-        assert!(inputs([64, 1, 1], 1).check(64, plain).is_ok());
-        assert!(inputs([8, 8, 1], 2).check(64, plain).is_ok());
-        assert!(inputs([64, 1, 1], 1).check(32, plain).is_ok());
+        assert!(inputs([64, 1, 1], 1).check().is_ok());
+        assert!(inputs([8, 8, 1], 2).check().is_ok());
+        assert!(inputs([64, 1, 1], 1).check().is_ok());
         assert_eq!(inputs([64, 1, 1], 1).waves(32), 2);
         assert_eq!(inputs([100, 1, 1], 1).waves(64), 2);
         assert_eq!(inputs([8, 8, 1], 2).waves(64), 1);
-        assert!(inputs([0, 1, 1], 1).check(64, plain).is_err());
-        assert!(inputs([64, 1, 1], 0).check(64, plain).is_err());
-        assert!(inputs([64, 1, 1], 4).check(64, plain).is_err());
+        assert!(inputs([0, 1, 1], 1).check().is_err());
+        assert!(inputs([64, 1, 1], 0).check().is_err());
+        assert!(inputs([64, 1, 1], 4).check().is_err());
     }
 
-    /// A group of waves whose program waits at `s_barrier` or uses the local data share is refused,
-    /// saying how many waves it is and which of the two it does: its waves meet there, and
-    /// separate invocations are not held for one another (D858).
+    /// A group of waves whose program waits at `s_barrier` or uses the local data share is refused
+    /// when it runs one invocation per lane, saying how many waves it is and which of the two it
+    /// does: its waves are then separate workgroups, which never meet (D880).
     #[test]
     fn a_group_of_waves_that_meet_is_refused() {
         let program = GroupProgram {
             barrier: true,
             local_share: true,
         };
-        let refused = inputs([256, 1, 1], 1).check(64, program).unwrap_err();
+        let refused = inputs([256, 1, 1], 1)
+            .refuse_meeting_waves(64, program)
+            .unwrap_err();
         assert_eq!(
             refused.to_string(),
             concat!(
@@ -663,7 +683,9 @@ mod tests {
             barrier: false,
             local_share: true,
         };
-        let refused = inputs([8, 8, 2], 3).check(32, shares).unwrap_err();
+        let refused = inputs([8, 8, 2], 3)
+            .refuse_meeting_waves(32, shares)
+            .unwrap_err();
         assert_eq!(
             refused.to_string(),
             concat!(
@@ -673,7 +695,7 @@ mod tests {
         );
         assert!(
             inputs([8, 8, 2], 3)
-                .check(32, GroupProgram::default())
+                .refuse_meeting_waves(32, GroupProgram::default())
                 .is_ok()
         );
     }

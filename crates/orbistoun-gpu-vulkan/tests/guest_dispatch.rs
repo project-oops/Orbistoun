@@ -518,6 +518,56 @@ fn a_group_of_waves_runs_every_wave() {
     }
 }
 
+/// A thread group of waves that meet at `s_barrier` through the local data share runs each wave as
+/// an invocation and the barrier as the workgroup's, where no branch crosses it: Grand Theft Auto
+/// V's scene compute program reduces through the share in groups of four waves, a barrier between
+/// each step. Each of 128 threads writes its id to its own share word, waits, and stores the word
+/// of thread `id ^ 64` - the other wave's - so only a barrier both waves keep reads every word
+/// written.
+#[test]
+fn a_group_of_waves_meets_at_its_barrier() {
+    if !device_or_skip("a group of waves meets at its barrier") {
+        return;
+    }
+    // The source codes of the inline constants 2 and 64.
+    let two = 128 + 2_u32;
+    let sixty_four = 128 + 64_u32;
+    // MUBUF: vaddr at 0, vdata at 8, the descriptor's first register / 4 at 16, soffset 0 at 24.
+    let program = [
+        encoded("v_lshlrev_b32_e32", (1 << 17) | two), // v1 = id * 4
+        encoded("ds_write_b32", 0),
+        1,                                                        // address v1, data v0
+        0xbf8a_0000,                                              // s_barrier
+        encoded("v_xor_b32_e32", (2 << 17) | sixty_four),         // v2 = id ^ 64
+        encoded("v_lshlrev_b32_e32", (2 << 17) | (2 << 9) | two), // v2 = v2 * 4
+        encoded("ds_read_b32", 0),
+        2 | (3 << 24), // v3 = the word at v2
+        0xbf8c_c07f,   // s_waitcnt lgkmcnt(0)
+        encoded("buffer_store_dword", 0x1000),
+        0x8002_0301, // v3 at v1, through s[8:11], offen
+        0xbf81_0000,
+    ];
+    let module = translated_for(&program, (0, None, [128, 1, 1]), (None, Width::Wave64))
+        .expect("waves that meet at an uncrossed barrier translate");
+    let before = vec![BEFORE; WINDOW_WORDS as usize];
+    let done = dispatch_guest(
+        &module,
+        &before,
+        (&user_data(WINDOW, 128 * 4), [1, 1, 1]),
+        &DispatchImages::default(),
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    for (index, &word) in done.memory.iter().enumerate() {
+        let expected = if index < 128 {
+            index as u32 ^ 64
+        } else {
+            BEFORE
+        };
+        assert_eq!(word, expected, "word {index}");
+    }
+}
+
 /// A group of several waves whose last group is partial runs, per lane, exactly the threads it
 /// runs as whole waves (D855, D858, D880): groups of 100 threads, two waves, the second group
 /// running 37 of them.
@@ -565,14 +615,15 @@ fn a_partial_group_of_waves_runs_its_threads_both_ways() {
     assert_eq!(results[0], results[1], "both ways leave the same memory");
 }
 
-/// A group of waves whose program waits at `s_barrier` is refused: its waves meet there, and
-/// waves run as separate invocations are not held for one another.
+/// A group of waves whose program branches over its `s_barrier` is refused: a wave whose mask is
+/// empty would meet the others one time fewer, which the workgroup's barrier cannot stand for
+/// (D892).
 #[test]
-fn a_group_of_waves_that_meets_at_a_barrier_is_refused() {
+fn a_group_of_waves_that_branches_over_its_barrier_is_refused() {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
-    // s_barrier; s_endpgm.
-    let words = [0xbf8a_0000_u32, 0xbf81_0000];
+    // s_cbranch_execz 1 (to the end); s_barrier; s_endpgm.
+    let words = [0xbf88_0001_u32, 0xbf8a_0000, 0xbf81_0000];
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode(&bytes, &encodings, &operands);
     let refused = translate_with_user_data(
@@ -593,7 +644,7 @@ fn a_group_of_waves_that_meets_at_a_barrier_is_refused() {
     )
     .expect_err("refused")
     .to_string();
-    assert!(refused.contains("waits at s_barrier"), "{refused}");
+    assert!(refused.contains("branches over an s_barrier"), "{refused}");
 }
 
 /// A raw buffer's bounds hold: stores past its record count are dropped, as the hardware drops
