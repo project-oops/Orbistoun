@@ -2213,6 +2213,9 @@ pub struct Wavefront<'a> {
     ),
     /// Where a compute module's image descriptors come from, and what it did to their registers.
     images: ImageTrace,
+    /// The offsets of the instructions that rewrite only an image descriptor's type
+    /// ([`type_rewrites`]), which translate to nothing.
+    type_rewrites: std::collections::BTreeSet<u32>,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -3109,6 +3112,7 @@ impl<'a> Wavefront<'a> {
             u16_type: None,
             textures: Vec::new(),
             descriptor_loads: Default::default(),
+            type_rewrites: std::collections::BTreeSet::new(),
             images: ImageTrace::seeded(user_data.first_register, user_data.count),
             bool_type,
             lane_ptr: files.lane_ptr,
@@ -5011,6 +5015,10 @@ impl Model for Wavefront<'_> {
         self.dispatch.is_some()
     }
 
+    fn rewrites_only_an_image_type(&self, offset: u32) -> bool {
+        self.type_rewrites.contains(&offset)
+    }
+
     fn load_descriptor_opaquely(&mut self, first: u32, registers: u32) -> bool {
         // One image descriptor, or two side by side - each half traced as one.
         let traced = registers % model::IMAGE_DESCRIPTOR_REGISTERS == 0
@@ -6292,6 +6300,73 @@ fn descriptor_table_loads(
     (loads, sampler_loads, reaching, sampler_reaching)
 }
 
+/// The offsets of each pair of instructions that rewrites only the type of an image descriptor loaded
+/// from the descriptor table, through a scratch register nothing after reads:
+/// `s_and_b32 t, sW, 0x0fffffff` then `s_or_b32 sW, t, type << 28`, `sW` a group's word three
+/// (`SQ_IMG_RSRC_WORD3`, whose bits 31:28 are `TYPE`, `gfx10-rsrc.json`) and the type `2D` or
+/// `2D_ARRAY`. The image the descriptor names is the one loaded; an access's own dimensionality
+/// addresses it (D895).
+fn type_rewrites(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    loads: &DescriptorLoads,
+) -> std::collections::BTreeSet<u32> {
+    const KEPT_BITS: u32 = 0x0FFF_FFFF;
+    let constant = |operand: &Operand| match operand {
+        Operand::Literal(value) => Some(*value),
+        Operand::Integer(value) => u32::try_from(*value).ok(),
+        _ => None,
+    };
+    let named = |instruction: &Instruction| {
+        instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
+    };
+    let mut found = std::collections::BTreeSet::new();
+    for (index, pair) in decode.instructions.windows(2).enumerate() {
+        let [and, or] = pair else { continue };
+        if named(and) != Some("s_and_b32") || named(or) != Some("s_or_b32") {
+            continue;
+        }
+        let ([scratch, Operand::Scalar(word), mask], [Operand::Scalar(written), read, set]) =
+            (and.operands.as_slice(), or.operands.as_slice())
+        else {
+            continue;
+        };
+        let word3 = u32::from(*word)
+            .checked_sub(3)
+            .is_some_and(|group| loads.contains_key(&group));
+        let type_only = constant(mask) == Some(KEPT_BITS)
+            && constant(set).is_some_and(|set| {
+                set & KEPT_BITS == 0
+                    && matches!(set >> 28, IMAGE_TYPE_2D_CODE | IMAGE_TYPE_2D_ARRAY_CODE)
+            });
+        // The scratch register holds a word of the descriptor nothing reads before it is written
+        // again.
+        let mut unread_after = true;
+        for later in &decode.instructions[index + 2..] {
+            if later.operands.iter().skip(1).any(|o| o == scratch) {
+                unread_after = false;
+                break;
+            }
+            if later.operands.first() == Some(scratch) {
+                break;
+            }
+        }
+        if word3 && type_only && written == word && read == scratch && unread_after {
+            found.insert(and.offset);
+            found.insert(or.offset);
+        }
+    }
+    found
+}
+
+/// `SQ_RSRC_IMG_2D`, the `TYPE` of a two-dimensional image (`gfx10-rsrc.json`).
+const IMAGE_TYPE_2D_CODE: u32 = 9;
+/// `SQ_RSRC_IMG_2D_ARRAY`, the `TYPE` of a 2D array (`gfx10-rsrc.json`).
+const IMAGE_TYPE_2D_ARRAY_CODE: u32 = 13;
+
 /// The first register of the image descriptor an image instruction names: its first scalar
 /// operand. `None` for any other instruction.
 fn image_descriptor(instruction: &Instruction, name: &str) -> Option<u32> {
@@ -7071,6 +7146,7 @@ pub fn translate_with_user_data(
         ),
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
+    module.type_rewrites = type_rewrites(decode, encodings, &module.descriptor_loads.0);
     crate::control::emit(&mut module, decode, encodings)?;
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;

@@ -1381,6 +1381,12 @@ pub trait Model {
     /// because it is written in one arm of the dispatch switch and read in the header.
     fn program_counter(&mut self) -> Id;
 
+    /// Whether the instruction at `offset` only rewrites the type of an image descriptor loaded from
+    /// the descriptor table, which keeps the image it names and translates to nothing (D895).
+    fn rewrites_only_an_image_type(&self, _offset: u32) -> bool {
+        false
+    }
+
     /// How many waves of a compute thread group run as invocations of one workgroup, meeting at
     /// its `s_barrier`s (D858, D892); one for every other module.
     fn group_waves(&self) -> u32 {
@@ -2824,6 +2830,11 @@ pub fn instruction<M: Model + ?Sized>(
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let name = resolve(model, instruction)?;
+    // A rewrite of a table descriptor's type alone keeps the image it names (D895).
+    if model.rewrites_only_an_image_type(instruction.offset) {
+        model.count();
+        return Ok(());
+    }
 
     if !supports(&name) {
         return Err(match blocked(&name) {

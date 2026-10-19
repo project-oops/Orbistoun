@@ -13,6 +13,12 @@ The host binds such an image only where its descriptor views one layer, the firs
 `BASE_ARRAY` (`SQ_IMG_RSRC_WORD4`, bits 0-12 and 16-28, `gfx10-rsrc.json`) both zero. The type may be
 `2D` or `2D_ARRAY`. A view of more layers, or of a later one, is refused by name.
 
+A program may rewrite a table-loaded descriptor's `TYPE` field (`SQ_IMG_RSRC_WORD3` bits 31:28) to
+`2D` or `2D_ARRAY` through a scratch register that nothing else reads:
+`s_and_b32 t, sW, 0x0fffffff` then `s_or_b32 sW, t, type << 28`. That pair translates to nothing, and
+the descriptor still names the image it was loaded as. A rewrite of any other bit is refused, since
+it would name another image.
+
 **Why:** Grand Theft Auto V's compute copy loads two image descriptors and rewrites their type to
 `2D_ARRAY` (`s_or_b32 s23, vcc_lo, 0xd0000000`) before it fetches from one and stores to the other,
 its layer taken from its user data. The images it copies are two-dimensional, so the layer it names
