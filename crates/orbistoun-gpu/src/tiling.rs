@@ -874,6 +874,28 @@ pub fn surface_words_64kb_rx_bpp4(width: u32, height: u32) -> usize {
 /// them a quarter of a block across - against that rule.
 const RX_BPP4_SLICE_BITS: [usize; 5] = [0x800, 0x400, 0x200, 0x100, 0x0];
 
+/// The pipe-bank XOR slice `slice` of a 2D array in a 64 KiB `_X` mode adds to the surface's own:
+/// its low four bits reversed into the four pipe bits, which `<< 8` puts on its in-block offsets
+/// (D899). Read off addrlib by `tools/addrlib/equation <mode> <bytes> 16 array` for `64KB_R_X` at
+/// one to eight bytes, `64KB_D_X` at four and sixteen and `64KB_Z_X` at two and four: the same terms
+/// in each, a higher bit adding none (`gfx10addrlib.cpp:2230`).
+#[must_use]
+pub const fn array_slice_xor(slice: u32) -> u8 {
+    ((slice & 1) << 3 | (slice & 2) << 1 | (slice & 4) >> 1 | (slice & 8) >> 3) as u8
+}
+
+/// Moves each 256-byte piece of `words` to the piece pipe-bank XOR `pipe_bank_xor` names, inside its
+/// 64 KiB block: word `i` and word `i ^ (pipe_bank_xor << 6)` trade places, which undoes itself.
+fn move_pieces(words: &mut [u32], pipe_bank_xor: u8) {
+    let xor = usize::from(pipe_bank_xor) << 6;
+    for i in 0..words.len() {
+        let j = i ^ xor;
+        if j > i && j < words.len() {
+            words.swap(i, j);
+        }
+    }
+}
+
 /// The XOR slice `z` of a 32-bpp `64KB_R_X` volume puts on its in-block byte offsets; `None` past
 /// the slices whose terms were read.
 #[must_use]
@@ -1835,11 +1857,12 @@ impl SurfaceLayout {
     }
 
     /// Whether a surface of this layout with pipe-bank XOR `pipe_bank_xor` is modelled: every
-    /// `64KB_R_X` one, and a `4KB_D_X` one without an XOR.
+    /// 64 KiB `_X` one, and any other without an XOR.
     #[must_use]
     pub const fn models(self, pipe_bank_xor: u8) -> bool {
         match self {
             Self::Rx64Kb | Self::Rx64KbBpp1 | Self::Dx64KbBpp16 => true,
+            _ if self.xor_moves_pieces() => true,
             // The standard swizzles have no pipe XOR (`ADDR_SW_64KB_S`, `addrtypes.h:236`).
             Self::Dx4Kb
             | Self::Dx4KbBpp16
@@ -1863,6 +1886,21 @@ impl SurfaceLayout {
         }
     }
 
+    /// The 64 KiB `_X` layouts whose pipe-bank XOR is read only as what it is at every texel size:
+    /// each 256-byte piece of a block moved to the piece the XOR names, `<< 8` on its in-block
+    /// offset (D899) - the pieces the four-byte and one-byte `64KB_R_X` and sixteen-byte
+    /// `64KB_D_X` layouts move as part of their own offsets.
+    const fn xor_moves_pieces(self) -> bool {
+        matches!(
+            self,
+            Self::Rx64KbBpp8
+                | Self::Rx64KbBpp2
+                | Self::Rx64KbBpp16
+                | Self::Zx64Kb
+                | Self::Zx64KbBpp2
+        )
+    }
+
     /// Detiles a whole surface into a linear, row-major image, each texel through `map`.
     ///
     /// # Panics
@@ -1877,6 +1915,12 @@ impl SurfaceLayout {
         pipe_bank_xor: u8,
         map: impl Fn(u32) -> u32 + Sync,
     ) -> Vec<u32> {
+        // Its pieces put back where no XOR places them, and read so (D899).
+        if pipe_bank_xor != 0 && self.xor_moves_pieces() {
+            let mut unmoved = tiled.to_vec();
+            move_pieces(&mut unmoved, pipe_bank_xor);
+            return self.detile_mapped(&unmoved, width, height, 0, map);
+        }
         match self {
             Self::Rx64Kb => {
                 detile_surface_64kb_rx_bpp4_mapped(tiled, width, height, pipe_bank_xor, map)
@@ -2015,6 +2059,13 @@ impl SurfaceLayout {
         tiled: &mut [u32],
         map: impl Fn(u32) -> u32 + Sync,
     ) -> Result<(), DetileError> {
+        // Tiled where no XOR places its pieces, then each piece moved where the XOR does (D899).
+        if pipe_bank_xor != 0 && self.xor_moves_pieces() {
+            move_pieces(tiled, pipe_bank_xor);
+            let tiled_here = self.tile_mapped(linear, width, height, 0, tiled, map);
+            move_pieces(tiled, pipe_bank_xor);
+            return tiled_here;
+        }
         match self {
             Self::Rx64Kb => {
                 tile_surface_64kb_rx_bpp4_mapped(linear, width, height, pipe_bank_xor, tiled, map)
@@ -2163,7 +2214,7 @@ mod z_x_tests {
             layout.at_bytes_per_texel(2),
             Some(SurfaceLayout::Zx64KbBpp2)
         );
-        assert!(!layout.models(1), "a pipe-bank XOR is not modelled");
+        assert!(layout.models(1), "a pipe-bank XOR moves its pieces (D899)");
         let texels: Vec<u32> = (0..256 * 128).map(|i| i & 0xFFFF).collect();
         let layout = SurfaceLayout::Zx64KbBpp2;
         let mut tiled = vec![0; layout.words(256, 128)];
@@ -2171,6 +2222,43 @@ mod z_x_tests {
             .tile_mapped(&texels, 256, 128, 0, &mut tiled, |t| t)
             .expect("tiled");
         assert_eq!(layout.detile_mapped(&tiled, 256, 128, 0, |t| t), texels);
+    }
+}
+
+#[cfg(test)]
+mod xor_tests {
+    /// A 64 KiB `_X` surface's pipe-bank XOR moves each 256-byte piece of a block to the piece the
+    /// XOR names, at any texel size (D899): an eight-byte `64KB_R_X` slice under XOR 10 has texel
+    /// `(x, y)` at its XOR-free offset XORed with `0xa00`. Its texels detile in order, and tile back
+    /// to the same bytes.
+    #[test]
+    fn a_64kb_x_surface_s_pipe_bank_xor_moves_its_256_byte_pieces() {
+        use super::{SurfaceLayout, tiled_byte_offset_64kb_rx_bpp8_surface};
+        let (width, height) = (128_u32, 64_u32);
+        let layout = SurfaceLayout::Rx64KbBpp8;
+        assert!(layout.models(10));
+        let mut tiled = vec![0_u32; layout.words(width, height)];
+        for y in 0..height {
+            for x in 0..width {
+                let at = (tiled_byte_offset_64kb_rx_bpp8_surface(x, y, width) ^ 0xa00) / 4;
+                let index = y * width + x;
+                tiled[at] = index;
+                tiled[at + 1] = !index;
+            }
+        }
+        let linear = layout.detile_mapped(&tiled, width, height, 10, |w| w);
+        assert!(
+            linear
+                .chunks_exact(2)
+                .zip(0_u32..)
+                .all(|(texel, index)| texel == [index, !index]),
+            "every texel in order"
+        );
+        let mut back = vec![0_u32; tiled.len()];
+        layout
+            .tile_mapped(&linear, width, height, 10, &mut back, |w| w)
+            .expect("tiled");
+        assert!(back == tiled, "tiled back to the same words");
     }
 }
 

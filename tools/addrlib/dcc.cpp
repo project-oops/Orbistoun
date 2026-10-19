@@ -54,7 +54,8 @@ struct Dcc {
   UINT_16 bits[64];
 };
 
-Dcc dcc_info(ADDR_HANDLE handle, UINT_32 bytes, bool pipe_aligned, UINT_32 width, UINT_32 height) {
+Dcc dcc_info(ADDR_HANDLE handle, UINT_32 bytes, bool pipe_aligned, UINT_32 width, UINT_32 height,
+             UINT_32 slices = 1) {
   ADDR2_COMPUTE_DCCINFO_INPUT in = {};
   in.size = sizeof(in);
   in.dccKeyFlags.pipeAligned = pipe_aligned;
@@ -63,7 +64,7 @@ Dcc dcc_info(ADDR_HANDLE handle, UINT_32 bytes, bool pipe_aligned, UINT_32 width
   in.bpp = bytes * 8;
   in.unalignedWidth = width;
   in.unalignedHeight = height;
-  in.numSlices = 1;
+  in.numSlices = slices;
   in.numFrags = 1;
   in.numMipLevels = 1;
   in.firstMipIdInTail = 1;
@@ -82,18 +83,20 @@ Dcc dcc_info(ADDR_HANDLE handle, UINT_32 bytes, bool pipe_aligned, UINT_32 width
 }
 
 UINT_64 addrlib_address(ADDR_HANDLE handle, const Dcc &dcc, UINT_32 bytes, bool pipe_aligned,
-                        UINT_32 width, UINT_32 height, UINT_32 x, UINT_32 y, UINT_32 pipe_xor) {
+                        UINT_32 width, UINT_32 height, UINT_32 x, UINT_32 y, UINT_32 pipe_xor,
+                        UINT_32 slice = 0, UINT_32 slices = 1) {
   ADDR2_COMPUTE_DCC_ADDRFROMCOORD_INPUT in = {};
   in.size = sizeof(in);
   in.x = x;
   in.y = y;
+  in.slice = slice;
   in.dccKeyFlags.pipeAligned = pipe_aligned;
   in.resourceType = ADDR_RSRC_TEX_2D;
   in.swizzleMode = ADDR_SW_64KB_R_X;
   in.bpp = bytes * 8;
   in.unalignedWidth = width;
   in.unalignedHeight = height;
-  in.numSlices = 1;
+  in.numSlices = slices;
   in.numMipLevels = 1;
   in.numFrags = 1;
   in.pipeXor = pipe_xor;
@@ -117,13 +120,14 @@ UINT_64 addrlib_address(ADDR_HANDLE handle, const Dcc &dcc, UINT_32 bytes, bool 
 
 // Mesa's `gfx10_nir_meta_addr_from_coord` (`ac_nir_surface.c` 11-57) with integers for its NIR,
 // as `ac_nir_dcc_addr_from_coord` calls it: a bias of `log2(bytes) - 8`, the address from bit one.
-UINT_64 mesa_address(const Dcc &dcc, UINT_32 bytes, UINT_32 x, UINT_32 y, UINT_32 pipe_xor) {
+UINT_64 mesa_address(const Dcc &dcc, UINT_32 bytes, UINT_32 x, UINT_32 y, UINT_32 pipe_xor,
+                     UINT_32 z = 0) {
   const UINT_32 width_log2 = log2_of(dcc.info.metaBlkWidth);
   const UINT_32 height_log2 = log2_of(dcc.info.metaBlkHeight);
   const int bias = static_cast<int>(log2_of(bytes)) - 8;
   const UINT_32 size_log2 = static_cast<UINT_32>(static_cast<int>(width_log2 + height_log2) + bias);
   const UINT_32 start = 1;
-  const UINT_32 coords[4] = {x, y, 0, 0};
+  const UINT_32 coords[4] = {x, y, z, 0};
   UINT_64 address = 0;
   for (UINT_32 i = start; i < size_log2 + 1; ++i) {
     UINT_32 v = 0;
@@ -142,16 +146,19 @@ UINT_64 mesa_address(const Dcc &dcc, UINT_32 bytes, UINT_32 x, UINT_32 y, UINT_3
   const UINT_64 index =
       static_cast<UINT_64>(y >> height_log2) * (dcc.info.pitch >> width_log2) + (x >> width_log2);
   const UINT_64 pipe = ((pipe_xor & pipe_mask) << kPipeInterleaveLog2) & block_mask;
-  return (index << size_log2) + ((address >> 1) ^ pipe);
+  return static_cast<UINT_64>(dcc.info.dccRamSliceSize) * z + (index << size_log2) +
+         ((address >> 1) ^ pipe);
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: dcc <bytes per texel> <pipe aligned: 0 or 1>\n");
+  if (argc != 3 && argc != 4) {
+    std::fprintf(stderr, "usage: dcc <bytes per texel> <pipe aligned: 0 or 1> [slices]\n");
     return 1;
   }
+  // An array's keys: each slice's at its place, by the equation's slice terms.
+  const UINT_32 slices = argc == 4 ? static_cast<UINT_32>(std::strtoul(argv[3], nullptr, 0)) : 1;
   const UINT_32 bytes = static_cast<UINT_32>(std::strtoul(argv[1], nullptr, 0));
   const bool pipe_aligned = std::strtoul(argv[2], nullptr, 0) != 0;
   if (bytes == 0 || (bytes & (bytes - 1)) != 0 || bytes > 16) {
@@ -174,7 +181,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  const Dcc probe = dcc_info(created.hLib, bytes, pipe_aligned, 1920, 1080);
+  const Dcc probe = dcc_info(created.hLib, bytes, pipe_aligned, 1920, 1080, slices);
   std::printf("64KB_R_X at %u bytes a texel, %s: compress blocks %u x %u, meta blocks %u x %u "
               "of %u bytes\n",
               bytes, pipe_aligned ? "pipe aligned" : "unaligned", probe.info.compressBlkWidth,
@@ -206,6 +213,21 @@ int main(int argc, char **argv) {
     }
     std::printf("\n");
   }
+  // The same blocks of slice three of a six-slice array: its keys a slice of keys on, by the
+  // equation's slice terms.
+  {
+    const Dcc dcc = dcc_info(created.hLib, bytes, pipe_aligned, 1920, 1080, 6);
+    const UINT_32 samples[][3] = {{8, 0, 0}, {200, 100, 0}, {1000, 600, 5}};
+    std::printf("slice 3 of 6, %u bytes a slice (x, y, pipe xor, key byte):",
+                dcc.info.dccRamSliceSize);
+    for (const auto &sample : samples) {
+      std::printf(" (%u, %u, %u, 0x%llx)", sample[0], sample[1], sample[2],
+                  static_cast<unsigned long long>(addrlib_address(
+                      created.hLib, dcc, bytes, pipe_aligned, 1920, 1080, sample[0], sample[1],
+                      sample[2], 3, 6)));
+    }
+    std::printf("\n");
+  }
 
   // Every compress block of three surfaces, under three pipe XORs.
   const UINT_32 shapes[][2] = {{1920, 1080}, {480, 270}, {4000, 300}};
@@ -213,14 +235,15 @@ int main(int argc, char **argv) {
   UINT_64 wrong = 0;
   UINT_64 checked = 0;
   for (const auto &shape : shapes) {
-    const Dcc dcc = dcc_info(created.hLib, bytes, pipe_aligned, shape[0], shape[1]);
+    const Dcc dcc = dcc_info(created.hLib, bytes, pipe_aligned, shape[0], shape[1], slices);
     for (UINT_32 pipe_xor : pipe_xors) {
+      for (UINT_32 z = 0; z < slices; ++z)
       for (UINT_32 y = 0; y < shape[1]; y += dcc.info.compressBlkHeight) {
         for (UINT_32 x = 0; x < shape[0]; x += dcc.info.compressBlkWidth) {
           const UINT_64 expected =
               addrlib_address(created.hLib, dcc, bytes, pipe_aligned, shape[0], shape[1], x, y,
-                              pipe_xor);
-          const UINT_64 actual = mesa_address(dcc, bytes, x, y, pipe_xor);
+                              pipe_xor, z, slices);
+          const UINT_64 actual = mesa_address(dcc, bytes, x, y, pipe_xor, z);
           ++checked;
           if (actual != expected) {
             if (wrong < 8) {

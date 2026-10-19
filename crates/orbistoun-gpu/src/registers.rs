@@ -1430,9 +1430,16 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
     // unwritten extension reads as its reset value, zero.
     let high = u64::from(last(CB_COLOR0_BASE_EXT).unwrap_or(0) & 0xFF) << 32;
-    // The target is the slice `SLICE_START` names, each slice a whole chain (D859).
+    // The target is the slice `SLICE_START` names, each slice a whole chain (D859), with the
+    // slice's pipe-bank XOR in a 64 KiB `_X` mode (D899).
     let (first_slice, _) = view_slices(last(CB_COLOR0_VIEW).unwrap_or(0));
     let slice = u64::from(first_slice) * layout.chain_bytes(extent.width, extent.height, levels);
+    let pipe_bank_xor = match mode {
+        Some(SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled64KbDX) => {
+            pipe_bank_xor ^ crate::tiling::array_slice_xor(first_slice)
+        }
+        _ => pipe_bank_xor,
+    };
     chain_level(
         (((u64::from(base) | high) << 8) + slice, pipe_bank_xor),
         (extent.width, extent.height),
@@ -1444,8 +1451,6 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
 /// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
 /// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
 pub(crate) const CB_COLOR0_VIEW: u32 = 0xA31B;
-/// `CB_COLOR0_VIEW`'s `SLICE_START` and `SLICE_MAX` together.
-const VIEW_SLICES: u32 = 0x03FF_FFFF;
 /// `CB_COLOR0_VIEW.MIP_LEVEL`'s shift; the field is four bits.
 const VIEW_MIP_LEVEL_SHIFT: u32 = 26;
 /// `CB_COLOR0_ATTRIB` (`gfx103.json`, byte `167028`, dword `0xA31D`): `NUM_SAMPLES` 14:12,
@@ -1478,9 +1483,11 @@ pub struct ColourTargetDcc {
     pub extent: ColourTargetExtent,
     /// Levels in the chain, `ATTRIB2.MAX_MIP` plus one.
     pub levels: u32,
-    /// One 2D slice: `CB_COLOR0_VIEW`'s slices and `ATTRIB3.MIP0_DEPTH` all zero,
-    /// `ATTRIB3.RESOURCE_TYPE` 2D.
-    pub single_slice: bool,
+    /// A 2D surface or array of them: `ATTRIB3.RESOURCE_TYPE` 2D.
+    pub two_dimensional: bool,
+    /// The slice drawn and the surface's last, `CB_COLOR0_VIEW.SLICE_START` and
+    /// `ATTRIB3.MIP0_DEPTH`: the drawn slice's keys and blocks lie that many slices on (D899).
+    pub slices: (u32, u32),
     /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
     pub single_sample: bool,
     /// The colour a block whose key says "clear to the register" holds: `CB_COLOR0_CLEAR_WORD0`
@@ -1511,9 +1518,7 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
     let attrib2 = last(CB_COLOR0_ATTRIB2)?;
     // `ATTRIB3.MIP0_DEPTH` 12:0, `RESOURCE_TYPE` 25:24.
     let mip0_depth = attrib3 & 0x1FFF;
-    let single_slice = last(CB_COLOR0_VIEW).unwrap_or(0) & VIEW_SLICES == 0
-        && mip0_depth == 0
-        && (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
+    let two_dimensional = (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
     // `NUM_SAMPLES` and `NUM_FRAGMENTS`, as `log2`, together in 16:12.
     let samples_and_fragments = (last(CB_COLOR0_ATTRIB).unwrap_or(0) >> 12) & 0x1F;
     Some(ColourTargetDcc {
@@ -1528,7 +1533,8 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
             << 8,
         extent: decode_colour_target_extent(attrib2),
         levels: (attrib2 >> 28) + 1,
-        single_slice,
+        two_dimensional,
+        slices: (view_slices(last(CB_COLOR0_VIEW).unwrap_or(0)).0, mip0_depth),
         single_sample: samples_and_fragments == 0,
         pipe_bank_xor: (last(CB_COLOR0_BASE)? & 0xFF) as u8,
         clear: last(CB_COLOR0_CLEAR_WORD0)
@@ -4858,7 +4864,8 @@ mod tests {
 
     /// A target is the slice `CB_COLOR0_VIEW.SLICE_START` names, each slice a whole chain (D859):
     /// a 256 x 256 four-byte `64KB_R_X` slice is four 64 KiB blocks, so slice two starts 512 KiB
-    /// past the surface.
+    /// past the surface, its in-block offsets XORed with the slice's low bits reversed into the
+    /// pipe bits, `0x400` (D899; `tools/addrlib/equation 64KB_R_X 4 16 array`).
     #[test]
     fn a_target_is_the_slice_its_view_starts_at() {
         let write = |register, value| RegisterWrite {
@@ -4874,8 +4881,8 @@ mod tests {
         ];
         target.push(write(super::CB_COLOR0_VIEW, 2 | 5 << 13));
         assert_eq!(
-            colour_target_at(&target).map(|t| t.base),
-            Some(0x7400_02e8_0000 + 2 * 0x4_0000)
+            colour_target_at(&target).map(|t| (t.base, t.pipe_bank_xor)),
+            Some((0x7400_02e8_0000 + 2 * 0x4_0000, 0x4))
         );
     }
 
@@ -5055,7 +5062,8 @@ mod tests {
                     height: 256,
                 },
                 levels: 1,
-                single_slice: true,
+                two_dimensional: true,
+                slices: (0, 0),
                 single_sample: true,
                 clear: None,
                 // The low byte of its base.
@@ -5077,13 +5085,14 @@ mod tests {
         let mut chain = craft.clone();
         chain.push(write(0xA3B0, 0x303f_c0ff));
         let chained = colour_target_dcc_at(&chain).expect("dcc");
-        assert_eq!((chained.levels, chained.single_slice), (4, true));
+        assert_eq!((chained.levels, chained.two_dimensional), (4, true));
         let mut level = chain;
         level.push(write(0xA31B, 1 << 26));
-        assert!(colour_target_dcc_at(&level).expect("dcc").single_slice);
+        assert_eq!(colour_target_dcc_at(&level).expect("dcc").slices, (0, 0));
+        // A view from slice two draws that slice's keys and blocks (D899).
         let mut slices = craft;
-        slices.push(write(0xA31B, 1 << 13));
-        assert!(!colour_target_dcc_at(&slices).expect("dcc").single_slice);
+        slices.push(write(0xA31B, 2 | 5 << 13));
+        assert_eq!(colour_target_dcc_at(&slices).expect("dcc").slices.0, 2);
     }
 
     /// SuperTuxKart's 2048x1024 target, as its stream writes it: twelve levels (`MAX_MIP` 11) in

@@ -116,16 +116,16 @@ impl KeyEquation {
         width.next_multiple_of(1 << self.meta_log2.0)
     }
 
-    /// The byte of the keys, from their first, that describes the compress block holding texel
-    /// `(x, y)` of a surface whose keys are `pitch` texels across, under `pipe_xor` - Mesa's
+    /// The byte of slice `z`'s keys, from their first, that describes the compress block holding
+    /// texel `(x, y)` of a surface whose keys are `pitch` texels across, under `pipe_xor` - Mesa's
     /// `gfx10_nir_meta_addr_from_coord` (`ac_nir_surface.c` 11-57) as `ac_nir_dcc_addr_from_coord`
-    /// calls it, for one slice and sample.
+    /// calls it, for one sample, less the slices of keys before (D899).
     #[must_use]
-    pub fn key_offset(&self, (x, y): (u32, u32), pitch: u32, pipe_xor: u32) -> u64 {
+    pub fn key_offset(&self, (x, y, z): (u32, u32, u32), pitch: u32, pipe_xor: u32) -> u64 {
         let (width_log2, height_log2) = self.meta_log2;
         // The meta block's key bytes, `log2`, as a nibble address: the bias is `log2(bytes) - 8`.
         let size_log2 = width_log2 + height_log2 + self.texel_log2 - 8;
-        let coords = [x, y, 0, 0];
+        let coords = [x, y, z, 0];
         let mut address = 0_u64;
         for i in 1..=size_log2 {
             let mut v = 0_u32;
@@ -362,18 +362,18 @@ pub fn census(keys: &[u8]) -> String {
 }
 
 /// Why a DCC target's metadata is not one this writes back to, or `None` when it is: a
-/// single-sample, single-slice 2D `64KB_R_X` surface of any number of levels - the case whose
-/// metadata is one run of whole blocks ([`chain_meta_bytes`]).
+/// single-sample 2D `64KB_R_X` surface of any number of levels, or one slice of an array of them -
+/// the case whose metadata is one run of whole blocks a slice ([`chain_meta_bytes`], D899).
 #[must_use]
 pub const fn unsupported(
     tiling: Option<SwizzleMode>,
-    single_slice: bool,
+    two_dimensional: bool,
     single_sample: bool,
 ) -> Option<&'static str> {
     if !matches!(tiling, Some(SwizzleMode::Tiled64KbRX)) {
         Some("DCC on a swizzle mode other than 64KB_R_X")
-    } else if !single_slice {
-        Some("DCC on a target with more than one slice, or a view of one")
+    } else if !two_dimensional {
+        Some("DCC on a target that is not two-dimensional")
     } else if !single_sample {
         Some("DCC on a multisampled target")
     } else {
@@ -426,7 +426,7 @@ mod tests {
                 (520, 260, 0),
             ];
             for ((x, y, pipe_xor), want) in samples.into_iter().zip(expected) {
-                let got = equation.key_offset((x, y), equation.pitch(1920), pipe_xor);
+                let got = equation.key_offset((x, y, 0), equation.pitch(1920), pipe_xor);
                 assert_eq!(got, want, "({x}, {y}) under pipe xor {pipe_xor}");
             }
         }
@@ -515,6 +515,52 @@ mod tests {
             chain_meta_bytes(1920, 1080, 1, true),
             meta_bytes(1920, 1080, true)
         );
+    }
+
+    /// A slice of an array's keys lies a slice of keys after the one before, one level's key bytes
+    /// apart, each key moved by the equation's slice terms where the keys are pipe aligned (D899):
+    /// `tools/addrlib/dcc <bytes> <aligned>`'s keys of slice 3 of a six-slice 1920 x 1080 surface,
+    /// less three slices of keys.
+    #[test]
+    fn an_array_slice_s_keys_take_the_slice_terms() {
+        use super::{key_equation, texel_chain_meta_bytes};
+        use crate::tiling::SurfaceLayout;
+        for (bytes, aligned, layout, slice_bytes, expected) in [
+            (4, false, SurfaceLayout::Rx64Kb, 49152, [0x1, 0x1e1, 0x50db]),
+            (
+                4,
+                true,
+                SurfaceLayout::Rx64Kb,
+                49152,
+                [0xd01, 0x51d, 0x5f5f],
+            ),
+            (
+                8,
+                false,
+                SurfaceLayout::Rx64KbBpp8,
+                81920,
+                [0x2, 0x3c3, 0x9eb6],
+            ),
+            (
+                8,
+                true,
+                SurfaceLayout::Rx64KbBpp8,
+                81920,
+                [0xd02, 0x53b, 0x9fbe],
+            ),
+        ] {
+            let equation = key_equation(bytes, aligned).expect("read");
+            let pitch = equation.pitch(1920);
+            let got: Vec<u64> = [(8, 0, 0), (200, 100, 0), (1000, 600, 5)]
+                .iter()
+                .map(|&(x, y, pipe_xor)| equation.key_offset((x, y, 3), pitch, pipe_xor))
+                .collect();
+            assert_eq!(got, expected, "{bytes} bytes, aligned {aligned}");
+            assert_eq!(
+                texel_chain_meta_bytes(1920, 1080, 1, layout, aligned),
+                slice_bytes
+            );
+        }
     }
 
     /// The metadata starts at its block, whatever XOR sits in the base's low bits.

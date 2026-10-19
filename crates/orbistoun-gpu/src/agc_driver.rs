@@ -352,7 +352,7 @@ fn writable_more_target(
     let format = more.format?;
     let bytes_per_texel = format.written_back_bytes()?;
     (more.dcc.is_none_or(|dcc| {
-        crate::dcc::unsupported(more.tiling, dcc.single_slice, dcc.single_sample).is_none()
+        crate::dcc::unsupported(more.tiling, dcc.two_dimensional, dcc.single_sample).is_none()
     }) && (target.width, target.height) == (first.width, first.height)
         && target.base != first.base
         && more
@@ -777,9 +777,9 @@ impl GuestCp<'_> {
             levels,
             clear,
             pipe_bank_xor,
+            slices: (slice, _),
             ..
         } = target;
-        let start = crate::dcc::meta_start(dcc);
         let length = crate::dcc::texel_chain_meta_bytes(
             extent.width,
             extent.height,
@@ -787,6 +787,12 @@ impl GuestCp<'_> {
             layout,
             dcc.pipe_aligned,
         );
+        // The slice drawn: its keys a slice of keys on, its blocks a chain on under its own pipe-bank
+        // XOR (D899).
+        let start = crate::dcc::meta_start(dcc) + u64::from(slice) * length;
+        let surface =
+            surface + u64::from(slice) * layout.chain_bytes(extent.width, extent.height, levels);
+        let pipe_bank_xor = pipe_bank_xor ^ tiling::array_slice_xor(slice);
         let keys = usize::try_from(length)
             .ok()
             .and_then(|length| cp::CpMemory::read(self, start, length))
@@ -818,7 +824,7 @@ impl GuestCp<'_> {
                 .expand_dcc_blocks(
                     (&keys, start, dcc),
                     (surface, extent, levels, pipe_bank_xor),
-                    (layout, clear),
+                    (layout, clear, slice),
                 )
                 .map_err(|why| {
                     format!(
@@ -844,17 +850,18 @@ impl GuestCp<'_> {
             u32,
             u8,
         ),
-        (layout, clear): (tiling::SurfaceLayout, Option<[u32; 2]>),
+        (layout, clear, slice): (tiling::SurfaceLayout, Option<[u32; 2]>, u32),
     ) -> Result<(), String> {
         let texel_bytes = 1_u32 << layout.texel_log2();
+        // The data's pipe-bank XOR is only an array slice's own (D899).
         let equation = crate::dcc::key_equation(texel_bytes, dcc.pipe_aligned)
-            .filter(|_| levels == 1 && pipe_bank_xor == 0)
+            .filter(|_| levels == 1 && pipe_bank_xor == tiling::array_slice_xor(slice))
             .filter(|_| layout.compress_block_offset(0, 0, 1).is_some())
             .ok_or("its DCC keys need per-block decoding the key equation was not read for")?;
         let pitch = equation.pitch(extent.width);
         // The keys' pipe XOR, which radeonsi ORs into the base's low bits (`ac_descriptors.c`
         // 1504-1506).
-        let pipe_xor = u32::try_from((dcc.base - start) >> 8).unwrap_or(0);
+        let pipe_xor = u32::try_from((dcc.base - crate::dcc::meta_start(dcc)) >> 8).unwrap_or(0);
         let clear_block: Option<Vec<u8>> = clear.map(|[low, high]| {
             let texel: Vec<u8> = if texel_bytes == 8 {
                 [low.to_le_bytes(), high.to_le_bytes()].concat()
@@ -868,13 +875,13 @@ impl GuestCp<'_> {
         let mut blocks = Vec::new();
         for y in (0..extent.height).step_by(down as usize) {
             for x in (0..extent.width).step_by(across as usize) {
-                let at = usize::try_from(equation.key_offset((x, y), pitch, pipe_xor))
+                let at = usize::try_from(equation.key_offset((x, y, slice), pitch, pipe_xor))
                     .map_err(|_| "a DCC key outside this host's address range".to_owned())?;
                 let key = *keys.get(at).ok_or("a DCC key past the target's keys")?;
                 let offset = layout
                     .compress_block_offset(x, y, extent.width)
                     .ok_or("a compress block the layout does not place")?;
-                let address = surface + (offset as u64 & !0xFF);
+                let address = surface + ((offset as u64 & !0xFF) ^ (u64::from(pipe_bank_xor) << 8));
                 let block = match key {
                     crate::dcc::KEY_UNCOMPRESSED => continue,
                     crate::dcc::KEY_CLEAR_0000 => None,
@@ -935,12 +942,18 @@ impl GuestCp<'_> {
         if let Some(dcc) = submission.colour_target_dcc
             && let Some(why) = crate::dcc::unsupported(
                 submission.colour_target_tiling,
-                dcc.single_slice,
+                dcc.two_dimensional,
                 dcc.single_sample,
             )
         {
             return Err(format!(
-                "its colour target uses {why}, which is not modelled"
+                "its colour target uses {why}, which is not modelled: slice {} of 0..={}, {}x{}, {} level(s), keys at {:#x}",
+                dcc.slices.0,
+                dcc.slices.1,
+                dcc.extent.width,
+                dcc.extent.height,
+                dcc.levels,
+                dcc.dcc.base
             ));
         }
         // The executor holds one frame per extent, so a frame still pending for another target is
@@ -6159,7 +6172,8 @@ mod tests {
             surface: 0x7400_d000_0000,
             extent,
             levels: 1,
-            single_slice: true,
+            two_dimensional: true,
+            slices: (0, 0),
             single_sample: true,
             clear: None,
             pipe_bank_xor: 0,
@@ -8922,7 +8936,8 @@ mod tests {
                 surface: buffer_at,
                 extent: ColourTargetExtent { width, height },
                 levels,
-                single_slice: true,
+                two_dimensional: true,
+                slices: (0, 0),
                 single_sample: true,
                 clear: None,
                 pipe_bank_xor: 0,
@@ -8998,7 +9013,8 @@ mod tests {
                 height: 8,
             },
             levels: 1,
-            single_slice: true,
+            two_dimensional: true,
+            slices: (0, 0),
             single_sample: true,
             clear: Some([0x1122_3344, 0]),
             pipe_bank_xor: 0,
@@ -9008,7 +9024,7 @@ mod tests {
         let equation = crate::dcc::key_equation(4, true).expect("four-byte texels");
         let key_of = |x, y| {
             at(meta)
-                + usize::try_from(equation.key_offset((x, y), equation.pitch(16), 3))
+                + usize::try_from(equation.key_offset((x, y, 0), equation.pitch(16), 3))
                     .expect("small")
         };
         let block_of = |x, y| layout.compress_block_offset(x, y, 16).expect("placed") & !0xFF;
