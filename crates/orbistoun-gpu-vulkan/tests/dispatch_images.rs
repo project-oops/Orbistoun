@@ -124,7 +124,7 @@ fn translated_with(
     )
     .expect("the copy translates");
     assert_eq!(textures.first().and_then(|t| t.user_data), Some(0));
-    assert_eq!(storage.and_then(|t| t.user_data), Some(8));
+    assert_eq!(storage.first().and_then(|t| t.user_data), Some(8));
     module
 }
 
@@ -154,20 +154,94 @@ fn a_dispatch_copies_one_image_into_another() {
                         height: SIDE,
                         depth: None,
                     }),
-                    stored: Some(DispatchImage {
+                    stored: &[DispatchImage {
                         texels: &destination,
                         format: DispatchFormat::Rgba8,
                         width: SIDE,
                         height: SIDE,
                         depth: None,
-                    }),
+                    }],
                 },
             )
             .expect("dispatched");
             assert!(!done.escaped, "{form}");
-            assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
+            assert_eq!(
+                done.stored.first().map(Vec::as_slice),
+                Some(source.as_slice()),
+                "{form}"
+            );
         }
     });
+}
+
+/// A dispatch may store to more than one image, each its own binding, read back in the order its
+/// program first stores to them (D893): Grand Theft Auto V's scene compute program writes back the
+/// image it read and a second one. The copy stores what it loads to `s[8:15]` and `s[16:23]`.
+#[test]
+fn a_dispatch_stores_to_two_images() {
+    if !device_or_skip("two stored images") {
+        return;
+    }
+    // The copy, then a second store through `s[16:23]` (the descriptor's register / 4 at 16).
+    let program = [
+        COPY[0],
+        COPY[1],
+        COPY[2],
+        COPY[3],
+        COPY[4],
+        COPY[3],
+        0x0004_0200,
+        COPY[5],
+        COPY[6],
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, (_, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 24,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("a copy into two images translates");
+    assert_eq!(
+        storage.iter().map(|t| t.user_data).collect::<Vec<_>>(),
+        [Some(8), Some(16)]
+    );
+    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0102_0304_u32 ^ i).collect();
+    let destination = vec![0xdead_beef_u32; (SIDE * SIDE) as usize];
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba8,
+        width: SIDE,
+        height: SIDE,
+        depth: None,
+    };
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 24], [1, 1, 1]),
+        &DispatchImages {
+            more_fetched: &[],
+            fetched: Some(image(&source)),
+            stored: &[image(&destination), image(&destination)],
+        },
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    assert_eq!(done.stored, [source.clone(), source]);
 }
 
 /// Threads a partial last group runs along x.
@@ -208,13 +282,13 @@ fn an_inactive_thread_stores_nothing() {
                         height: SIDE,
                         depth: None,
                     }),
-                    stored: Some(DispatchImage {
+                    stored: &[DispatchImage {
                         texels: &destination,
                         format: DispatchFormat::Rgba8,
                         width: SIDE,
                         height: SIDE,
                         depth: None,
-                    }),
+                    }],
                 },
             )
             .expect("dispatched");
@@ -227,7 +301,11 @@ fn an_inactive_thread_stores_nothing() {
                     }
                 })
                 .collect();
-            assert_eq!(done.stored.as_deref(), Some(expected.as_slice()), "{form}");
+            assert_eq!(
+                done.stored.first().map(Vec::as_slice),
+                Some(expected.as_slice()),
+                "{form}"
+            );
         }
     });
 }
@@ -284,12 +362,15 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
             &DispatchImages {
                 more_fetched: &[],
                 fetched: Some(image(&source)),
-                stored: Some(image(&destination)),
+                stored: &[image(&destination)],
             },
         )
         .expect("dispatched");
         assert!(!done.escaped);
-        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(source.as_slice())
+        );
     });
 }
 
@@ -340,7 +421,7 @@ fn a_dispatch_stores_to_a_volume() {
             },
         )
         .expect("the store translates");
-        assert!(storage.is_some_and(|source| source.volume));
+        assert!(storage.first().is_some_and(|source| source.volume));
         let texels = (EDGE * EDGE * EDGE) as usize;
         let destination = vec![0xdead_beef_u32; texels * 4];
         let done = dispatch_guest(
@@ -350,20 +431,23 @@ fn a_dispatch_stores_to_a_volume() {
             &DispatchImages {
                 more_fetched: &[],
                 fetched: None,
-                stored: Some(DispatchImage {
+                stored: &[DispatchImage {
                     texels: &destination,
                     format: DispatchFormat::Rgba32Uint,
                     width: EDGE,
                     height: EDGE,
                     depth: Some(EDGE),
-                }),
+                }],
             },
         )
         .expect("dispatched");
         let expected: Vec<u32> = (0..EDGE * EDGE * EDGE)
             .flat_map(|i| [i % EDGE, (i / EDGE) % EDGE, i / (EDGE * EDGE), 7])
             .collect();
-        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(expected.as_slice())
+        );
     });
 }
 
@@ -424,18 +508,21 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
             &DispatchImages {
                 more_fetched: &[],
                 fetched: None,
-                stored: Some(DispatchImage {
+                stored: &[DispatchImage {
                     texels: &destination,
                     format: DispatchFormat::Rgb10A2,
                     width: EDGE,
                     height: EDGE,
                     depth: Some(EDGE),
-                }),
+                }],
             },
         )
         .expect("dispatched");
         let expected = vec![0xc000_03ff_u32; destination.len()];
-        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(expected.as_slice())
+        );
     });
 }
 
@@ -474,11 +561,14 @@ fn a_dispatch_copies_a_single_channel_image() {
             &DispatchImages {
                 more_fetched: &[],
                 fetched: Some(image(&source)),
-                stored: Some(image(&destination)),
+                stored: &[image(&destination)],
             },
         )
         .expect("dispatched");
-        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(source.as_slice())
+        );
     });
 }
 
@@ -507,11 +597,14 @@ fn a_dispatch_copies_an_eight_bit_integer_image() {
             &DispatchImages {
                 more_fetched: &[],
                 fetched: Some(image(&source)),
-                stored: Some(image(&destination)),
+                stored: &[image(&destination)],
             },
         )
         .expect("dispatched");
-        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(source.as_slice())
+        );
     });
 }
 
@@ -567,7 +660,7 @@ fn a_sixteen_word_load_names_two_images_of_its_table() {
         )
         .expect("the copy translates");
         let fetched = textures.first().expect("a fetched image");
-        let stored = storage.expect("a stored image");
+        let stored = *storage.first().expect("a stored image");
         for (source, offset) in [(fetched, 0), (&stored, 32)] {
             assert_eq!(source.table_offset, Some(offset));
             assert_eq!(source.table.low, TableWord::UserData(0));
@@ -616,18 +709,18 @@ fn a_dispatch_asks_an_image_s_size() {
                     height: 4,
                     depth: None,
                 }),
-                stored: Some(DispatchImage {
+                stored: &[DispatchImage {
                     texels: &destination,
                     format: DispatchFormat::Rgba32Uint,
                     width: SIDE,
                     height: SIDE,
                     depth: None,
-                }),
+                }],
             },
         )
         .expect("dispatched");
         assert!(!done.escaped);
-        let stored = done.stored.expect("stored");
+        let stored = done.stored.first().expect("stored");
         assert!(
             stored.chunks(4).all(|texel| texel == [6, 4, 7, 9]),
             "{:?}",
@@ -699,7 +792,7 @@ fn a_dispatch_fetches_from_two_images() {
             [Some(0), Some(0x40)],
             "two fetched images, in slot order"
         );
-        assert_eq!(storage.and_then(|t| t.table_offset), Some(32));
+        assert_eq!(storage.first().and_then(|t| t.table_offset), Some(32));
         let image = |texels| DispatchImage {
             texels,
             format: DispatchFormat::Rgba8,
@@ -717,12 +810,15 @@ fn a_dispatch_fetches_from_two_images() {
             &DispatchImages {
                 fetched: Some(image(&first)),
                 more_fetched: &[image(&second)],
-                stored: Some(image(&destination)),
+                stored: &[image(&destination)],
             },
         )
         .expect("dispatched");
         assert!(!done.escaped);
-        assert_eq!(done.stored.as_deref(), Some(second.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(second.as_slice())
+        );
     });
 }
 
@@ -755,11 +851,14 @@ fn a_dispatch_copies_a_half_float_image() {
             &DispatchImages {
                 fetched: Some(image(&source)),
                 more_fetched: &[],
-                stored: Some(image(&destination)),
+                stored: &[image(&destination)],
             },
         )
         .expect("dispatched");
         assert!(!done.escaped);
-        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(source.as_slice())
+        );
     });
 }

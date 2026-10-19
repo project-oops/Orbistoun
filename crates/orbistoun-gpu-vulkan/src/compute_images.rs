@@ -93,7 +93,7 @@ impl DispatchImage<'_> {
     }
 }
 
-/// The images a dispatch binds: those it fetches from and the one it stores to.
+/// The images a dispatch binds: those it fetches from and those it stores to.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchImages<'a> {
     /// Bound at the texture binding: the first texture slot's.
@@ -101,8 +101,9 @@ pub struct DispatchImages<'a> {
     /// The further texture slots' images, in order, each at its slot's binding
     /// ([`orbistoun_spirv::TEXTURE_BINDINGS`]).
     pub more_fetched: &'a [DispatchImage<'a>],
-    /// Bound at the storage-image binding, and read back after the dispatch.
-    pub stored: Option<DispatchImage<'a>>,
+    /// The images it stores to, in order, each at its storage-image binding
+    /// ([`orbistoun_spirv::STORAGE_IMAGE_BINDINGS`]) and read back after the dispatch (D893).
+    pub stored: &'a [DispatchImage<'a>],
 }
 
 /// One image, created, with the host buffer its texels travel through.
@@ -146,10 +147,19 @@ impl BoundImages {
                 "more fetched images than a stage has texture bindings".to_owned(),
             ));
         }
-        let mut wanted = vec![
-            (images.fetched, orbistoun_spirv::TEXTURE_BINDING, false),
-            (images.stored, orbistoun_spirv::STORAGE_IMAGE_BINDING, true),
-        ];
+        if images.stored.len() > orbistoun_spirv::STORAGE_IMAGE_BINDINGS.len() {
+            return Err(DispatchError::Unsupported(
+                "more stored images than a stage has storage-image bindings".to_owned(),
+            ));
+        }
+        let mut wanted = vec![(images.fetched, orbistoun_spirv::TEXTURE_BINDING, false)];
+        wanted.extend(
+            images
+                .stored
+                .iter()
+                .zip(orbistoun_spirv::STORAGE_IMAGE_BINDINGS)
+                .map(|(image, binding)| (Some(*image), binding, true)),
+        );
         wanted.extend(
             images
                 .more_fetched
@@ -347,40 +357,14 @@ impl BoundImages {
         }
     }
 
-    /// The stored image's texels as the dispatch left them, once the recording has completed.
-    pub(crate) fn read_stored(
-        &self,
-        device: &ash::Device,
-    ) -> Result<Option<Vec<u32>>, DispatchError> {
-        let Some(image) = self.images.iter().find(|image| image.stored) else {
-            return Ok(None);
-        };
-        let texels =
-            image.width as usize * image.height as usize * image.depth.unwrap_or(1) as usize;
-        let size = image.format.bytes();
-        let bytes = (texels * size) as vk::DeviceSize;
-        // SAFETY: the memory is host-visible and coherent, holds `bytes`, and is not mapped; the
-        // copy into it has completed.
-        let mapped = unsafe {
-            device.map_memory(image.staging_memory, 0, bytes, vk::MemoryMapFlags::empty())
-        }
-        .map_err(|e| DispatchError::Vulkan("map_memory(stored image)", e))?;
-        // SAFETY: the mapping covers `bytes` bytes and nothing writes it while it is read.
-        let raw =
-            unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().cast_const(), texels * size) };
-        // A texel of more than a word comes back as its words, in order.
-        let texels = raw
-            .chunks_exact(image.format.words().1)
-            .map(|texel| {
-                texel
-                    .iter()
-                    .rev()
-                    .fold(0_u32, |word, &byte| word << 8 | u32::from(byte))
-            })
-            .collect();
-        // SAFETY: mapped just above.
-        unsafe { device.unmap_memory(image.staging_memory) };
-        Ok(Some(texels))
+    /// Each stored image's texels as the dispatch left them, in the order they were bound, once
+    /// the recording has completed.
+    pub(crate) fn read_stored(&self, device: &ash::Device) -> Result<Vec<Vec<u32>>, DispatchError> {
+        self.images
+            .iter()
+            .filter(|image| image.stored)
+            .map(|image| read_back_image(device, image))
+            .collect()
     }
 
     /// Releases everything created, once the dispatch that used it has finished: each image to
@@ -417,6 +401,34 @@ impl BoundImages {
             }
         }
     }
+}
+
+/// One stored image's texels as the dispatch left them, once the recording has completed.
+fn read_back_image(device: &ash::Device, image: &Bound) -> Result<Vec<u32>, DispatchError> {
+    let texels = image.width as usize * image.height as usize * image.depth.unwrap_or(1) as usize;
+    let size = image.format.bytes();
+    let bytes = (texels * size) as vk::DeviceSize;
+    // SAFETY: the memory is host-visible and coherent, holds `bytes`, and is not mapped; the
+    // copy into it has completed.
+    let mapped =
+        unsafe { device.map_memory(image.staging_memory, 0, bytes, vk::MemoryMapFlags::empty()) }
+            .map_err(|e| DispatchError::Vulkan("map_memory(stored image)", e))?;
+    // SAFETY: the mapping covers `bytes` bytes and nothing writes it while it is read.
+    let raw =
+        unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().cast_const(), texels * size) };
+    // A texel of more than a word comes back as its words, in order.
+    let texels = raw
+        .chunks_exact(image.format.words().1)
+        .map(|texel| {
+            texel
+                .iter()
+                .rev()
+                .fold(0_u32, |word, &byte| word << 8 | u32::from(byte))
+        })
+        .collect();
+    // SAFETY: mapped just above.
+    unsafe { device.unmap_memory(image.staging_memory) };
+    Ok(texels)
 }
 
 /// A fetched image is a combined image sampler and a stored one a storage image.
@@ -844,7 +856,7 @@ mod tests {
                 height: HEIGHT,
                 depth: None,
             }),
-            stored: None,
+            stored: &[],
         }
     }
 

@@ -879,10 +879,15 @@ pub fn execute_dispatch(
         .iter()
         .map(|(texels, _)| dispatch_image(texels))
         .collect();
+    let stored: Vec<_> = images
+        .stored
+        .iter()
+        .map(|image| dispatch_image(&image.texels))
+        .collect();
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
         fetched: images.fetched.as_ref().map(dispatch_image),
         more_fetched: &more,
-        stored: images.stored.as_ref().map(dispatch_image),
+        stored: &stored,
     };
     // A buffer the program only stores to goes over unread, as its length alone (D809).
     let buffers: Vec<orbistoun_gpu_vulkan::BufferIn<'_>> = buffers

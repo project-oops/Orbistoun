@@ -2129,13 +2129,7 @@ impl Pipeline {
                 integer_images,
             )?;
             let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
-            let wanted = [
-                fetched_integer(&images)?,
-                images
-                    .stored
-                    .as_ref()
-                    .is_some_and(|t| t.format.is_integer()),
-            ];
+            let wanted = [fetched_integer(&images)?, stored_integer(&images)?];
             if wanted == integer_images {
                 break (module, images);
             }
@@ -2825,9 +2819,8 @@ fn last_clear(walked: &PacketWalk) -> Option<u32> {
         .map(|packet| packet.offset)
 }
 
-/// A dispatch's images: the one it fetches from and the one it stores to, each as linear texels
-/// read from guest memory, and where the stored one lies so what the dispatch wrote can be tiled
-/// back.
+/// A dispatch's images: those it fetches from and those it stores to, each as linear texels read
+/// from guest memory, and where each stored one lies so what the dispatch wrote can be tiled back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DispatchImages {
     /// The fetched image: the program's first texture slot.
@@ -2837,31 +2830,43 @@ pub struct DispatchImages {
     /// The images its further texture slots fetch from, in slot order, each with where it was
     /// read.
     pub more_fetched: Vec<(DispatchTexels, (u64, u64))>,
-    /// The stored image, as it was before the dispatch.
-    pub stored: Option<DispatchTexels>,
-    /// Where each channel of the stored image lies in memory, where its descriptor reorders them:
-    /// its texels, before and after, are in the shader's order ([`to_memory_channels`]).
-    pub stored_order: Option<[u8; 4]>,
-    /// Where the stored image lies, and the bytes it spanned before the dispatch.
-    pub stored_surface: Option<(DispatchSurface, Vec<u8>)>,
-    /// The stored image's compression keys, when they were all cleared: it was read as the zeros
-    /// they mean, and once every texel is written back they are marked uncompressed - expanded, a
-    /// state the hardware's own writes leave.
-    pub stored_keys_to_expand: Option<KeysToExpand>,
+    /// The images it stores to, in the order its program first stores to them (D893).
+    pub stored: Vec<StoredImage>,
+}
+
+/// One image a dispatch stores to: as it was before the dispatch, and where it lies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredImage {
+    /// Its texels before the dispatch.
+    pub texels: DispatchTexels,
+    /// Where each of its channels lies in memory, where its descriptor reorders them: its texels,
+    /// before and after, are in the shader's order ([`to_memory_channels`]).
+    pub order: Option<[u8; 4]>,
+    /// Where it lies, and the bytes it spanned before the dispatch.
+    pub surface: (DispatchSurface, Vec<u8>),
+    /// Its compression keys, when they were all cleared: it was read as the zeros they mean, and
+    /// once every texel is written back they are marked uncompressed - expanded, a state the
+    /// hardware's own writes leave.
+    pub keys_to_expand: Option<KeysToExpand>,
 }
 
 impl DispatchImages {
-    /// The guest memory its images were read from, as (first byte, bytes): the fetched image's and
-    /// the stored one's.
+    /// The guest memory its images were read from, as (first byte, bytes): the fetched images' and
+    /// the stored ones'.
     pub fn read_spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.fetched_span
             .into_iter()
             .chain(self.more_fetched.iter().map(|(_, span)| *span))
-            .chain(
-                self.stored_surface
-                    .as_ref()
-                    .map(|(surface, _)| (surface.base(), surface.bytes() as u64)),
-            )
+            .chain(self.stored.iter().map(StoredImage::span))
+    }
+}
+
+impl StoredImage {
+    /// Where it lies, as (first byte, bytes).
+    #[must_use]
+    pub fn span(&self) -> (u64, u64) {
+        let (surface, _) = &self.surface;
+        (surface.base(), surface.bytes() as u64)
     }
 }
 
@@ -3311,11 +3316,11 @@ fn dispatch_images(
             images.more_fetched.push((texels, span));
         }
     }
-    if let Some(source) = storage {
+    for source in storage {
         let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
         let spanned = read_spanned(&surface, memory)?;
         let (width, height) = surface.extent();
-        images.stored_order = order;
+        let mut keys_to_expand = None;
         let texels = match surface_keys(&descriptor, format, memory)? {
             crate::dcc::Keys::Uncompressed => {
                 let texels = detiled.detile(&surface, &spanned);
@@ -3336,7 +3341,7 @@ fn dispatch_images(
                     ))
                     .ok()
                 });
-                images.stored_keys_to_expand = descriptor
+                keys_to_expand = descriptor
                     .compression
                     .zip(surface_key_bytes(&descriptor, format))
                     .zip(chain)
@@ -3354,22 +3359,49 @@ fn dispatch_images(
                 .to_owned());
             }
         };
-        images.stored = Some(DispatchTexels {
+        let texels = DispatchTexels {
             texels,
             format,
             width,
             height,
             depth: volume_depth(&surface),
-        });
+        };
         // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
-        let spanned = if images.stored_keys_to_expand.is_some() {
+        let spanned = if keys_to_expand.is_some() {
             vec![0; spanned.len()]
         } else {
             spanned
         };
-        images.stored_surface = Some((surface, spanned));
+        images.stored.push(StoredImage {
+            texels,
+            order,
+            surface: (surface, spanned),
+            keys_to_expand,
+        });
     }
     Ok(images)
+}
+
+/// Whether the images a dispatch stores to hold integers, which its module's storage images are
+/// declared as; refused where some do and some do not, since the module types them all one way
+/// (D893).
+fn stored_integer(images: &DispatchImages) -> Result<bool, String> {
+    let integer = images
+        .stored
+        .first()
+        .is_some_and(|image| image.texels.format.is_integer());
+    if images
+        .stored
+        .iter()
+        .any(|image| image.texels.format.is_integer() != integer)
+    {
+        return Err(concat!(
+            "the dispatch stores to integer and float images, and its module declares every ",
+            "storage image one way (D893)"
+        )
+        .to_owned());
+    }
+    Ok(integer)
 }
 
 /// One fetched image's texels, read through `source`'s descriptor, and where they were read.

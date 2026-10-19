@@ -52,11 +52,28 @@ pub struct Kept {
     pub module: Vec<u32>,
     /// Which texture the module samples at which binding.
     pub textures: Vec<TextureSource>,
-    /// Where a guest dispatch's stored image's descriptor came from, when it stores to one.
-    #[serde(default)]
-    pub storage: Option<TextureSource>,
+    /// Where each of a guest dispatch's stored images' descriptors came from (D893).
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub storage: Vec<TextureSource>,
     /// What the translation wanted the caller told.
     pub warnings: Vec<String>,
+}
+
+/// A kept translation's stored images: a list, or the one image - or none - a store kept before a
+/// dispatch could store to more than one holds (D893), so a store written then still loads.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<TextureSource>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Many(Vec<TextureSource>),
+        One(Option<TextureSource>),
+    }
+    Ok(match serde::Deserialize::deserialize(deserializer)? {
+        Stored::Many(sources) => sources,
+        Stored::One(source) => source.into_iter().collect(),
+    })
 }
 
 /// What a refill did.
@@ -251,6 +268,30 @@ mod tests {
         let path = dir.path().join("title").join("shader-translations.json");
         store.save_if_changed(&path).expect("written");
         assert_eq!(TranslationStore::load(&path).get(7, &TRIVIAL), Some(&kept));
+    }
+
+    /// A translation kept when a dispatch stored to one image at most, its stored image a single
+    /// entry or `null`, still loads, as a list of that one or of none (D893).
+    #[test]
+    fn a_store_kept_with_one_stored_image_still_loads() {
+        let (encodings, operands) = tables();
+        let kept = translate(&TRIVIAL, &context(), &encodings, &operands).expect("translates");
+        let source = orbistoun_translate::wavefront::TextureSource {
+            user_data: Some(8),
+            ..orbistoun_translate::wavefront::TextureSource::default()
+        };
+        let mut value = serde_json::to_value(&kept).expect("serialises");
+        for (old, expected) in [
+            (serde_json::Value::Null, Vec::new()),
+            (
+                serde_json::to_value(source).expect("serialises"),
+                vec![source],
+            ),
+        ] {
+            value["storage"] = old;
+            let loaded: super::Kept = serde_json::from_value(value.clone()).expect("loads");
+            assert_eq!(loaded.storage, expected);
+        }
     }
 
     /// Nothing is written until something changes.

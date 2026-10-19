@@ -1888,6 +1888,16 @@ pub const TEXTURE_BINDING: u32 = 2;
 /// sampler and cannot be written, and a storage image is written and has no sampler.
 pub const STORAGE_IMAGE_BINDING: u32 = 3;
 
+/// Which binding each of a compute dispatch's storage images is bound at, in the order its program
+/// first stores to them: [`STORAGE_IMAGE_BINDING`], then 21 onwards, after the last of
+/// [`TEXTURE_BINDINGS`].
+pub const STORAGE_IMAGE_BINDINGS: [u32; MAX_STORED_IMAGES] = [STORAGE_IMAGE_BINDING, 21, 22, 23];
+
+/// How many images a compute dispatch may store to, one binding each: four, the storage images one
+/// stage may reach on every Vulkan device (the required minimum of
+/// `maxPerStageDescriptorStorageImages`). A pixel shader stores to one.
+pub const MAX_STORED_IMAGES: usize = 4;
+
 /// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
 /// The open-toolchain GL context's second texture unit samples one.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;

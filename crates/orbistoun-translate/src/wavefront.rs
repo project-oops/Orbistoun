@@ -2342,10 +2342,19 @@ impl Wavefront<'_> {
         b.function(op::STORE, &[pointer.0, one.0]);
     }
 
-    /// The texture sources this module samples, in slot order.
+    /// The texture sources this module samples, in slot order, and those of the images it stores
+    /// to, in the order it first stores to them.
     #[must_use]
-    pub fn image_sources(&self) -> (Vec<TextureSource>, Option<TextureSource>) {
-        (self.texture_sources(), self.images.stored_source)
+    pub fn image_sources(&self) -> ImageSources {
+        (
+            self.texture_sources(),
+            self.images
+                .stored_sources
+                .iter()
+                .flatten()
+                .copied()
+                .collect(),
+        )
     }
 
     /// The texture sources this module samples, in slot order.
@@ -5348,21 +5357,42 @@ impl Model for Wavefront<'_> {
                 "two-dimensional one"
             ));
         }
-        if let Some((stored, was)) = self.images.stored {
-            let same_level = self
-                .images
-                .stored_source
-                .is_none_or(|source| source.level_user_data == level);
-            if was != descriptor || stored.volume != volume || !same_level {
+        // The image a store names again, by the registers holding its descriptor (D690).
+        for (held, source) in self.images.stored.iter().zip(self.images.stored_sources) {
+            let Some((stored, was)) = *held else { break };
+            if was != descriptor {
+                continue;
+            }
+            let same_level = source.is_none_or(|source| source.level_user_data == level);
+            if stored.volume != volume || !same_level {
                 return Err(concat!(
-                    "this shader stores to more than one image and a pipeline binds one - ",
-                    "resolving which is which needs the descriptors decoded, and writing ",
-                    "whichever happened to be bound would corrupt a texture nobody asked to ",
-                    "write (D690)"
+                    "this shader stores to one image as two shapes or two levels, and a binding ",
+                    "holds one (D690)"
                 ));
             }
             return Ok(stored);
         }
+        // A pixel shader's harness binds one storage image; a compute dispatch binds each the
+        // guest's descriptors name, up to the bindings a stage has (D893).
+        let slot = self
+            .images
+            .stored
+            .iter()
+            .take_while(|held| held.is_some())
+            .count();
+        if slot > 0 && self.stage != Stage::Compute {
+            return Err(concat!(
+                "this shader stores to more than one image and a pipeline binds one - ",
+                "resolving which is which needs the descriptors decoded, and writing ",
+                "whichever happened to be bound would corrupt a texture nobody asked to ",
+                "write (D690)"
+            ));
+        }
+        let Some(&binding) = orbistoun_spirv::STORAGE_IMAGE_BINDINGS.get(slot) else {
+            return Err(
+                "this dispatch stores to more images than a stage binds storage images (D893)",
+            );
+        };
 
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
@@ -5372,9 +5402,9 @@ impl Model for Wavefront<'_> {
                 ..model::ImageShape::default()
             };
             let mut source = self.new_texture_source(descriptor, (None, shape))?;
-            source.slot = 0;
+            source.slot = u32::try_from(slot).unwrap_or(u32::MAX);
             source.level_user_data = level;
-            self.images.stored_source = Some(source);
+            self.images.stored_sources[slot] = Some(source);
         }
 
         let pointer = self.builder.id();
@@ -5388,14 +5418,8 @@ impl Model for Wavefront<'_> {
         );
         self.builder
             .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
-        self.builder.annotate(
-            op::DECORATE,
-            &[
-                variable.0,
-                decoration::BINDING,
-                orbistoun_spirv::STORAGE_IMAGE_BINDING,
-            ],
-        );
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
         // Written and never read, as a guest's store is; the reference compiler marks a write-only
         // image the same way.
         self.builder
@@ -5432,7 +5456,7 @@ impl Model for Wavefront<'_> {
             integer,
             volume,
         };
-        self.images.stored = Some((stored, descriptor));
+        self.images.stored[slot] = Some((stored, descriptor));
         Ok(stored)
     }
 
@@ -5980,15 +6004,16 @@ impl Model for Wavefront<'_> {
 /// What a module tracks to say where a compute dispatch's image descriptors are.
 #[derive(Debug, Clone, Copy, Default)]
 struct ImageTrace {
-    /// The storage image, declared the first time an instruction stores to one.
+    /// The storage images, each declared the first time an instruction stores to it, in that order
+    /// (D893).
     ///
-    /// Declaring it declares a capability that a device without the matching feature refuses, so a
-    /// module that never stores never declares one (D692). The image descriptor register it was
+    /// Declaring one declares a capability that a device without the matching feature refuses, so
+    /// a module that never stores never declares one (D692). The image descriptor register each was
     /// first named with rides along, so stores follow the same register rules as samples.
-    stored: Option<(model::Stored, u32)>,
-    /// Where the stored image's descriptor came from, for a compute module, whose storage image is
-    /// the guest's own rather than a harness image.
-    stored_source: Option<TextureSource>,
+    stored: [Option<(model::Stored, u32)>; orbistoun_spirv::MAX_STORED_IMAGES],
+    /// Where each stored image's descriptor came from, for a compute module, whose storage images
+    /// are the guest's own rather than a harness image.
+    stored_sources: [Option<TextureSource>; orbistoun_spirv::MAX_STORED_IMAGES],
     /// Scalar registers the program has written, one bit each: a descriptor still in the registers
     /// the user data seeded is read from the user data.
     written_scalars: u128,
@@ -6011,9 +6036,9 @@ impl ImageTrace {
     }
 }
 
-/// The textures a module samples, in slot order, and its stored image, where each one's
-/// descriptor came from.
-pub type ImageSources = (Vec<TextureSource>, Option<TextureSource>);
+/// The textures a module samples, in slot order, and the images it stores to, in the order it first
+/// stores to them (D893), where each one's descriptor came from.
+pub type ImageSources = (Vec<TextureSource>, Vec<TextureSource>);
 
 /// Which texture a translated module samples at which binding, and where its descriptor comes from:
 /// the descriptor table the image descriptor was loaded from, and the byte offset in it. `None` when
@@ -7531,7 +7556,10 @@ mod exact_memory_tests {
     #[test]
     fn a_store_to_a_level_names_the_word_holding_it() {
         let (_, _, (_, stored)) = store_to_a_level(8).expect("a store to a level from s8");
-        assert_eq!(stored.and_then(|source| source.level_user_data), Some(8));
+        assert_eq!(
+            stored.first().and_then(|source| source.level_user_data),
+            Some(8)
+        );
         // v_mov_b32 v6, 1 (inline integer code 129): a level no user data holds.
         let refused = store_to_a_level(129).expect_err("refused").to_string();
         assert!(refused.contains("level"), "{refused}");
@@ -7554,7 +7582,10 @@ mod exact_memory_tests {
     #[test]
     fn a_dispatch_stores_to_a_volume() {
         let (module, _, (_, stored)) = store_of_dimension(2).expect("a store to a volume");
-        assert!(stored.is_some_and(|source| source.volume), "{stored:?}");
+        assert!(
+            stored.first().is_some_and(|source| source.volume),
+            "{stored:?}"
+        );
         // `OpTypeImage` (opcode 0x19, nine words): result, sampled type, then `Dim`, 2 for 3D.
         let dims: Vec<u32> = module
             .windows(4)

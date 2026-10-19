@@ -1182,12 +1182,13 @@ pub type DispatchExecutor = fn(
     ),
 ) -> Result<DispatchDone, String>;
 
-/// What a dispatch left: the window's words, whether an access escaped it, the stored image's
-/// texels when it bound one, and its own buffers' words with their write masks (D746, D809).
+/// What a dispatch left: the window's words, whether an access escaped it, each stored image's
+/// texels in the order it bound them (D893), and its own buffers' words with their write masks
+/// (D746, D809).
 pub type DispatchDone = (
     Vec<u32>,
     bool,
-    Option<Vec<u32>>,
+    Vec<Vec<u32>>,
     Vec<crate::dispatch::BufferAfter>,
 );
 
@@ -1238,52 +1239,63 @@ pub fn last_dispatch_refusal() -> Option<String> {
         .clone()
 }
 
-/// What a dispatch's stored image writes back, in order: under cleared keys the whole chain they
-/// cover as the zeros they mean, then the stored level's texels over what it held - only the bytes
-/// that changed, so the rest of its blocks, a mip tail's other levels among them, are untouched -
-/// then the cleared keys marked uncompressed, now every texel is what it says.
+/// What a dispatch's stored images write back, each in turn as [`stored_image_into`] writes it.
 ///
 /// # Errors
 ///
-/// When the device answered no texels for a stored image, or ones that do not fit it.
+/// When the device answered texels for other than every stored image, or ones that do not fit one.
 fn stored_image_writes(
     images: &crate::pipeline::DispatchImages,
-    stored: Option<Vec<u32>>,
+    stored: Vec<Vec<u32>>,
 ) -> Result<GuestWrites, String> {
+    if stored.len() != images.stored.len() {
+        return Err(format!(
+            "the device answered {} stored images of the {} the dispatch binds",
+            stored.len(),
+            images.stored.len()
+        ));
+    }
     let mut writes = GuestWrites::default();
-    if let Some(expand) = images.stored_keys_to_expand {
+    for (image, texels) in images.stored.iter().zip(stored) {
+        stored_image_into(&mut writes, image, texels)?;
+    }
+    Ok(writes)
+}
+
+/// What one stored image writes back, in order: under cleared keys the whole chain they cover as
+/// the zeros they mean, then the stored level's texels over what it held - only the bytes that
+/// changed, so the rest of its blocks, a mip tail's other levels among them, are untouched - then
+/// the cleared keys marked uncompressed, now every texel is what it says.
+///
+/// # Errors
+///
+/// When its texels do not fit it.
+fn stored_image_into(
+    writes: &mut GuestWrites,
+    image: &crate::pipeline::StoredImage,
+    mut texels: Vec<u32>,
+) -> Result<(), String> {
+    if let Some(expand) = image.keys_to_expand {
         let (base, bytes) = expand.surface;
         writes.push_repeated(base, 0, bytes);
     }
-    if let Some((surface, spanned_before)) = &images.stored_surface {
-        let mut texels = stored.ok_or("the device did not answer the stored image")?;
-        let mut before = images
-            .stored
-            .as_ref()
-            .map(|stored| std::borrow::Cow::Borrowed(&*stored.texels));
-        // Texels a descriptor reorders were read into the shader's order; memory keeps its own.
-        if let Some(order) = images.stored_order {
-            for texel in &mut texels {
-                *texel = crate::pipeline::to_memory_channels(*texel, order);
-            }
-            before = before.map(|before| {
-                before
-                    .iter()
-                    .map(|&texel| crate::pipeline::to_memory_channels(texel, order))
-                    .collect()
-            });
+    let (surface, spanned_before) = &image.surface;
+    let mut before = std::borrow::Cow::Borrowed(&*image.texels.texels);
+    // Texels a descriptor reorders were read into the shader's order; memory keeps its own.
+    if let Some(order) = image.order {
+        for texel in &mut texels {
+            *texel = crate::pipeline::to_memory_channels(*texel, order);
         }
-        let before = before.as_deref();
-        if let Some(changed) = before.and_then(|before| changed_texels(surface, before, &texels)) {
-            for (slot, texel) in changed {
-                writes.push(surface.base() + u64::from(slot) * 4, &texel.to_le_bytes());
-            }
-            if let Some(expand) = images.stored_keys_to_expand {
-                let (keys, bytes) = expand.keys;
-                writes.push_repeated(keys, crate::dcc::KEY_UNCOMPRESSED, bytes);
-            }
-            return Ok(writes);
+        before = before
+            .iter()
+            .map(|&texel| crate::pipeline::to_memory_channels(texel, order))
+            .collect();
+    }
+    if let Some(changed) = changed_texels(surface, &before, &texels) {
+        for (slot, texel) in changed {
+            writes.push(surface.base() + u64::from(slot) * 4, &texel.to_le_bytes());
         }
+    } else {
         let started = std::time::Instant::now();
         let mut spanned = spanned_before.clone();
         surface
@@ -1301,11 +1313,11 @@ fn stored_image_writes(
             started.elapsed(),
         );
     }
-    if let Some(expand) = images.stored_keys_to_expand {
+    if let Some(expand) = image.keys_to_expand {
         let (keys, bytes) = expand.keys;
         writes.push_repeated(keys, crate::dcc::KEY_UNCOMPRESSED, bytes);
     }
-    Ok(writes)
+    Ok(())
 }
 
 /// A stored image's texels that changed, each as the word of the surface it lies in and its value
@@ -1461,9 +1473,9 @@ fn note_dispatch_writes(
     entry.program = Some(program);
     entry.fetched = images.fetched_span.or(entry.fetched);
     entry.stored = images
-        .stored_surface
-        .as_ref()
-        .map(|(surface, _)| (surface.base(), surface.bytes() as u64))
+        .stored
+        .first()
+        .map(crate::pipeline::StoredImage::span)
         .or(entry.stored);
     entry.buffers = ranges
         .iter()
@@ -6586,7 +6598,9 @@ mod tests {
     /// levels read the zeros their cleared keys meant, not what memory held under them.
     #[test]
     fn a_cleared_chain_expands_whole_before_its_level_is_written() {
-        use crate::pipeline::{DispatchImages, DispatchSurface, KeysToExpand};
+        use crate::pipeline::{
+            DispatchImages, DispatchSurface, DispatchTexels, KeysToExpand, StoredImage, TexelFormat,
+        };
         let level = super::ColourTarget {
             base: BASE + 0x2_0000,
             width: 16,
@@ -6596,17 +6610,28 @@ mod tests {
             place: crate::registers::Place::Whole,
         };
         let surface = DispatchSurface::Tiled(level);
+        // No texels before to compare, so the level is tiled back whole over the zeros.
         let images = DispatchImages {
-            stored_surface: Some((surface, vec![0; surface.bytes()])),
-            stored_keys_to_expand: Some(KeysToExpand {
-                keys: (0x9000, 3),
-                surface: (BASE, 0x3_0000),
-            }),
+            stored: vec![StoredImage {
+                texels: DispatchTexels {
+                    texels: Vec::new().into(),
+                    format: TexelFormat::Rgba8,
+                    width: 16,
+                    height: 8,
+                    depth: None,
+                },
+                order: None,
+                surface: (surface, vec![0; surface.bytes()]),
+                keys_to_expand: Some(KeysToExpand {
+                    keys: (0x9000, 3),
+                    surface: (BASE, 0x3_0000),
+                }),
+            }],
             ..DispatchImages::default()
         };
         let mut texels = vec![0u32; 16 * 8];
         texels[5] = 0x42;
-        let writes = super::stored_image_writes(&images, Some(texels))
+        let writes = super::stored_image_writes(&images, vec![texels])
             .expect("writes")
             .pairs();
         assert_eq!(
@@ -6628,7 +6653,9 @@ mod tests {
     /// memory exactly as tiling the whole image back would - and with no texel changed, nothing.
     #[test]
     fn a_few_changed_texels_write_back_as_tiling_the_image_would() {
-        use crate::pipeline::{DispatchImages, DispatchSurface, DispatchTexels, TexelFormat};
+        use crate::pipeline::{
+            DispatchImages, DispatchSurface, DispatchTexels, StoredImage, TexelFormat,
+        };
         let (width, height) = (64u32, 32u32);
         let surface = DispatchSurface::Tiled(super::ColourTarget {
             base: BASE,
@@ -6650,15 +6677,24 @@ mod tests {
             height,
             depth: None,
         };
-        let known = DispatchImages {
-            stored: Some(stored),
-            stored_surface: Some((surface, spanned.clone())),
+        let image = |texels: DispatchTexels, order| DispatchImages {
+            stored: vec![StoredImage {
+                texels,
+                order,
+                surface: (surface, spanned.clone()),
+                keys_to_expand: None,
+            }],
             ..DispatchImages::default()
         };
-        let whole = DispatchImages {
-            stored: None,
-            ..known.clone()
-        };
+        let known = image(stored.clone(), None);
+        // With no texels before to compare, the image is tiled back whole.
+        let whole = image(
+            DispatchTexels {
+                texels: Vec::new().into(),
+                ..stored
+            },
+            None,
+        );
         let applied = |writes: super::GuestWrites| {
             let mut memory = spanned.clone();
             for (at, bytes) in writes.pairs() {
@@ -6671,11 +6707,11 @@ mod tests {
         for index in [0, 1, 2, 65, 700, 2047] {
             after[index] ^= 0x0102_0304;
         }
-        let few = super::stored_image_writes(&known, Some(after.clone())).expect("writes");
+        let few = super::stored_image_writes(&known, vec![after.clone()]).expect("writes");
         assert_eq!(few.runs.len(), 6, "one write a texel");
-        let tiled = super::stored_image_writes(&whole, Some(after)).expect("writes");
+        let tiled = super::stored_image_writes(&whole, vec![after]).expect("writes");
         assert_eq!(applied(few), applied(tiled));
-        let none = super::stored_image_writes(&known, Some(before.clone())).expect("writes");
+        let none = super::stored_image_writes(&known, vec![before.clone()]).expect("writes");
         assert!(none.runs.is_empty());
 
         // Read through selects that swap red and blue, the image went to the device in the
@@ -6687,25 +6723,24 @@ mod tests {
                 .map(|&t| t & 0xff00_ff00 | (t & 0xff) << 16 | (t >> 16) & 0xff)
                 .collect()
         };
-        let reordered = DispatchImages {
-            stored: Some(DispatchTexels {
+        let reordered = image(
+            DispatchTexels {
                 texels: swapped(&before).into(),
                 format: TexelFormat::Rgba8,
                 width,
                 height,
                 depth: None,
-            }),
-            stored_order: Some(order),
-            ..known.clone()
-        };
+            },
+            Some(order),
+        );
         let mut written = before.clone();
         written[65] = 0x4433_2211;
         let writes =
-            super::stored_image_writes(&reordered, Some(swapped(&written))).expect("writes");
+            super::stored_image_writes(&reordered, vec![swapped(&written)]).expect("writes");
         assert_eq!(writes.runs.len(), 1, "the one texel the shader changed");
         assert_eq!(
             applied(writes),
-            applied(super::stored_image_writes(&whole, Some(written)).expect("writes")),
+            applied(super::stored_image_writes(&whole, vec![written]).expect("writes")),
             "memory as if no selects had reordered it"
         );
     }

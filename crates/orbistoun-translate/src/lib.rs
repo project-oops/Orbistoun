@@ -397,9 +397,10 @@ pub struct Translated {
     /// subgroup models; a guest dispatch run one invocation per lane is built by the wavefront
     /// model's emitter and has them (D880).
     pub textures: Vec<wavefront::TextureSource>,
-    /// Where a compute module's stored image's descriptor came from. `None` for a module that
-    /// stores to no image, and for a pixel shader, whose storage image is the harness's.
-    pub storage: Option<wavefront::TextureSource>,
+    /// Where each of a compute module's stored images' descriptors came from, in the order it
+    /// first stores to them (D893). Empty for a module that stores to no image, and for a pixel
+    /// shader, whose storage image is the harness's.
+    pub storage: Vec<wavefront::TextureSource>,
 }
 
 impl Translated {
@@ -824,7 +825,7 @@ pub fn translate_with_user_data(
                 warnings,
                 required_subgroup: None,
                 textures: Vec::new(),
-                storage: None,
+                storage: Vec::new(),
             })
         }
         Fidelity::Subgroup => {
@@ -838,7 +839,7 @@ pub fn translate_with_user_data(
                 warnings,
                 required_subgroup: Some(required_subgroup),
                 textures: Vec::new(),
-                storage: None,
+                storage: Vec::new(),
             })
         }
         // The wavefront model is built above, and `resolve` turns Auto into a concrete level, so
@@ -1786,7 +1787,7 @@ mod tests {
             .copied()
             .expect("a fetched image");
         assert_eq!((fetched.user_data, fetched.table_offset), (Some(8), None));
-        let stored = translated.storage.expect("a stored image");
+        let stored = translated.storage.first().copied().expect("a stored image");
         assert_eq!(
             (stored.user_data, stored.table_offset, stored.table),
             (

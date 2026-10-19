@@ -1789,8 +1789,8 @@ pub struct GuestDispatch {
     /// Whether an access left the window or went through a descriptor whose addressing is not
     /// modelled; the result is then not the guest's and must not reach its memory.
     pub escaped: bool,
-    /// The stored image's texels after the dispatch, when it bound one.
-    pub stored: Option<Vec<u32>>,
+    /// Each stored image's texels after the dispatch, in the order they were bound (D893).
+    pub stored: Vec<Vec<u32>>,
     /// Each traced buffer's words after the dispatch and its write mask, by slot (D746, D809);
     /// empty when it bound none.
     pub buffers: Vec<crate::compute_buffers::BufferOut>,
@@ -1950,7 +1950,7 @@ pub fn dispatch_guest_hashed(
         (memory_buffer, memory_memory),
     );
     let (observed, after) = dispatched?;
-    let stored = stored?.flatten();
+    let stored = stored?.unwrap_or_default();
 
     Ok(GuestDispatch {
         memory: after,
