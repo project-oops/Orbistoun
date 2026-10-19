@@ -2755,6 +2755,23 @@ fn log_execution() {
         report_unsatisfied_wait(address);
     }
     report_stepped_aside();
+    report_passed_refusals();
+}
+
+/// Lists the dispatches and draws the run passed over at the host's refusal (D896), each reason
+/// once with how many times it was met: every wall the run met, not only the first.
+fn report_passed_refusals() {
+    let passed = orbistoun_gpu::agc_driver::passed_refusals();
+    if passed.is_empty() {
+        return;
+    }
+    tracing::info!(
+        "{} distinct refusal(s) were passed over (ORBISTOUN_PASS_REFUSED, D896), what they would have written missing:",
+        passed.len()
+    );
+    for (refusal, times) in passed {
+        tracing::info!("  {times} x {refusal}");
+    }
 }
 
 /// Says which asynchronous compute streams the run left stepped aside (D891), and what the first

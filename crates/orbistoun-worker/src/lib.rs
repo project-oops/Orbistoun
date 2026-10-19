@@ -603,6 +603,8 @@ fn install_presentation() {
     );
     // The z-pass counters a `ZPASS_DONE` dumps, from the device's occlusion queries (D827).
     orbistoun_gpu::agc_driver::install_sample_counter(render::samples_passed);
+    // Work the host refuses passed over, when the run asks, to see every wall at once (D896).
+    orbistoun_gpu::agc_driver::set_pass_refused(orbistoun_env::PASS_REFUSED.get().is_some());
     orbistoun_gpu::agc_driver::set_write_back_at_flip(
         orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
     );

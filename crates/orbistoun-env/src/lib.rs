@@ -380,6 +380,22 @@ pub const FLIP_TO_ALL: Var = Var {
     read_by: "orbistoun-video",
     effect: Effect::Intervenes,
 };
+/// Pass over a compute dispatch or draw segment the host cannot carry out, rather than stopping the
+/// command processor's queue there, and list each one in the run report (D896).
+///
+/// Unset, the first refusal stops its queue, and nothing after it retires: a run shows one wall.
+/// Set, the work refused writes nothing and the queue goes on, so one run lists every dispatch and
+/// draw the host refused, and the title goes on to whatever stops it next. What the passed work
+/// would have written is missing, so a frame or a result after it is not the title's.
+pub const PASS_REFUSED: Var = Var {
+    name: "ORBISTOUN_PASS_REFUSED",
+    kind: Kind::Diagnostic,
+    summary: "pass over a dispatch or draw the host refuses instead of stopping its queue - what else is refused after it?",
+    example: "1",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
+
 /// Fill the guest stack before entering.
 pub const STACK_FILL: Var = Var {
     name: "ORBISTOUN_STACK_FILL",
@@ -819,6 +835,7 @@ pub const REGISTRY: &[Var] = &[
     DUMP,
     DLSYM_STUBS,
     FLIP_TO_ALL,
+    PASS_REFUSED,
     STACK_FILL,
     DIRECT_FILL,
     BSS_FILL,
@@ -912,6 +929,7 @@ mod tests {
         super::DUMP,
         super::DLSYM_STUBS,
         super::FLIP_TO_ALL,
+        super::PASS_REFUSED,
         super::STACK_FILL,
         super::DIRECT_FILL,
         super::BSS_FILL,

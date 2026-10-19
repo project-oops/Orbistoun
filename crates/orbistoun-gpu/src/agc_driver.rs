@@ -1218,6 +1218,53 @@ pub fn install_dispatch_executor(executor: DispatchExecutor) {
     let _ = dispatch_executor().set(executor);
 }
 
+/// Whether a dispatch or draw segment the host cannot carry out is passed over rather than stopping
+/// its queue (D896): `ORBISTOUN_PASS_REFUSED`, an intervention.
+static PASS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sets whether a refused dispatch or draw segment is passed over (D896).
+pub fn set_pass_refused(pass: bool) {
+    PASS_REFUSED.store(pass, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many distinct refusals passed over are kept.
+const PASSED_MOST: usize = 256;
+
+/// The refusals passed over, each its kind and reason with how many times it was met, first met
+/// first.
+fn passed_kept() -> &'static Mutex<Vec<(String, u64)>> {
+    static KEPT: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+    &KEPT
+}
+
+/// Whether the command processor goes on past work the host refused, `kind` (`compute dispatch`,
+/// `draws`) for `why`: only when asked (D896), and then the refusal is kept for the report.
+fn pass_over(kind: &str, why: &str) -> bool {
+    if !PASS_REFUSED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let refusal = format!("{kind}: {why}");
+    let mut kept = passed_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = kept.iter_mut().find(|(seen, _)| *seen == refusal) {
+        found.1 += 1;
+    } else if kept.len() < PASSED_MOST {
+        kept.push((refusal, 1));
+    }
+    true
+}
+
+/// The refusals the run passed over (D896), each its kind and reason with how many times it was
+/// met, first met first; empty unless asked to pass them over.
+#[must_use]
+pub fn passed_refusals() -> Vec<(String, u64)> {
+    passed_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// Why the most recent dispatch was not carried out, for the run report.
 fn dispatch_refusal() -> &'static Mutex<Option<String>> {
     static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
@@ -4523,7 +4570,7 @@ impl cp::CpMemory for GuestCp<'_> {
                         "the draws at bytes {:#x}..{:#x}: {why}",
                         segment.first, segment.end
                     ));
-                    false
+                    pass_over("draws", &why)
                 }
             }
         })
@@ -4559,7 +4606,7 @@ impl cp::CpMemory for GuestCp<'_> {
                     "the compute dispatch at byte {:#x}: {why}",
                     dispatch.offset
                 ));
-                false
+                pass_over("compute dispatch", &why)
             }
         }
     }
@@ -7265,8 +7312,60 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        super::passed_kept()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         super::set_pending(None);
         guard
+    }
+
+    /// Asked to, the command processor passes over a dispatch it cannot carry out rather than stop
+    /// its queue there, and keeps why (D896): what follows it runs, so a run lists every dispatch
+    /// it could not run, not only the first. Unasked, the queue stops there.
+    #[test]
+    fn a_refused_dispatch_is_passed_over_when_asked() {
+        use crate::packet::build::command_header;
+        let _guard = serial();
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; 0x100].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        allow_writes_to(base, 0x100);
+        // DISPATCH_DIRECT of a program nothing set, then WRITE_DATA to memory (DST_SEL 5).
+        let words = [
+            command_header(0x15, 4),
+            1,
+            1,
+            1,
+            0,
+            command_header(0x37, 4),
+            5 << 8,
+            u32::try_from(base & 0xffff_ffff).expect("low half"),
+            u32::try_from(base >> 32).expect("high half"),
+            7,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let written = |memory: &[u8]| u32::from_le_bytes(memory[..4].try_into().expect("a word"));
+
+        super::set_pass_refused(false);
+        super::run_submission(&bytes, super::Submission::default());
+        assert_eq!(
+            written(memory),
+            0,
+            "unasked, the queue stops at the dispatch"
+        );
+
+        *super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        super::set_pass_refused(true);
+        super::run_submission(&bytes, super::Submission::default());
+        super::set_pass_refused(false);
+        assert_eq!(written(memory), 7, "passed over, what follows it runs");
+        let passed = super::passed_refusals();
+        assert_eq!(passed.len(), 1, "{passed:?}");
+        assert!(passed[0].0.starts_with("compute dispatch: "), "{passed:?}");
+        assert_eq!(passed[0].1, 1);
     }
 
     /// A stream handed to an asynchronous compute ring is carried out though the graphics queue has
