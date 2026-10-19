@@ -6372,6 +6372,29 @@ fn a_one_source_float_sdwa_takes_its_source_modifiers() {
     assert_eq!(vector(&registers, 2), (-0.25f32).to_bits(), "1 / -|-4.0|");
 }
 
+/// A one-source float instruction in its SDWA form clamps its result where the word's clamp bit (13)
+/// asks, a NaN as the stage's `DX10_CLAMP` says: Grand Theft Auto V's vertex and pixel shaders take
+/// a clamped base-2 exponential through SDWA (`v_exp_f32_sdwa v8, v8 clamp`). exp2 3.0 is 8.0,
+/// clamped to 1.0; exp2 -1.0 is 0.5, inside.
+#[test]
+fn a_one_source_float_sdwa_clamps_its_result() {
+    const CLAMP: u32 = 1 << 13;
+    const WHOLE: u32 = SEL_DWORD << 8 | SEL_DWORD << 16;
+    if !device_or_skip("a_one_source_float_sdwa_clamps_its_result") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(3, 3.0f32.to_bits()));
+    program.extend(v_mov_literal(4, (-1.0f32).to_bits()));
+    let exp = |dst: u32| head("v_exp_f32_e32") | (dst << 17) | SDWA_MARKER;
+    program.extend([exp(1), 3 | WHOLE | CLAMP]);
+    program.extend([exp(2), 4 | WHOLE | CLAMP]);
+    program.push(s_endpgm());
+    let registers = run_with_dx10_clamp(true, &program);
+    assert_eq!(vector(&registers, 1), 1.0f32.to_bits(), "exp2 3.0, clamped");
+    assert_eq!(vector(&registers, 2), 0.5f32.to_bits(), "exp2 -1.0");
+}
+
 /// PPSA28061's scanline pixel shader takes a base-2 logarithm of an absolute value through SDWA
 /// (`v_log_f32_sdwa v12, |v12|`) and truncates toward zero (`v_trunc_f32_e32 v8, v6`): log2 |-8.0|
 /// is 3.0, and -2.75 truncates to -2.0.

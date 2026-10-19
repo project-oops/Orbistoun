@@ -7458,8 +7458,11 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
 pub const SDWA_FLOAT_UNARY: &[&str] = &[
     "v_rcp_f32_e32",
     "v_log_f32_e32",
+    "v_exp_f32_e32",
     "v_rsq_f32_e32",
     "v_rndne_f32_e32",
+    "v_floor_f32_e32",
+    "v_trunc_f32_e32",
     "v_sqrt_f32_e32",
 ];
 
@@ -7729,8 +7732,9 @@ fn sdwa_float<M: Model + ?Sized>(
 }
 
 /// A `SDWA_FLOAT_UNARY` instruction in its SDWA form: over whole registers, its one source under the
-/// word's negate (20) and absolute value (21). A select of part of a register, a sign extension, a
-/// destination part, the clamp (13) or the output multiplier (15:14) is refused.
+/// word's negate (20) and absolute value (21), its result clamped to `[0, 1]` where the clamp (13)
+/// asks, a NaN as the stage's `DX10_CLAMP` says. A select of part of a register, a sign extension,
+/// a destination part or the output multiplier (15:14) is refused.
 fn sdwa_float_unary<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7741,16 +7745,28 @@ fn sdwa_float_unary<M: Model + ?Sized>(
     let bit = |at: u32| word >> at & 1 != 0;
     let plain = fields.select[0] == (SDWA_DWORD, false)
         && fields.dst_sel == SDWA_DWORD
-        && !bit(13)
         && word & (0x3 << 14) == 0;
     let (Some(Operand::Vector(register)), true) = (instruction.operands.first(), plain) else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
-                "a one-source float SDWA instruction selects part of a register, clamps or scales ",
-                "its result, or its destination is not a vector register"
+                "a one-source float SDWA instruction selects part of a register, scales its ",
+                "result, or its destination is not a vector register"
             ),
         });
+    };
+    let clamp = match (bit(13), model.dx10_clamp()) {
+        (false, _) => None,
+        (true, Some(nan_to_zero)) => Some(nan_to_zero),
+        (true, None) => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "this instruction clamps its result to [0, 1], and what that does to a NaN ",
+                    "is the stage's DX10_CLAMP mode, which this translation was not given"
+                ),
+            });
+        }
     };
     let source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
     let modifiers = Modifiers {
@@ -7768,6 +7784,10 @@ fn sdwa_float_unary<M: Model + ?Sized>(
         let result = match extended {
             Some(extended) => model.f32_ext_unary(extended, value),
             None => model.f32_binary(op::FDIV, one, value),
+        };
+        let result = match clamp {
+            Some(nan_to_zero) => clamp_unit(model, result, nan_to_zero),
+            None => result,
         };
         model.write_vector_lane(u32::from(*register), lane, result);
     }
