@@ -328,3 +328,56 @@ fn a_pixel_shader_exporting_depth_replaces_the_triangle_s() {
         "the exported 0.125 passes LESS over the near 0.25"
     );
 }
+
+/// A guest pixel shader may export only a sample mask to `mrtz`: Mesa puts it in the third channel
+/// of the 32-bit form (`ac_nir_lower_ps_late.c`, `emit_ps_mrtz_export`), and Grand Theft Auto V's
+/// scene pixel shader exports `exp mrtz` with only that channel enabled. A mask of zero keeps no
+/// sample, so the red triangle over the green leaves it green; a mask of one keeps the only sample
+/// and draws it red. Neither replaces the depth.
+#[test]
+fn a_pixel_shader_exporting_a_sample_mask_keeps_only_the_samples_it_names() {
+    use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+    use orbistoun_translate::wavefront::{Stage, Window};
+    use orbistoun_translate::{Fidelity, Strategy, Width};
+    if !device_or_skip("a_pixel_shader_exporting_a_sample_mask_keeps_only_the_samples_it_names") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    for (mask, expected) in [(0u32, GREEN_PIXEL), (1, RED_PIXEL)] {
+        // v_mov_b32 v0, mask; v_mov_b32 v1, 1.0; v_mov_b32 v2, 0; exp mrtz v2, v2, v0, v2 (the
+        // sample mask only); exp mrt0 v1, v2, v2, v1 done vm; s_endpgm.
+        let words: [u32; 9] = [
+            0x7e00_0280 | mask,
+            0x7e02_02f2,
+            0x7e04_0280,
+            0xf800_0084,
+            0x0200_0202,
+            0xf800_180f,
+            0x0102_0201,
+            0xbf81_0000,
+            0,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let module = orbistoun_translate::translate_windowed(
+            &decoded,
+            &encodings,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            Stage::Fragment,
+            Window::default(),
+        )
+        .expect("a sample mask export translates")
+        .module;
+        let mut backend = backend(None);
+        backend
+            .ensure_resident(DEPTH_WRITER, Resource::Shader(&module))
+            .expect("resident");
+        run(&mut backend, &draw(NEAR, GREEN));
+        run(&mut backend, &draw(FAR, DEPTH_WRITER));
+        assert_eq!(centre(&mut backend), expected, "sample mask {mask}");
+    }
+}

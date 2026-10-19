@@ -1319,6 +1319,9 @@ struct FragmentOutputs {
     more_colour: [Option<Id>; 8],
     /// The `float` `FragDepth` output, declared for one that exports depth.
     depth: Option<(Id, Id)>,
+    /// The `SampleMask` output, declared for one that exports a sample mask: the `Output` pointer
+    /// type to one `uint` and the variable.
+    sample_mask: Option<(Id, Id)>,
     /// The colour targets that hold integers, bit `K` for `mrtK` (D851): their outputs are
     /// `uvec4`s rather than `vec4`s.
     integer: u8,
@@ -1350,6 +1353,7 @@ impl FragmentOutputs {
             colour: declare_colour_output(b, (f32_type, vec4), output_ptr, (colour, stage, zero)),
             more_colour: [None; 8],
             depth: depth.map(|variable| declare_depth_output(b, f32_type, variable)),
+            sample_mask: None,
             integer,
             unsigned,
         }
@@ -1384,11 +1388,33 @@ impl FragmentOutputs {
         self
     }
 
+    /// Declares the `SampleMask` output reserved as `variable`, an array of one `uint`.
+    fn with_sample_mask(mut self, b: &mut Builder, u32_type: Id, variable: Option<Id>) -> Self {
+        self.sample_mask = variable.map(|variable| {
+            let length = b.id();
+            b.declare(op::CONSTANT, &[u32_type.0, length.0, 1]);
+            let array = b.id();
+            b.declare(op::TYPE_ARRAY, &[array.0, u32_type.0, length.0]);
+            let pointer = b.id();
+            b.declare(op::TYPE_POINTER, &[pointer.0, OUTPUT, array.0]);
+            let element = b.id();
+            b.declare(op::TYPE_POINTER, &[element.0, OUTPUT, u32_type.0]);
+            b.annotate(
+                op::DECORATE,
+                &[variable.0, decoration::BUILT_IN, built_in::SAMPLE_MASK],
+            );
+            b.declare(op::VARIABLE, &[pointer.0, variable.0, OUTPUT]);
+            (element, variable)
+        });
+        self
+    }
+
     /// The variables the entry point's interface names.
     fn interface(self) -> impl Iterator<Item = u32> {
         self.colour
             .into_iter()
             .chain(self.depth)
+            .chain(self.sample_mask)
             .map(|(_, variable)| variable.0)
             .chain(
                 self.more_colour
@@ -2766,7 +2792,7 @@ type StageContext<'b> = (
     Window,
     UserData,
     &'b crate::draw_buffers::DrawBuffers,
-    (bool, bool, u8, (bool, bool)),
+    ((bool, bool), bool, u8, (bool, bool)),
     Option<LaneMasks>,
 );
 
@@ -2843,7 +2869,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
-                (false, false, 0, (false, false)),
+                ((false, false), false, 0, (false, false)),
                 None,
             ),
         )
@@ -2861,9 +2887,13 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets, layered), masks): StageContext<
-            '_,
-        >,
+        (
+            window,
+            user_data,
+            buffers,
+            ((writes_depth, sample_mask_exported), reads_quad, colour_targets, layered),
+            masks,
+        ): StageContext<'_>,
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -2874,6 +2904,7 @@ impl<'a> Wavefront<'a> {
         // The colour and depth outputs of a fragment module, reserved before the entry point
         // because its interface must name them.
         let (output, depth) = reserve_fragment_outputs(&mut b, stage, writes_depth);
+        let sample_mask = (stage == Stage::Fragment && sample_mask_exported).then(|| b.id());
         let more_colour = reserve_more_colour_outputs(&mut b, stage, colour_targets);
         let vec4 = b.id();
         let output_ptr = b.id();
@@ -2905,7 +2936,8 @@ impl<'a> Wavefront<'a> {
             output_ptr,
             (output, depth, stage, user_data.integer_targets),
         )
-        .with_more_colour(&mut b, output_ptr, more_colour);
+        .with_more_colour(&mut b, output_ptr, more_colour)
+        .with_sample_mask(&mut b, u32_type, sample_mask);
         let inputs = declare_attribute_inputs(&mut b, (f32_type, vec4), &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let mut mesh = declare_mesh_outputs(
@@ -4808,6 +4840,10 @@ impl Model for Wavefront<'_> {
         self.output.depth
     }
 
+    fn sample_mask_output(&self) -> Option<(Id, Id)> {
+        self.output.sample_mask
+    }
+
     // The four hooks below stage what the program exports; the outputs are written once it has
     // run, after the counts are declared (`emit_mesh_outputs`).
 
@@ -6707,18 +6743,24 @@ pub fn exports_entry_primitive(decode: &Decode, encodings: &EncodingTable) -> bo
     false
 }
 
-/// Whether a pixel shader exports depth: any `exp mrtz`, which needs a `FragDepth` output declared
-/// before the entry point is.
+/// Whether a pixel shader exports depth and a sample mask: an `exp mrtz` enabling Z, which needs a
+/// `FragDepth` output declared before the entry point is, and one enabling the sample mask, which
+/// needs a `SampleMask` one.
 #[must_use]
-pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> bool {
-    decode.instructions.iter().any(|instruction| {
-        let named = instruction
-            .encoding
-            .and_then(|i| encodings.encodings().get(usize::from(i)))
-            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
-        named == Some("exp")
-            && instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_MRTZ))
-    })
+pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> (bool, bool) {
+    let enabled = decode
+        .instructions
+        .iter()
+        .filter(|instruction| {
+            let named = instruction
+                .encoding
+                .and_then(|i| encodings.encodings().get(usize::from(i)))
+                .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+            named == Some("exp")
+                && instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_MRTZ))
+        })
+        .fold(0, |enabled, instruction| enabled | instruction.word);
+    (enabled & 1 != 0, enabled & 4 != 0)
 }
 
 /// What a compute program shares between the waves of its group: whether any instruction is

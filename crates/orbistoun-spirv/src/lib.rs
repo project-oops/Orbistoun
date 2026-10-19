@@ -512,6 +512,9 @@ pub mod built_in {
     pub const CLIP_DISTANCE: u32 = 3;
     /// The depth a fragment shader writes in place of the rasterised one (a `float`).
     pub const FRAG_DEPTH: u32 = 22;
+    /// The samples a fragment shader keeps of those it covers (an array of one `uint` up to 32
+    /// samples): a sample whose bit is clear is not written.
+    pub const SAMPLE_MASK: u32 = 20;
     /// A mesh shader's point index array: one vertex index per primitive (a `uint`).
     pub const PRIMITIVE_POINT_INDICES_EXT: u32 = 5294;
     /// A mesh shader's line index array: two vertex indices per primitive (a `uvec2`).

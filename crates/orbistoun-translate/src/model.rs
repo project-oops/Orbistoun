@@ -855,6 +855,12 @@ pub trait Model {
         None
     }
 
+    /// The sample mask output of a fragment module that exports one: the `Output` pointer type to
+    /// its one `uint`, and the array variable. [`None`] for any other module.
+    fn sample_mask_output(&self) -> Option<(Id, Id)> {
+        None
+    }
+
     /// Declares how many vertices and primitives this workgroup will emit.
     ///
     /// [`None`] at any stage but mesh; the caller turns that into a refusal naming the
@@ -2609,7 +2615,7 @@ fn export<M: Model + ?Sized>(
         return Ok(());
     }
     if *target == EXPORT_MRTZ {
-        return depth_export(model, instruction, a);
+        return depth_export(model, instruction, (a, c));
     }
     let (vec4, colour) = colour_target_output(model, instruction, *target, (vec4, colour))?;
     // An integer target takes the exported bits as they are, and a compressed export to one packs
@@ -2696,39 +2702,75 @@ fn colour_target_output<M: Model + ?Sized>(
     }
 }
 
-/// `exp mrtz`: the depth a pixel replaces its rasterised one with, from the first source - Z, the
-/// only channel translated. Stencil, sample mask and the `mrt0` alpha (channels 1 to 3) and a
-/// compressed export are refused by name. With `vm` set a pixel whose lane is inactive is
-/// discarded, as for a colour export.
+/// `exp mrtz`: the depth a pixel replaces its rasterised one with, from the first source, and the
+/// samples it keeps, from the third - Z and the sample mask of the 32-bit form, which Mesa puts in
+/// channels 0 and 2 (`ac_nir_lower_ps_late.c`, `emit_ps_mrtz_export`). Stencil and the `mrt0` alpha
+/// (channels 1 and 3) and a compressed export are refused by name. With `vm` set a pixel whose
+/// lane is inactive is discarded, as for a colour export.
 fn depth_export<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    source: &Operand,
+    (depth_source, mask_source): (&Operand, &Operand),
 ) -> Result<(), TranslateError> {
     let enabled = instruction.word & EXPORT_ENABLE_MASK;
-    if enabled != 1 || instruction.word & EXPORT_COMPRESSED != 0 {
+    if enabled & !(MRTZ_DEPTH | MRTZ_SAMPLE_MASK) != 0
+        || enabled == 0
+        || instruction.word & EXPORT_COMPRESSED != 0
+    {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
-                "a depth export that writes stencil, the sample mask or alpha, or is ",
-                "compressed, is not translated - only Z alone is"
+                "a depth export that writes stencil or alpha, or is compressed, is not ",
+                "translated - only Z and the sample mask are"
             ),
         });
     }
-    let Some((_, depth)) = model.depth_output() else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a depth export from a module with no depth output: only a pixel shader has one",
-        });
+    let no_output = |what| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: what,
+    };
+    let depth = if enabled & MRTZ_DEPTH == 0 {
+        None
+    } else {
+        Some(model.depth_output().ok_or_else(|| {
+            no_output(
+                "a depth export from a module with no depth output: only a pixel shader has one",
+            )
+        })?)
+    };
+    let mask = if enabled & MRTZ_SAMPLE_MASK == 0 {
+        None
+    } else {
+        Some(model.sample_mask_output().ok_or_else(|| {
+            no_output("a sample mask export from a module with no sample mask output: only a pixel shader has one")
+        })?)
     };
     discard_inactive(model, instruction);
     // Lane zero: one fragment is one pixel.
-    let bits = model.read_source(instruction, source, 0)?;
-    let value = model.as_float(bits);
-    model.builder().function(op::STORE, &[depth.0, value.0]);
+    if let Some((_, depth)) = depth {
+        let bits = model.read_source(instruction, depth_source, 0)?;
+        let value = model.as_float(bits);
+        model.builder().function(op::STORE, &[depth.0, value.0]);
+    }
+    if let Some((pointer, mask)) = mask {
+        let bits = model.read_source(instruction, mask_source, 0)?;
+        let first = model.constant(0);
+        let element = model.builder().id();
+        model
+            .builder()
+            .function(op::ACCESS_CHAIN, &[pointer.0, element.0, mask.0, first.0]);
+        model.builder().function(op::STORE, &[element.0, bits.0]);
+    }
     model.count();
     Ok(())
 }
+
+/// The channel of an `exp mrtz` that carries Z.
+const MRTZ_DEPTH: u32 = 1;
+
+/// The channel of an `exp mrtz` that carries the sample mask, in the 32-bit form
+/// (`ac_nir_lower_ps_late.c`, `emit_ps_mrtz_export`).
+const MRTZ_SAMPLE_MASK: u32 = 4;
 
 /// `value` with only the `enabled` channels taken from it, the rest as the output `colour` held
 /// them; `value` itself when every channel is enabled.
