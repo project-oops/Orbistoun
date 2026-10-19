@@ -1045,6 +1045,9 @@ fn dispatch_image(
             orbistoun_gpu::pipeline::TexelFormat::R32Uint => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R32Uint
             }
+            orbistoun_gpu::pipeline::TexelFormat::R16Uint => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::R16Uint
+            }
             orbistoun_gpu::pipeline::TexelFormat::Rgba16Float => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba16Float
             }
@@ -2688,6 +2691,10 @@ fn log_execution() {
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
     }
+    report_commands(
+        "the stream that stopped its queue",
+        &orbistoun_gpu::agc_driver::stalled_commands(),
+    );
     log_flip_origins();
     log_dispatch_writes();
     // The program a refused dispatch runs, to read the refusal against.
@@ -2764,6 +2771,31 @@ fn report_stepped_aside() {
     if let Some(orbistoun_gpu::cp::Stopped::WaitNeverSatisfied { address, .. }) = first {
         report_unsatisfied_wait(address);
     }
+    report_commands("the first", &orbistoun_gpu::agc_driver::aside_commands());
+}
+
+/// Lists the commands a stream that stopped ran before it stopped, named where the packet
+/// vocabulary names them: a command carried out here without a memory write it makes on the
+/// console is found beside the wait that waits for that write.
+fn report_commands(stream: &str, commands: &[(u8, usize)]) {
+    if commands.is_empty() {
+        return;
+    }
+    let vocabulary = orbistoun_gpu::registers::Vocabulary::builtin().ok();
+    let named: Vec<String> = commands
+        .iter()
+        .map(|&(opcode, times)| {
+            let name = vocabulary
+                .as_ref()
+                .and_then(|vocabulary| vocabulary.opcode_name(opcode))
+                .map_or_else(|| format!("{opcode:#04x}"), str::to_owned);
+            format!("{name} x{times}")
+        })
+        .collect();
+    tracing::info!(
+        "the commands {stream} ran before it stopped: {}",
+        named.join(", ")
+    );
 }
 
 /// Says what last filled the word a queue stopped waiting on, where something orbistoun tracks

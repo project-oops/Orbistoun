@@ -5679,6 +5679,56 @@ fn execute_part(bytes: &[u8], from: u32, submission: &Submission) -> cp::CpExecu
     executed
 }
 
+/// The commands of `bytes` before byte `until`, by opcode, with how many times each ran: what a
+/// stall's report lists, so a command carried out here without a memory write it makes on the
+/// console shows beside the wait that waits for that write.
+#[must_use]
+pub fn commands_before(bytes: &[u8], until: u32) -> Vec<(u8, usize)> {
+    let mut counts: std::collections::BTreeMap<u8, usize> = std::collections::BTreeMap::new();
+    for packet in crate::packet::walk(bytes)
+        .packets
+        .iter()
+        .take_while(|packet| packet.offset < until)
+    {
+        if let crate::packet::PacketKind::Command { opcode } = packet.kind {
+            *counts.entry(opcode).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
+}
+
+/// The commands the stream that stopped its queue ran before it stopped ([`commands_before`]).
+fn stalled_commands_kept() -> &'static Mutex<Vec<(u8, usize)>> {
+    static KEPT: Mutex<Vec<(u8, usize)>> = Mutex::new(Vec::new());
+    &KEPT
+}
+
+/// The commands the stream that stopped its queue ran before it stopped, by opcode with how many
+/// times each ran; empty while no stream has stopped one.
+#[must_use]
+pub fn stalled_commands() -> Vec<(u8, usize)> {
+    stalled_commands_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// The commands the first compute stream stepped aside ran before its wait, as
+/// [`stalled_commands`]; empty while none is stepped aside.
+#[must_use]
+pub fn aside_commands() -> Vec<(u8, usize)> {
+    let aside = aside()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    aside
+        .front()
+        .and_then(|first| {
+            let until = first.stopped.and_then(cp::Stopped::offset)?;
+            Some(commands_before(&first.bytes, until))
+        })
+        .unwrap_or_default()
+}
+
 /// Records a stream's execution, ended where it stopped: one that did not complete stops its queue.
 fn finish(bytes: &[u8], executed: cp::CpExecution) {
     if let Ok(mut record) = execution_record().lock() {
@@ -5691,6 +5741,11 @@ fn finish(bytes: &[u8], executed: cp::CpExecution) {
         note_held(bytes, from);
     }
     if executed.stopped != cp::Stopped::Completed {
+        if let Some(from) = executed.stopped.offset() {
+            *stalled_commands_kept()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = commands_before(bytes, from);
+        }
         *queue_stall()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executed);
@@ -5800,6 +5855,46 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverSubmitAcb", submit_acb),
         ("sceAgcDriverSubmitDcb", submit_dcb),
     ]
+}
+
+#[cfg(test)]
+mod stall_tests {
+    /// The commands a stream ran before it stopped are counted by opcode, the one it stopped at and
+    /// any after it left out: Grand Theft Auto V's graphics and compute queues each wait for a label
+    /// nothing tracked writes, and which commands ran before the waits is where the writer that
+    /// went unmodelled is found.
+    #[test]
+    fn a_stall_lists_the_commands_before_it() {
+        use crate::packet::build::command_header;
+        let words = [
+            command_header(0x10, 1), // NOP
+            0,
+            command_header(0x37, 4), // WRITE_DATA
+            0,
+            0,
+            0,
+            0,
+            command_header(0x10, 1),
+            0,
+            command_header(0x3C, 6), // WAIT_REG_MEM, where it stops
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            command_header(0x37, 4),
+            0,
+            0,
+            0,
+            0,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            super::commands_before(&bytes, 9 * 4),
+            vec![(0x10, 2), (0x37, 1)]
+        );
+    }
 }
 
 #[cfg(test)]
