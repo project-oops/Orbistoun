@@ -6151,6 +6151,85 @@ fn three_and_four_word_local_writes_read_back() {
     assert_eq!(read, [11, 22, 33, 44, 55, 66, 77]);
 }
 
+/// The loading-screen reduction's float local atomics (DS 18, 19): `ds_min_f32` and `ds_max_f32`
+/// keep the float minimum and maximum of the word and every running lane's value (D919). Lane `i`
+/// holds `i - 32.0`; a word starting at 0.5 ends at -32.0 and 31.0 across a wave of 64.
+#[test]
+fn local_float_atomics_take_the_minimum_and_maximum() {
+    if !device_or_skip("local_float_atomics_take_the_minimum_and_maximum") {
+        return;
+    }
+    let mut program: Vec<u32> = lane_index_into(1).to_vec();
+    program.push(vop1_vv("v_cvt_f32_i32_e32", 1, 1));
+    program.extend(v_mov_literal(2, (-32.0f32).to_bits()));
+    program.push(vop2_vv("v_add_f32_e32", 1, 1, 2));
+    program.push(v_mov_inline(0, 0));
+    program.extend(v_mov_literal(3, 0.5f32.to_bits()));
+    for offset in [0, 4] {
+        program.extend(ds_write(0, 3, offset));
+    }
+    program.push(s_waitcnt());
+    program.extend([head("ds_min_f32"), 1 << 8]);
+    program.extend([head("ds_max_f32") | 4, 1 << 8]);
+    program.push(s_waitcnt());
+    for (dst, offset) in [(5, 0), (6, 4)] {
+        program.extend(ds_read(dst, 0, offset));
+    }
+    program.push(s_waitcnt());
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 5), (-32.0f32).to_bits(), "the minimum");
+    assert_eq!(vector(&registers, 6), 31.0f32.to_bits(), "the maximum");
+}
+
+/// The reduction's wide local moves (DS 77, 118, 255): `ds_write_b64` writes two words and
+/// `ds_read_b64` and `ds_read_b128` read two and four back.
+#[test]
+fn two_and_four_word_local_moves_read_back() {
+    if !device_or_skip("two_and_four_word_local_moves_read_back") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 0)];
+    for (register, value) in (1..=4).zip([11_u32, 22, 33, 44]) {
+        program.extend(v_mov_literal(register, value));
+    }
+    program.extend([head("ds_write_b64"), 1 << 8]);
+    program.extend([head("ds_write_b64") | 8, 3 << 8]);
+    program.push(s_waitcnt());
+    program.extend([head("ds_read_b128"), 4 << 24]);
+    program.extend([head("ds_read_b64") | 8, 2 << 24]);
+    program.push(s_waitcnt());
+    program.push(s_endpgm());
+    let registers = run(&program);
+    let wide: Vec<u32> = (4..8).map(|n| vector(&registers, n)).collect();
+    assert_eq!(wide, [11, 22, 33, 44]);
+    assert_eq!((vector(&registers, 2), vector(&registers, 3)), (33, 44));
+}
+
+/// `s_min_i32` keeps the signed minimum and sets the condition code where the first source is the
+/// smaller: the reduction's `s_min_i32 vcc_lo, s26, vcc_lo` (SOP2 6).
+#[test]
+fn a_scalar_signed_minimum_keeps_the_smaller() {
+    if !device_or_skip("a_scalar_signed_minimum_keeps_the_smaller") {
+        return;
+    }
+    let sop2 = |dst: u32, a: u32, b: u32| head("s_min_i32") | dst << 16 | b << 8 | a;
+    assert_eq!(
+        sop2(0x6a, 0x1a, 0x6a),
+        0x836a_6a1a,
+        "Grand Theft Auto V's word"
+    );
+    let mut program = Vec::new();
+    program.extend(s_mov_b32_literal(2, (-3_i32).cast_unsigned()));
+    program.extend(s_mov_b32_literal(3, 4));
+    program.push(sop2(1, 2, 3));
+    program.push(sop2(4, 3, 2));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 1), (-3_i32).cast_unsigned());
+    assert_eq!(scalar(&registers, 4), (-3_i32).cast_unsigned());
+}
+
 /// The scene's local atomics (DS 7, 8, 32): `ds_min_u32` and `ds_max_u32` keep the unsigned
 /// minimum and maximum of the word and every running lane's value, and `ds_add_rtn_u32` adds each
 /// lane's value, answering what the word held before. Every lane of the wave takes part: the word

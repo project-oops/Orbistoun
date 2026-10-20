@@ -26,3 +26,15 @@
 0x000080 8 image_gather4_lz v[0:3], v[4:5], s[0:7], s[8:11] dmask:0x1 dim:SQ_RSRC_IMG_2D
 0x000088 4 s_andn1_saveexec_b64 s[0:1], s[2:3]
 0x00008c 4 s_andn1_saveexec_b64 s[4:5], vcc
+0x000090 4 s_min_i32 vcc_lo, s26, vcc_lo
+0x000094 4 s_min_i32 s0, s1, -2
+0x000098 8 ds_write_b64 v12, v[4:5] offset:16
+0x0000a0 8 ds_write_b64 v0, v[2:3]
+0x0000a8 8 ds_min_f32 v0, v9
+0x0000b0 8 ds_max_f32 v0, v6 offset:12
+0x0000b8 8 ds_read_b128 v[0:3], v4
+0x0000c0 8 ds_read_b64 v[4:5], v4 offset:16
+0x0000c8 8 buffer_atomic_fmin v0, v1, s[4:7], 0 offen
+0x0000d0 8 buffer_atomic_fmax v3, v2, s[4:7], 0 offen offset:12
+0x0000d8 8 buffer_load_ushort v0, v2, s[32:35], 0 idxen offset:2
+0x0000e0 8 buffer_load_ushort v1, v3, s[4:7], 0 offen

@@ -52,6 +52,16 @@ pub const SUPPORTED: &[&str] = &[
     "ds_read_b96",
     "ds_write_b96",
     "ds_min_u32",
+    "ds_min_f32",
+    "ds_max_f32",
+    "ds_write_b64",
+    "ds_read_b64",
+    "ds_read_b128",
+    "s_min_i32",
+    "buffer_atomic_add",
+    "buffer_atomic_fmin",
+    "buffer_atomic_fmax",
+    "buffer_load_ushort",
     "ds_max_u32",
     "ds_add_rtn_u32",
     "ds_write_b128",
@@ -1174,6 +1184,27 @@ pub trait Model {
         Err(TranslateError::Unsupported {
             offset: 0,
             detail: "a store through a bound buffer in a model that binds none (D746)",
+        })
+    }
+
+    /// Combines `value` into word `word_index` of the draw buffer at `slot` by the atomic `opcode`,
+    /// as one indivisible step, in `lane` where `landed` holds - elsewhere the word is left alone -
+    /// and answers what the word held (D919).
+    ///
+    /// # Errors
+    ///
+    /// In a model that binds no draw buffers.
+    fn atomic_draw_buffer(
+        &mut self,
+        slot: u32,
+        (word_index, opcode, value): (Id, u16, Id),
+        landed: Id,
+        lane: u32,
+    ) -> Result<Id, TranslateError> {
+        let _ = (slot, word_index, opcode, value, landed, lane);
+        Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "a buffer atomic in a model that binds no buffers (D919)",
         })
     }
 
@@ -2998,7 +3029,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_orn2_b32" | "s_or_b32"
         | "s_xor_b32" | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32"
         | "s_lshr_b32" | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
-        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" => {
+        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" => {
             scalar_integer(model, instruction, name)
         }
 
@@ -3286,6 +3317,9 @@ fn memory_instruction<M: Model + ?Sized>(
         name if name.starts_with("buffer_store_format_") => {
             format_buffer_store(model, instruction, name)
         }
+        "buffer_atomic_add" | "buffer_atomic_fmin" | "buffer_atomic_fmax" => {
+            buffer_atomic(model, instruction, name)
+        }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
         // The GDS bit (17 on GFX10, `aco_assembler.cpp:513`) points the access at the global data
@@ -3305,18 +3339,9 @@ fn memory_instruction<M: Model + ?Sized>(
         }
         "ds_write_b32" | "ds_read_b32" | "ds_read_b96" | "ds_write2_b32" | "ds_read2_b32"
         | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" | "ds_write_b96" | "ds_write_b128"
-        | "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" => {
-            match name {
-                "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" => {
-                    local_share_atomic(model, instruction, name)
-                }
-                "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
-                "ds_read_b96" => local_share_words(model, instruction, 3),
-                "ds_write_b96" => local_share_write_words(model, instruction, 3),
-                "ds_write_b128" => local_share_write_words(model, instruction, 4),
-                "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
-                _ => local_share_merge(model, instruction, name),
-            }?;
+        | "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" | "ds_min_f32" | "ds_max_f32"
+        | "ds_write_b64" | "ds_read_b64" | "ds_read_b128" => {
+            local_share_instruction(model, instruction, name)?;
             model.after_local_access();
             Ok(())
         }
@@ -5051,6 +5076,11 @@ fn scalar_integer<M: Model + ?Sized>(
         // `S_MUL_I32`: the product's low 32 bits, which signed and unsigned multiplication share;
         // the condition code is not written.
         "s_mul_i32" => (model.binary(op::IMUL, left, right), None),
+        // `S_MIN_I32`: the signed minimum, and whether the first source is the smaller.
+        "s_min_i32" => {
+            let less = model.compare(op::SLESS_THAN, left, right);
+            (model.select(less, left, right), Some(less))
+        }
         // `S_MUL_HI_U32`: the unsigned product's high 32 bits; the condition code is not written.
         "s_mul_hi_u32" => (multiply_high(model, left, right), None),
         // `S_LSHR_B32`: `D = S0 >> S1[4:0]`, logical, and whether it is non-zero.
@@ -6181,12 +6211,28 @@ fn local_share_atomic<M: Model + ?Sized>(
         "ds_max_u32" => op::ATOMIC_U_MAX,
         _ => op::ATOMIC_I_ADD,
     };
+    let float = match name {
+        "ds_min_f32" => Some(false),
+        "ds_max_f32" => Some(true),
+        _ => None,
+    };
     for lane in running_lanes(model) {
         let base = model.read_source(instruction, address, lane)?;
         let byte_offset = model.constant(offset);
         let byte_address = model.add(base, byte_offset);
         let index = model.local_word_index(byte_address);
         let value = model.read_source(instruction, data, lane)?;
+        // A float minimum or maximum, as two integer atomics split by the value's sign (D919);
+        // where one invocation runs the wave, folded in order as floats.
+        if let Some(maximum) = float {
+            let [(first, kept), (second, other)] = float_atomic_parts(model, value, maximum);
+            if model.atomic_local(first, index, kept, lane).is_some() {
+                model.atomic_local(second, index, other, lane);
+            } else {
+                fold_float_in_order(model, index, (value, maximum), lane)?;
+            }
+            continue;
+        }
         let before = if let Some(before) = model.atomic_local(opcode, index, value, lane) {
             before
         } else {
@@ -6198,6 +6244,85 @@ fn local_share_atomic<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// A local-data-share access, by its name: an atomic, or a read or write of one to four words.
+fn local_share_instruction<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    match name {
+        "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" | "ds_min_f32" | "ds_max_f32" => {
+            local_share_atomic(model, instruction, name)
+        }
+        "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
+        "ds_read_b64" => local_share_words(model, instruction, 2),
+        "ds_read_b128" => local_share_words(model, instruction, 4),
+        "ds_write_b64" => local_share_write_words(model, instruction, 2),
+        "ds_read_b96" => local_share_words(model, instruction, 3),
+        "ds_write_b96" => local_share_write_words(model, instruction, 3),
+        "ds_write_b128" => local_share_write_words(model, instruction, 4),
+        "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
+        _ => local_share_merge(model, instruction, name),
+    }
+}
+
+/// The identity of an atomic `opcode`: what folded in changes nothing.
+#[must_use]
+pub const fn atomic_identity(opcode: u16) -> u32 {
+    match opcode {
+        op::ATOMIC_U_MIN => u32::MAX,
+        op::ATOMIC_S_MIN => 0x7FFF_FFFF,
+        op::ATOMIC_S_MAX => 0x8000_0000,
+        _ => 0,
+    }
+}
+
+/// A float minimum (or, where `maximum`, maximum) of a word and `value`, as two integer atomics
+/// split by `value`'s sign (D919): a value whose sign bit is clear orders against any float as its
+/// bits do as a signed integer, so the signed minimum keeps the smaller; one whose sign bit is set
+/// orders against any float reversed as an unsigned integer, so the unsigned maximum keeps the
+/// smaller. Each lane gives the atomic its sign does not choose that atomic's identity. A NaN and
+/// the zeros' order are not modelled.
+fn float_atomic_parts<M: Model + ?Sized>(
+    model: &mut M,
+    value: Id,
+    maximum: bool,
+) -> [(u16, Id); 2] {
+    let sign_bit = model.constant(0x8000_0000);
+    let sign = model.binary(op::BITWISE_AND, value, sign_bit);
+    let zero = model.constant(0);
+    let positive = model.compare(op::IEQUAL, sign, zero);
+    let (by_sign, reversed) = if maximum {
+        (op::ATOMIC_S_MAX, op::ATOMIC_U_MIN)
+    } else {
+        (op::ATOMIC_S_MIN, op::ATOMIC_U_MAX)
+    };
+    let by_sign_identity = model.constant(atomic_identity(by_sign));
+    let reversed_identity = model.constant(atomic_identity(reversed));
+    let first = model.select(positive, value, by_sign_identity);
+    let second = model.select(positive, reversed_identity, value);
+    [(by_sign, first), (reversed, second)]
+}
+
+/// [`local_share_atomic`]'s float step where one invocation runs the wave: the word read, the float
+/// minimum (or maximum) of it and `value` written back, lane after lane.
+fn fold_float_in_order<M: Model + ?Sized>(
+    model: &mut M,
+    index: Id,
+    (value, maximum): (Id, bool),
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let before = model.read_local(index)?;
+    let (new, old) = (model.as_float(value), model.as_float(before));
+    let less = model.compare(op::FORD_LESS_THAN, new, old);
+    let after = if maximum {
+        model.select(less, before, value)
+    } else {
+        model.select(less, value, before)
+    };
+    model.write_local(index, after, lane)
 }
 
 /// [`local_share_atomic`]'s step where one invocation runs the wave: the word read, `value` folded in
@@ -6911,7 +7036,7 @@ fn typed_buffer_memory<M: Model + ?Sized>(
     // A plain-word format moves whole dwords through the untyped path; a narrow format packs
     // components inside words and goes to `packed_buffer_memory`.
     if format.is_plain_words() {
-        buffer_access(model, instruction, loading, channels)
+        buffer_access(model, instruction, loading, (channels, None))
     } else {
         packed_buffer_memory(model, instruction, format, loading)
     }
@@ -7119,7 +7244,7 @@ fn format_buffer_store<M: Model + ?Sized>(
         });
     }
     if format.is_plain_words() {
-        buffer_access(model, instruction, false, written)
+        buffer_access(model, instruction, false, (written, None))
     } else {
         packed_buffer_memory(model, instruction, format, false)
     }
@@ -7537,6 +7662,10 @@ fn buffer_memory<M: Model + ?Sized>(
     // that many consecutive dwords into consecutive registers, as `buffer_access` does per
     // component.
     let loading = name.starts_with("buffer_load");
+    // A sixteen-bit load reads its half word zero-extended into one register.
+    if name == "buffer_load_ushort" {
+        return buffer_access(model, instruction, true, (1, Some(2)));
+    }
     let components = match name.rsplit_once("dword") {
         Some((_, "")) => 1,
         Some((_, "x2")) => 2,
@@ -7549,19 +7678,126 @@ fn buffer_memory<M: Model + ?Sized>(
             });
         }
     };
-    buffer_access(model, instruction, loading, components)
+    buffer_access(model, instruction, loading, (components, None))
+}
+
+/// `buffer_atomic_add`, `buffer_atomic_fmin` and `buffer_atomic_fmax` through a dispatch's bound
+/// buffer (D919): one word at the address and bounds an untyped access has, combined as one
+/// indivisible step - a sum, or a float minimum or maximum as two integer atomics split by the
+/// value's sign - answering what it held into the data register where `GLC` (bit 14) asks. An
+/// access out of bounds leaves the word and returns zero.
+fn buffer_atomic<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let [
+        Operand::Vector(register),
+        vaddr,
+        Operand::Scalar(resource_base),
+        soffset,
+    ] = instruction.operands.as_slice()
+    else {
+        return Err(refuse(
+            "a buffer atomic is not a data register, an address, a descriptor and an offset",
+        ));
+    };
+    let (register, resource_base) = (u32::from(*register), u32::from(*resource_base));
+    if resource_base + 4 > SCALAR_REGISTERS {
+        return Err(refuse(
+            "a buffer resource constant runs past the end of the register file",
+        ));
+    }
+    let word = instruction.word;
+    let (literal_offset, offen, idxen) = (word & 0xFFF, word & 1 << 12 != 0, word & 1 << 13 != 0);
+    let returning = word & 1 << 14 != 0;
+    if idxen {
+        return Err(refuse(
+            "a buffer atomic indexed by record is not translated",
+        ));
+    }
+    let float = match name {
+        "buffer_atomic_fmin" => Some(false),
+        "buffer_atomic_fmax" => Some(true),
+        _ => None,
+    };
+    let resource = read_buffer_resource(model, resource_base);
+    let (slot, addressed) = buffer_reach(model, instruction, (false, true), resource)?;
+    let Some(slot) = slot else {
+        return Err(refuse(
+            "a buffer atomic through the memory window rather than a bound buffer (D919)",
+        ));
+    };
+    let flags = model.read_scalar(resource_base + 3);
+    let instruction_offset = model.constant(literal_offset);
+    for lane in running_lanes(model) {
+        let scalar_offset = model.read_source(instruction, soffset, lane)?;
+        let voffset = if offen {
+            Some(model.read_source(instruction, vaddr, lane)?)
+        } else {
+            None
+        };
+        let zero = model.constant(0);
+        let offset = model.add(instruction_offset, voffset.unwrap_or(zero));
+        let address = buffer_address(
+            model,
+            &addressed,
+            scalar_offset,
+            instruction_offset,
+            voffset,
+            None,
+        );
+        let outside = buffer_out_of_bounds(model, &resource, flags, offset, zero, 4);
+        let bool_type = model.bool_type();
+        let b = model.builder();
+        let landed = b.id();
+        b.function(op::LOGICAL_NOT, &[bool_type.0, landed.0, outside.0]);
+        let two = model.constant(2);
+        let word_index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+        let value = model.read_source(instruction, &Operand::Vector(register as u16), lane)?;
+        let before = match float {
+            Some(maximum) => {
+                let [(first, kept), (second, other)] = float_atomic_parts(model, value, maximum);
+                let by_sign =
+                    model.atomic_draw_buffer(slot, (word_index, first, kept), landed, lane)?;
+                let reversed =
+                    model.atomic_draw_buffer(slot, (word_index, second, other), landed, lane)?;
+                let sign_bit = model.constant(0x8000_0000);
+                let sign = model.binary(op::BITWISE_AND, value, sign_bit);
+                let positive = model.compare(op::IEQUAL, sign, zero);
+                model.select(positive, by_sign, reversed)
+            }
+            None => model.atomic_draw_buffer(
+                slot,
+                (word_index, op::ATOMIC_I_ADD, value),
+                landed,
+                lane,
+            )?,
+        };
+        if returning {
+            let kept = pick(model, outside, zero, before);
+            model.write_vector_lane(register, lane, kept);
+        }
+    }
+    model.count();
+    Ok(())
 }
 
 /// The body shared by the typed and untyped buffer accesses.
 ///
 /// They differ only in whether a format was checked and how many components move, and share the
 /// descriptor, the addressing equation and both bounds checks. `components` are consecutive dwords
-/// at consecutive addresses, written to consecutive registers.
+/// at consecutive addresses, written to consecutive registers. `narrow`, for a load of fewer bytes
+/// than a word, is how many: read from the access's own byte, zero-extended.
 fn buffer_access<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     loading: bool,
-    components: u32,
+    (components, narrow): (u32, Option<u32>),
 ) -> Result<(), TranslateError> {
     let [data, vaddr, resource_operand, soffset] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
@@ -7654,7 +7890,8 @@ fn buffer_access<M: Model + ?Sized>(
 
             // Two bounds: the buffer's record count and the module's guest-memory window. An access
             // can satisfy one and not the other.
-            let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, 4);
+            let outside =
+                buffer_out_of_bounds(model, &resource, flags, offset, index, narrow.unwrap_or(4));
             let register = register + component;
             // A bound buffer holds every word its descriptor admits; only the window can be
             // escaped.
@@ -7665,7 +7902,10 @@ fn buffer_access<M: Model + ?Sized>(
 
             if loading {
                 // Out of range reads zero, as the reference states.
-                let value = read_reached(model, slot, address)?;
+                let value = match narrow {
+                    Some(bytes) => read_narrow(model, slot, address, bytes)?,
+                    None => read_reached(model, slot, address)?,
+                };
                 let kept = pick(model, outside, zero, value);
                 model.write_vector_lane(register, lane, kept);
             } else {
@@ -7677,6 +7917,19 @@ fn buffer_access<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// The `bytes` at byte `address`, fewer than a word, zero-extended: through the window, or from the
+/// draw buffer at `slot` at the access's own byte.
+fn read_narrow<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<u32>,
+    address: Id,
+    bytes: u32,
+) -> Result<Id, TranslateError> {
+    let element = read_element(model, slot, address, 1)?;
+    let mask = model.constant((1_u32 << (8 * bytes)) - 1);
+    Ok(model.binary(op::BITWISE_AND, element[0], mask))
 }
 
 /// Whether an exact module's buffer access leaves the memory it can place: a descriptor whose

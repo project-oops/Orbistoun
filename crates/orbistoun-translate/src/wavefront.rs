@@ -5106,10 +5106,7 @@ impl Model for Wavefront<'_> {
         if self.invocation.is_none() && self.group_waves() <= 1 {
             return None;
         }
-        let identity = match opcode {
-            op::ATOMIC_U_MIN => u32::MAX,
-            _ => 0,
-        };
+        let identity = model::atomic_identity(opcode);
         let value = match self.lane_known(lane) {
             Some(true) => value,
             Some(false) => Self::constant(self, identity),
@@ -5987,6 +5984,98 @@ impl Model for Wavefront<'_> {
             self.mark_written(mask, (buffer, index), (landed, active));
         }
         Ok(())
+    }
+
+    fn atomic_draw_buffer(
+        &mut self,
+        slot: u32,
+        (word_index, opcode, value): (Id, u16, Id),
+        landed: Id,
+        lane: u32,
+    ) -> Result<Id, TranslateError> {
+        let refuse = |detail| TranslateError::Unsupported { offset: 0, detail };
+        let Some((array, _)) = self.draw_buffers else {
+            return Err(refuse(
+                "a buffer atomic in a module that declares none (D919)",
+            ));
+        };
+        if self.stage == Stage::Mesh {
+            return Err(refuse(
+                "a buffer atomic in a primitive shader, whose buffers are an arena (D747)",
+            ));
+        }
+        // A lane that does not run, or whose access does not land, folds in the identity: the word
+        // is left as it is, with no branch around the atomic.
+        let active = match self.lane_known(lane) {
+            Some(true) => None,
+            _ => Some(self.lane_active(lane)),
+        };
+        let identity = Self::constant(self, model::atomic_identity(opcode));
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let buffer = Self::constant(self, slot);
+        let member = Self::constant(self, 0);
+        let zero = member;
+        let scope = Self::constant(self, orbistoun_spirv::scope::DEVICE);
+        let semantics = Self::constant(
+            self,
+            orbistoun_spirv::semantics::ACQUIRE_RELEASE
+                | orbistoun_spirv::semantics::UNIFORM_MEMORY,
+        );
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[array.block_ptr.0, block.0, array.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        let inside = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, inside.0, word_index.0, length.0],
+        );
+        let index = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, index.0, inside.0, word_index.0, zero.0],
+        );
+        let mut takes = b.id();
+        b.function(op::LOGICAL_AND, &[bool_type.0, takes.0, inside.0, landed.0]);
+        if let Some(active) = active {
+            let both = b.id();
+            b.function(op::LOGICAL_AND, &[bool_type.0, both.0, takes.0, active.0]);
+            takes = both;
+        }
+        let folded = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, folded.0, takes.0, value.0, identity.0],
+        );
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                array.element_ptr.0,
+                pointer.0,
+                array.variable.0,
+                buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let before = b.id();
+        b.function(
+            opcode,
+            &[
+                u32_type.0,
+                before.0,
+                pointer.0,
+                scope.0,
+                semantics.0,
+                folded.0,
+            ],
+        );
+        Ok(before)
     }
 
     fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {

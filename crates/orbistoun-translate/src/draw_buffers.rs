@@ -778,7 +778,9 @@ fn writes_memory(name: &str) -> bool {
 /// Whether an instruction is a buffer store a dispatch's bound buffer takes (D746): an untyped one,
 /// or one converting by its descriptor's format (D738), which addresses the buffer the same way.
 fn bound_buffer_store(name: &str) -> bool {
-    name.starts_with("buffer_store_dword") || name.starts_with("buffer_store_format_")
+    name.starts_with("buffer_store_dword")
+        || name.starts_with("buffer_store_format_")
+        || name.starts_with("buffer_atomic_")
 }
 
 /// Whether an instruction reaches an image a dispatch binds whole and writes back exactly, as it
@@ -954,6 +956,10 @@ fn vector_payload(instruction: &Instruction, name: &str) -> u32 {
         && "xyzw".starts_with(channels)
     {
         return 4 * u32::try_from(channels.len()).unwrap_or(4);
+    }
+    // An atomic moves one word.
+    if name.starts_with("buffer_atomic_") {
+        return 4;
     }
     match name.rsplit_once("dword") {
         Some((_, "")) => 4,

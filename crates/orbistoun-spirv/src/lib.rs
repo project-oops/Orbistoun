@@ -103,6 +103,12 @@ pub mod op {
     /// Keeps the unsigned maximum of the word a pointer names and a value, as one indivisible step,
     /// answering what it held.
     pub const ATOMIC_U_MAX: u16 = 239;
+    /// Keeps the signed minimum of the word a pointer names and a value, as one indivisible step,
+    /// answering what it held.
+    pub const ATOMIC_S_MIN: u16 = 236;
+    /// Keeps the signed maximum of the word a pointer names and a value, as one indivisible step,
+    /// answering what it held.
+    pub const ATOMIC_S_MAX: u16 = 238;
     /// A floating-point type.
     pub const TYPE_FLOAT: u16 = 22;
     /// A function type.
@@ -497,6 +503,8 @@ pub mod semantics {
     pub const ACQUIRE_RELEASE: u32 = 0x8;
     /// The ordering applies to workgroup memory.
     pub const WORKGROUP_MEMORY: u32 = 0x100;
+    /// The ordering applies to storage buffers.
+    pub const UNIFORM_MEMORY: u32 = 0x40;
 }
 
 /// Built-in variables, by their decoration value.
@@ -2540,6 +2548,20 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     (
         op::ATOMIC_I_ADD,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_S_MIN,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_S_MAX,
         Some(1),
         &[0, 2, 3, 4, 5],
         None,

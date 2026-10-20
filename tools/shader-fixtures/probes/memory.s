@@ -336,3 +336,25 @@ buffer_atomic_add v45, v5, s[20:23], s16 offen
 buffer_atomic_add v24, v63, s[28:31], s26 offen
 buffer_atomic_add v58, v11, s[36:39], s36 offen
 buffer_atomic_add v200, v130, s[96:99], s46 offen
+
+// ---- the reduction's wide local moves and float atomics (PPSA04263) --------------------------
+ds_write_b64 v12, v[4:5] offset:16
+ds_write_b64 v130, v[200:201] offset:65535
+ds_read_b64 v[4:5], v4 offset:16
+ds_read_b64 v[130:131], v77 offset:3
+ds_read_b128 v[0:3], v4 offset:16
+ds_read_b128 v[200:203], v9 offset:3
+ds_read_b128 v[40:43], v130 offset:65535
+ds_min_f32 v0, v9
+ds_min_f32 v77, v130 offset:65535
+ds_max_f32 v0, v6 offset:12
+ds_max_f32 v200, v9 offset:3
+buffer_atomic_fmin v4, v51, s[12:15], s6 offen
+buffer_atomic_fmin v45, v5, s[20:23], s16 offen
+buffer_atomic_fmin v200, v130, s[96:99], s46 offen
+buffer_atomic_fmax v4, v51, s[12:15], s6 offen
+buffer_atomic_fmax v45, v5, s[20:23], s16 offen
+buffer_atomic_fmax v200, v130, s[96:99], s46 offen
+buffer_load_ushort v4, v51, s[12:15], s6 offen
+buffer_load_ushort v45, v5, s[20:23], s16 offen
+buffer_load_ushort v200, v130, s[96:99], s46 offen

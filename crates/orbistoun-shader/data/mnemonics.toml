@@ -44,6 +44,16 @@ name = "ds_write2_b32"
 
 [[mnemonic]]
 family = "DS"
+opcode = 18
+name = "ds_min_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 19
+name = "ds_max_f32"
+
+[[mnemonic]]
+family = "DS"
 opcode = 30
 name = "ds_write_b8"
 
@@ -64,6 +74,16 @@ name = "ds_read_u8"
 
 [[mnemonic]]
 family = "DS"
+opcode = 77
+name = "ds_write_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 118
+name = "ds_read_b64"
+
+[[mnemonic]]
+family = "DS"
 opcode = 222
 name = "ds_write_b96"
 
@@ -76,6 +96,11 @@ name = "ds_write_b128"
 family = "DS"
 opcode = 254
 name = "ds_read_b96"
+
+[[mnemonic]]
+family = "DS"
+opcode = 255
+name = "ds_read_b128"
 
 [[mnemonic]]
 family = "EXP"
@@ -244,6 +269,11 @@ name = "buffer_store_format_xyzw"
 
 [[mnemonic]]
 family = "MUBUF"
+opcode = 10
+name = "buffer_load_ushort"
+
+[[mnemonic]]
+family = "MUBUF"
 opcode = 12
 name = "buffer_load_dword"
 
@@ -286,6 +316,16 @@ name = "buffer_store_dwordx3"
 family = "MUBUF"
 opcode = 50
 name = "buffer_atomic_add"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 63
+name = "buffer_atomic_fmin"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 64
+name = "buffer_atomic_fmax"
 
 [[mnemonic]]
 family = "SMEM"
@@ -386,6 +426,11 @@ name = "s_add_u32"
 family = "SOP2"
 opcode = 2
 name = "s_add_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 6
+name = "s_min_i32"
 
 [[mnemonic]]
 family = "SOP2"

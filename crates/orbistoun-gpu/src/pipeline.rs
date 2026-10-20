@@ -7051,6 +7051,32 @@ fn unbound_reason(
     let Some(words) = words else {
         return "its descriptor is not readable".to_owned();
     };
+    // A depth surface is the depth target the host holds (D817, D918): say what its route asks.
+    let descriptor = decode_image_descriptor(words);
+    if is_depth_swizzle(descriptor.tiling) && DEPTH_IMAGE_FORMATS.contains(&descriptor.format) {
+        let sampling = match sampler {
+            NamedSampler::Read(decoded) => Some(decoded),
+            _ => None,
+        };
+        return match depth_texture_from(words, source, sampling) {
+            Some(_) => "a depth target the host holds, which it binds".to_owned(),
+            None => format!(
+                "a depth surface of type {} (view layers {:#x}) the module samples as {}{}, its sampler {}",
+                words[3] >> 28,
+                words[4] & (DEPTH_FIELD | BASE_ARRAY_FIELD),
+                shape_sampled(source),
+                if source.compare { " compared" } else { "" },
+                match sampler {
+                    NamedSampler::Read(decoded) if decoded.saturated() != source.saturated => {
+                        "clamping to a half border the module does not saturate for (D743)"
+                    }
+                    NamedSampler::Read(_) => "read",
+                    NamedSampler::Unreadable => "unreadable",
+                    NamedSampler::NoneNamed => "not named",
+                }
+            ),
+        };
+    }
     let bound = match texture_from_words(words, source.slot, memory, texels) {
         Err(why) => return why.to_owned(),
         Ok(bound) => bound,

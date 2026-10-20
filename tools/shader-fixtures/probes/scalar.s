@@ -256,3 +256,8 @@ s_andn1_saveexec_b64 s[0:1], s[2:3]
 s_andn1_saveexec_b64 s[4:5], vcc
 s_andn1_saveexec_b64 s[100:101], s[50:51]
 s_andn1_saveexec_b64 vcc, -1
+
+// ---- s_min_i32: the reduction's signed minimum (PPSA04263) -----------------------------------
+s_min_i32 s0, s1, s2
+s_min_i32 s100, s7, s50
+s_min_i32 s9, s60, s3
