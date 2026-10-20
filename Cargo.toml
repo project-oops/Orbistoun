@@ -27,6 +27,7 @@ members = [
     "crates/orbistoun-systemservice",
     "crates/orbistoun-video",
     "crates/orbistoun-audio",
+    "crates/orbistoun-atrac9",
     "crates/orbistoun-net",
     "crates/orbistoun-input",
 
@@ -321,6 +322,7 @@ orbistoun-translate = { path = "crates/orbistoun-translate" }
 orbistoun-gpu = { path = "crates/orbistoun-gpu" }
 orbistoun-gpu-vulkan = { path = "crates/orbistoun-gpu-vulkan" }
 orbistoun-audio = { path = "crates/orbistoun-audio" }
+orbistoun-atrac9 = { path = "crates/orbistoun-atrac9" }
 orbistoun-audio-host = { path = "crates/orbistoun-audio-host" }
 orbistoun-net = { path = "crates/orbistoun-net" }
 orbistoun-video = { path = "crates/orbistoun-video" }

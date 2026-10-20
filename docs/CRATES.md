@@ -32,6 +32,7 @@ Each crate here is required by everything after it, which is also the order they
 | [orbistoun-systemservice](../crates/orbistoun-systemservice/) | The settings and status a title asks the system about. |
 | [orbistoun-video](../crates/orbistoun-video/) | Video output - swapchain and flips. |
 | [orbistoun-audio](../crates/orbistoun-audio/) | Audio output. |
+| [orbistoun-atrac9](../crates/orbistoun-atrac9/) | ATRAC9 decoding. Pure, no guest knowledge (D926). |
 | [orbistoun-net](../crates/orbistoun-net/) | Networking HLE: declarations for the libraries a title imports. |
 | [orbistoun-input](../crates/orbistoun-input/) | Controller input. |
 

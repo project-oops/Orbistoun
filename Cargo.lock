@@ -3012,6 +3012,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbistoun-atrac9"
+version = "0.1.0"
+
+[[package]]
 name = "orbistoun-audio"
 version = "0.1.0"
 dependencies = [
