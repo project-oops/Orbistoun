@@ -57,6 +57,11 @@ pub struct ModulePlan {
     /// Reported, not part of the plan's identity, since linking changes nothing about them.
     #[serde(default)]
     pub counter_reads: Vec<u64>,
+    /// Every instruction the host lacks, by address, with its mnemonic and how it was made to run:
+    /// `extrq trampoline`, `extrq at-fault`, `mwaitx in-place`, `rdpru refused` (D725, D924).
+    /// Empty on a host that has every one, and part of the plan's identity only when it is not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrites: Vec<(u64, String)>,
 }
 
 impl ModulePlan {
@@ -82,6 +87,11 @@ impl ModulePlan {
             syscalls: Vec::new(),
             amd_only: Vec::new(),
             counter_reads: Vec::new(),
+            rewrites: image
+                .rewrites()
+                .iter()
+                .map(|r| (r.at, format!("{} {}", r.form.mnemonic(), r.how.word())))
+                .collect(),
         }
     }
 
@@ -151,6 +161,15 @@ impl LinkPlan {
                 hash.update(site.to_le_bytes());
                 hash.update(mnemonic.as_bytes());
             }
+            // Only when there are any, so a host that rewrites nothing names the plans it named
+            // before rewrites were recorded.
+            if !module.rewrites.is_empty() {
+                hash.update((module.rewrites.len() as u64).to_le_bytes());
+                for (site, how) in &module.rewrites {
+                    hash.update(site.to_le_bytes());
+                    hash.update(how.as_bytes());
+                }
+            }
         }
         let digest = hash.finalize();
         let mut name = String::with_capacity(16);
@@ -181,7 +200,9 @@ impl LinkPlan {
             if was.map(placed) != now.map(placed) {
                 difference.placements.push(library.to_owned());
             }
-            if was.map(|m| (&m.syscalls, &m.amd_only)) != now.map(|m| (&m.syscalls, &m.amd_only)) {
+            let sites =
+                |m: &'_ ModulePlan| (m.syscalls.clone(), m.amd_only.clone(), m.rewrites.clone());
+            if was.map(sites) != now.map(sites) {
                 difference.syscalls.push(library.to_owned());
             }
             let empty = Vec::new();
@@ -202,6 +223,12 @@ impl LinkPlan {
     #[must_use]
     pub fn amd_only_count(&self) -> usize {
         self.modules.iter().map(|m| m.amd_only.len()).sum()
+    }
+
+    /// Instructions the host lacks, rewritten or left to fault, across every module (D924).
+    #[must_use]
+    pub fn rewrite_count(&self) -> usize {
+        self.modules.iter().map(|m| m.rewrites.len()).sum()
     }
 
     /// The modules' own reads of the time-stamp counter, across every module.
@@ -340,13 +367,19 @@ impl PlanKey {
 }
 
 /// The host CPU features an instruction rewrite may depend on, present ones only, in a fixed
-/// order (D725).
+/// order (D725). The AMD-only ones are as the rewrite sees the host, so a run that rehearses a host
+/// without them keys its plan apart from one that does not (D924).
 #[must_use]
 pub fn host_features() -> String {
     #[cfg(target_arch = "x86_64")]
     {
+        let rewrite = crate::rewrite::Host::running();
         let known = [
-            ("sse4a", std::arch::is_x86_feature_detected!("sse4a")),
+            ("sse4a", rewrite.sse4a),
+            ("monitorx", rewrite.monitorx),
+            ("clzero", rewrite.clzero),
+            ("rdpru", rewrite.rdpru),
+            ("mcommit", rewrite.mcommit),
             ("sse4.2", std::arch::is_x86_feature_detected!("sse4.2")),
             ("popcnt", std::arch::is_x86_feature_detected!("popcnt")),
             ("lzcnt", std::arch::is_x86_feature_detected!("lzcnt")),
@@ -667,6 +700,7 @@ mod tests {
             syscalls: Vec::new(),
             amd_only: Vec::new(),
             counter_reads: Vec::new(),
+            rewrites: Vec::new(),
         }
     }
 

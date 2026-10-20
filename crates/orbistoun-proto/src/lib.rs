@@ -493,6 +493,10 @@ pub struct LinkSummary {
     /// Instructions only an AMD processor executes, across every module (D725).
     #[serde(default)]
     pub amd_only: usize,
+    /// Of those, the ones this host lacks: rewritten at link, or left to fault and be carried out
+    /// or refused there (D924). Zero on a host that has them all.
+    #[serde(default)]
+    pub rewritten: usize,
     /// The modules' own `rdtsc` and `rdtscp` instructions: reads of the host's counter, at the host's
     /// rate rather than the one the guest is told.
     #[serde(default)]

@@ -86,7 +86,9 @@ with the same thunks and the same trace as a run from the window. It is built fr
 operator's own title and stays on the machine that built it ([scope](../SCOPE.md)).
 
 On a host CPU without SSE4a, the plan rewrites `extrq` and `insertq` (D725), and the run
-report lists how many instructions it rewrote.
+report lists how many instructions it rewrote. Most sites jump to a trampoline. A site too short
+for a jump is carried out at its fault, and `monitorx` and `mwaitx` become a no-op and a `pause`
+(D924). `ORBISTOUN_HOST_LACKS=sse4a,monitorx` runs a title on an AMD host as an Intel host would.
 
 ## The run result
 

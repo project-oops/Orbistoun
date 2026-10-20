@@ -104,6 +104,15 @@ pub fn apply(image: &mut Image, page: u64) -> Result<ProtectionTally, LoadError>
             tally.writable_and_executable = tally.writable_and_executable.saturating_add(run.len);
         }
     }
+    // The trampolines of rewritten instructions, past the last segment (D924): code, never data.
+    let (room, room_len) = image.room();
+    if room_len > 0 {
+        image
+            .space_mut()
+            .protect(room, room_len, Protection::READ_EXECUTE)?;
+        tally.runs += 1;
+        tally.executable = tally.executable.saturating_add(room_len);
+    }
     Ok(tally)
 }
 

@@ -436,6 +436,17 @@ pub const START_MODULES: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Instruction set extensions to treat the host as lacking, so a host that has them rewrites a
+/// title's AMD-only instructions as one without them would (D924).
+pub const HOST_LACKS: Var = Var {
+    name: "ORBISTOUN_HOST_LACKS",
+    kind: Kind::Diagnostic,
+    summary: "treat the host as lacking these extensions, comma-separated (sse4a, monitorx, clzero, rdpru, mcommit) - does a title run as it would on an Intel host?",
+    example: "sse4a,monitorx",
+    read_by: "orbistoun-loader",
+    effect: Effect::Intervenes,
+};
+
 /// Fill the guest's `.bss` before it starts, instead of zeroing it.
 pub const BSS_FILL: Var = Var {
     name: "ORBISTOUN_BSS_FILL",
@@ -838,6 +849,7 @@ pub const REGISTRY: &[Var] = &[
     PASS_REFUSED,
     STACK_FILL,
     DIRECT_FILL,
+    HOST_LACKS,
     BSS_FILL,
     ENTRY_ARGUMENT,
     HANDOFF_FIELDS,
@@ -932,6 +944,7 @@ mod tests {
         super::PASS_REFUSED,
         super::STACK_FILL,
         super::DIRECT_FILL,
+        super::HOST_LACKS,
         super::BSS_FILL,
         super::ENTRY_ARGUMENT,
         super::HANDOFF_FIELDS,

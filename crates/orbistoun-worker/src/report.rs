@@ -877,6 +877,22 @@ fn note_null_pointer_to_libc(line: &mut Line) {
     line.text(NEWLINE);
 }
 
+/// Carries out an AMD-only instruction the host lacks, at its illegal-instruction fault (D924).
+///
+/// The decision half of the fault path, pure so it is tested without a real trap: `code` is the
+/// faulting instruction's bytes at `rip`, and `xmm` the thread's sixteen `xmm` registers, updated
+/// in place. Returns how far to step past the instruction once it is carried out, its refusal by
+/// name when it reads what nothing has measured, and `None` when it is not one of these.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn answer_lacked(
+    code: &[u8],
+    rip: u64,
+    xmm: &mut [u128; 16],
+) -> Option<Result<u64, orbistoun_loader::rewrite::Refusal>> {
+    let (form, len) = orbistoun_loader::rewrite::faulted(code, rip)?;
+    Some(orbistoun_loader::rewrite::emulate(form, xmm).map(|()| len as u64))
+}
+
 /// Services a faulting instruction that is a software interrupt, if a handler is registered.
 ///
 /// The decision half of the interrupt glue, pure so it is tested without a real trap: the `CONTEXT`
@@ -1680,7 +1696,7 @@ pub(crate) fn syscalls_asked_for() {
 mod imp {
     use super::emit;
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
+        AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS, M128A,
     };
 
     /// Let the exception carry on to whatever would otherwise have handled it.
@@ -1793,6 +1809,27 @@ mod imp {
             return CONTINUE_EXECUTION;
         }
 
+        // An AMD-only instruction this host lacks, left to fault because no jump fits over it
+        // (D924): carried out against the thread's own registers and stepped past, as the
+        // console's processor would have run it. One that reads what nothing has measured is
+        // refused by name and reported as the illegal instruction it is.
+        if code == ILLEGAL_INSTRUCTION
+            && let Some(answer) = lacked_context(&ctx, rip)
+        {
+            match answer {
+                Ok(next) => {
+                    // SAFETY: `context` is the operating system's live context record for this
+                    // call; writing the whole record it owns is how a carried-out instruction
+                    // resumes.
+                    unsafe {
+                        *context = next;
+                    }
+                    return CONTINUE_EXECUTION;
+                }
+                Err(refusal) => tracing::error!("at {rip:#x}: {refusal}"),
+            }
+        }
+
         // A software interrupt with a registered handler is serviced, not reported. A guest
         // reaching the kernel by `int n` raises a general-protection fault the host delivers as an
         // access violation (D384); with a handler, it runs against the guest's registers and
@@ -1876,6 +1913,35 @@ mod imp {
                 CONTINUE_EXECUTION
             }
         }
+    }
+
+    /// Carries out the AMD-only instruction at `rip` against a copy of the context, and returns
+    /// the copy to resume with: its `xmm` registers as the instruction leaves them and `rip` past
+    /// it. `None` when the instruction is not one this handles.
+    fn lacked_context(
+        ctx: &CONTEXT,
+        rip: u64,
+    ) -> Option<Result<CONTEXT, orbistoun_loader::rewrite::Refusal>> {
+        let (bytes, len) = super::instruction_bytes(rip);
+        // SAFETY: both members of the union are plain data over the same bytes, and a context the
+        // system passes for an exception always carries its floating-point state, so the legacy
+        // save area is the thread's own.
+        let mut saved = unsafe { ctx.Anonymous.FltSave };
+        let mut xmm = saved
+            .XmmRegisters
+            .map(|r| u128::from(r.Low) | (u128::from(r.High as u64) << 64));
+        let step = match super::answer_lacked(&bytes[..len], rip, &mut xmm)? {
+            Ok(step) => step,
+            Err(refusal) => return Some(Err(refusal)),
+        };
+        saved.XmmRegisters = xmm.map(|v| M128A {
+            Low: v as u64,
+            High: (v >> 64) as i64,
+        });
+        let mut next = *ctx;
+        next.Anonymous.FltSave = saved;
+        next.Rip = rip.wrapping_add(step);
+        Some(Ok(next))
     }
 
     /// Runs a registered software-interrupt handler and returns the context to resume with.
@@ -3318,6 +3384,24 @@ mod tests {
         is_null_pointer_fault, note_emulator_fault, note_instruction_shape,
         note_null_pointer_to_libc, parse_addr_len, parse_indirect, serviced_interrupt,
     };
+
+    /// An `extrq` at the fault is carried out and stepped past by its length; an `rdpru` is
+    /// refused by name; anything else is not this path's.
+    #[test]
+    fn a_lacked_instruction_is_carried_out_or_refused_at_its_fault() {
+        let mut xmm = [0_u128; 16];
+        xmm[2] = 0xffff_0000_0000_abcd;
+        // extrq xmm2, 8, 4
+        let step = super::answer_lacked(&[0x66, 0x0f, 0x78, 0xc2, 0x08, 0x04], 0x1000, &mut xmm);
+        assert_eq!(step, Some(Ok(6)));
+        assert_eq!(xmm[2], 0xbc);
+        let refused = super::answer_lacked(&[0x0f, 0x01, 0xfd], 0x1000, &mut xmm);
+        assert!(
+            matches!(refused, Some(Err(r)) if r.to_string().contains("rdpru")),
+            "{refused:?}"
+        );
+        assert_eq!(super::answer_lacked(&[0x0f, 0x0b], 0x1000, &mut xmm), None);
+    }
 
     /// The indirect peek names a slot, not the object: the bracket form yields the slot, a plain
     /// `<addr>+len` does not parse as indirect, and malformed brackets dereference nothing.

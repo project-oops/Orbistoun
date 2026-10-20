@@ -54,6 +54,11 @@ pub struct Image {
     entry: u64,
     span: (u64, u64),
     segments: Vec<PlacedSegment>,
+    /// Where the trampolines of rewritten instructions sit, as `(start, length)`: the end of the
+    /// span, after the last segment, and empty when nothing needed one (D924).
+    room: (u64, u64),
+    /// Every instruction the host lacks, and how it was made to run (D725).
+    rewrites: Vec<crate::rewrite::Rewrite>,
 }
 
 /// Writes each eight-byte slot of `.bss` with a marker holding its own guest address.
@@ -165,6 +170,37 @@ impl Image {
     pub fn bytes_zeroed(&self) -> u64 {
         self.segments.iter().map(|s| s.zeroed).sum()
     }
+
+    /// Where the trampolines of rewritten instructions sit, as `(start, length)`; the length is
+    /// zero when nothing needed one.
+    pub const fn room(&self) -> (u64, u64) {
+        self.room
+    }
+
+    /// Every instruction this host lacks in the image's executable segments, and how each was made
+    /// to run, by address.
+    pub fn rewrites(&self) -> &[crate::rewrite::Rewrite] {
+        &self.rewrites
+    }
+}
+
+/// Writes `bytes` at guest address `at`, inside a reservation the caller holds read-write.
+///
+/// # Safety
+///
+/// `at .. at + bytes.len()` must lie in memory reserved read-write that nothing else is using.
+unsafe fn write_at(at: u64, bytes: &[u8]) -> Result<(), LoadError> {
+    let dest = usize::try_from(at).map_err(|_| LoadError::AddressTooLarge(at))?;
+    // SAFETY: the caller guarantees the range is reserved, writable and unshared; the source is a
+    // separate allocation.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            std::ptr::with_exposed_provenance_mut::<u8>(dest),
+            bytes.len(),
+        );
+    }
+    Ok(())
 }
 
 /// `PT_LOAD`.
@@ -218,10 +254,37 @@ fn layout(
 
 /// Places every loadable segment of a container at `base`.
 ///
-/// The whole span is reserved once rather than per segment, then written through.
+/// The whole span is reserved once rather than per segment, then written through. Every
+/// instruction the running host lacks is rewritten as the bytes go in (D725).
 pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
+    place_for(whole, base, page, crate::rewrite::Host::running())
+}
+
+/// [`place`], rewriting the instructions `host` lacks: the span grows by the pages the
+/// trampolines need, after the last segment, so a module placed next starts past them.
+pub fn place_for(
+    whole: &[u8],
+    base: u64,
+    page: u64,
+    host: crate::rewrite::Host,
+) -> Result<Image, LoadError> {
     let container = Container::parse(whole)?;
-    let (loadable, span_base, span_len) = layout(&container, base, page)?;
+    let (loadable, span_base, code_len) = layout(&container, base, page)?;
+
+    let mut code = Vec::new();
+    for (index, ph) in &loadable {
+        if ph.flags.get() & PF_X != 0
+            && let Some(bytes) = container.segment_data(whole, *index)?
+        {
+            code.push((bytes, base.saturating_add(ph.vaddr.get())));
+        }
+    }
+    let room_at = span_base.saturating_add(code_len);
+    let rewrite = crate::rewrite::plan(&code, host, room_at);
+    let room_len = (rewrite.room.len() as u64)
+        .div_ceil(page)
+        .saturating_mul(page);
+    let span_len = code_len.saturating_add(room_len);
 
     let mut space = AddressSpace::new();
     // Read-write for population; per-segment protection is applied afterwards, once
@@ -279,14 +342,31 @@ pub fn place(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
         });
     }
 
+    // Over the copied text, so each patch lands on the instruction it replaces; the trampolines
+    // after the last segment, in pages the span grew by for them.
+    for (at, bytes) in &rewrite.patches {
+        // SAFETY: each site was decoded from an executable segment's file bytes, which were just
+        // copied into the span reserved read-write above.
+        unsafe { write_at(*at, bytes)? };
+    }
+    // SAFETY: `room_at .. room_at + room.len()` is the tail the span was grown by, reserved
+    // read-write above and holding nothing else.
+    unsafe { write_at(room_at, &rewrite.room)? };
+    crate::rewrite::register_planted(&rewrite.planted);
+
     Ok(Image {
         space,
         base,
         entry: base.saturating_add(container.entry()),
         span: (span_base, span_len),
         segments,
+        room: (room_at, room_len),
+        rewrites: rewrite.rewrites,
     })
 }
+
+/// `PF_X`: the segment is executable.
+const PF_X: u32 = 1;
 
 #[cfg(test)]
 mod tests {

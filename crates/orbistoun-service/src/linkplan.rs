@@ -210,6 +210,7 @@ impl Service {
             writes: plan.write_count(),
             syscalls: plan.syscall_count(),
             amd_only: plan.amd_only_count(),
+            rewritten: plan.rewrite_count(),
             counter_reads: plan.counter_read_count(),
             ..LinkSummary::default()
         };

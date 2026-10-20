@@ -761,8 +761,8 @@ fn record_link_plan(
     tracing::info!(
         concat!(
             "link plan {} ({}): {} modules, {} relocation writes, {} raw syscall sites, ",
-            "{} AMD-only instructions, {} reads of the time-stamp counter in the title's own code ",
-            "(each reads the host's counter, at the host's rate)"
+            "{} AMD-only instructions ({} rewritten for this host), {} reads of the time-stamp ",
+            "counter in the title's own code (each reads the host's counter, at the host's rate)"
         ),
         summary.digest,
         summary.stored,
@@ -770,6 +770,7 @@ fn record_link_plan(
         summary.writes,
         summary.syscalls,
         summary.amd_only,
+        summary.rewritten,
         summary.counter_reads
     );
     if relink {

@@ -14,6 +14,7 @@ pub mod plan;
 pub mod process;
 pub mod protect;
 pub mod relocate;
+pub mod rewrite;
 pub mod tls;
 pub mod unwind;
 
