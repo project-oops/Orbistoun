@@ -2920,13 +2920,17 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
         // view's (`texture_components`). Sampling and linear filtering of `R8_UNORM` with optimal
         // tiling are required of every implementation (Vulkan's required format support table).
         orbistoun_gpu::TextureEncoding::R8 { .. } => (vk::Format::R8_UNORM, as_they_are()),
+        // Sixteen bits a texel, two to a word, sampled as `R16_UNORM` through its lanes (D920).
+        orbistoun_gpu::TextureEncoding::R16 { .. } => (vk::Format::R16_UNORM, as_they_are()),
     }
 }
 
 /// How a texture's view maps its channels: an `R8` texture's lanes each the byte (`R`), zero or
 /// one; every other as it is.
 fn texture_components(encoding: orbistoun_gpu::TextureEncoding) -> vk::ComponentMapping {
-    let orbistoun_gpu::TextureEncoding::R8 { lanes } = encoding else {
+    let (orbistoun_gpu::TextureEncoding::R8 { lanes }
+    | orbistoun_gpu::TextureEncoding::R16 { lanes }) = encoding
+    else {
         return vk::ComponentMapping::default();
     };
     let [r, g, b, a] = lanes.map(|lane| match lane {

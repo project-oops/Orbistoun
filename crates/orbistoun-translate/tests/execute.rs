@@ -1058,6 +1058,29 @@ fn a_wide_scalar_load_fills_consecutive_registers() {
     }
 }
 
+/// A scalar load into the condition mask fills its low half then its high one, as into any register
+/// pair: Grand Theft Auto V's compute program does `s_load_dwordx2 vcc, s[4:5], 0x10` (words
+/// 0xf4041a82 0xfa000010) and reads the two words as floats.
+#[test]
+fn a_scalar_load_into_the_condition_mask_fills_both_halves() {
+    if !device_or_skip("a_scalar_load_into_the_condition_mask_fills_both_halves") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let mut program = Vec::new();
+    for (i, value) in [11u32, 22].iter().enumerate() {
+        program.push(v_mov_inline(0, 16 + (i as u32) * 4));
+        program.push(v_mov_inline(1, *value));
+        program.extend(global_store(0, 1));
+    }
+    program.extend(s_load("s_load_dwordx2", 106, 0, 16));
+    program.push(sop1("s_mov_b32", 2, 106));
+    program.push(sop1("s_mov_b32", 3, 107));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!((scalar(&registers, 2), scalar(&registers, 3)), (11, 22));
+}
+
 /// `s_load_dwordx2` writes no register beyond its width.
 #[test]
 fn a_wide_scalar_load_writes_no_register_beyond_its_width() {
@@ -6204,6 +6227,43 @@ fn two_and_four_word_local_moves_read_back() {
     let wide: Vec<u32> = (4..8).map(|n| vector(&registers, n)).collect();
     assert_eq!(wide, [11, 22, 33, 44]);
     assert_eq!((vector(&registers, 2), vector(&registers, 3)), (33, 44));
+}
+
+/// `s_sub_u32` answers the difference and sets the condition code to the borrow, and `s_not_b32`
+/// the complement and whether it is non-zero: the next program's `s_sub_u32 s0, s7, vcc_lo` and
+/// `s_not_b32 vcc_lo, vcc_lo` (SOP2 1, SOP1 7). 3 - 5 borrows; the complement of 5 is not zero.
+#[test]
+fn a_scalar_difference_borrows_and_a_complement_inverts() {
+    if !device_or_skip("a_scalar_difference_borrows_and_a_complement_inverts") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let sop2 = |name: &str, dst: u32, a: u32, b: u32| head(name) | dst << 16 | b << 8 | a;
+    assert_eq!(
+        sop2("s_sub_u32", 0, 7, 0x6a),
+        0x8080_6a07,
+        "Grand Theft Auto V's word"
+    );
+    assert_eq!(
+        sop1("s_not_b32", 0x6a, 0x6a),
+        0xbeea_076a,
+        "Grand Theft Auto V's word"
+    );
+    let mut program = Vec::new();
+    program.extend(s_mov_b32_literal(1, 3));
+    program.extend(s_mov_b32_literal(2, 5));
+    program.push(sop2("s_sub_u32", 3, 1, 2));
+    program.push(sop1("s_mov_b32", 4, 253));
+    program.push(sop1("s_not_b32", 5, 2));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        scalar(&registers, 3),
+        3_u32.wrapping_sub(5),
+        "the difference"
+    );
+    assert_eq!(scalar(&registers, 4), 1, "the borrow");
+    assert_eq!(scalar(&registers, 5), !5, "the complement");
 }
 
 /// `s_min_i32` keeps the signed minimum and sets the condition code where the first source is the

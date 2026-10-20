@@ -169,8 +169,9 @@ fn capturing_positions() -> bool {
     CAPTURE_POSITIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// How many draw shaders a run keeps for listing.
-const DRAW_PROGRAMS_KEPT: usize = 64;
+/// How many draw shaders a run keeps for listing: enough for every shader a title's frame binds,
+/// so a refused draw's own program is among them - Grand Theft Auto V's scene binds hundreds.
+const DRAW_PROGRAMS_KEPT: usize = 1024;
 
 /// The shaders the run's draws were prepared with, by stage and address, at most
 /// [`DRAW_PROGRAMS_KEPT`]: what a draw drew is read against its code, as a dispatch's is.
@@ -7496,12 +7497,20 @@ fn depth_texture_from(
     let descriptor = decode_image_descriptor(words);
     let depth_tiled = is_depth_swizzle(descriptor.tiling);
     // A cube's six faces are the surface's first six slices, each drawn as its own target (D909,
-    // D918); its view names them all and starts at the first.
-    let cube = words[3] >> 28 == IMAGE_TYPE_CUBE
+    // D918); its view names them all and starts at the first. A flat sample of a cube or an array
+    // whose view starts at the first layer reads that layer: the target drawn at slice zero (D920,
+    // assumed).
+    let kind = words[3] >> 28;
+    let cube = source.cube
+        && kind == IMAGE_TYPE_CUBE
         && words[4] & (DEPTH_FIELD | BASE_ARRAY_FIELD) == ONE_CUBE_LAST_LAYER;
+    let first_layer = !source.cube
+        && !source.layered
+        && matches!(kind, IMAGE_TYPE_CUBE | IMAGE_TYPE_2D_ARRAY)
+        && words[4] & BASE_ARRAY_FIELD == 0;
     if !depth_tiled
         || !DEPTH_IMAGE_FORMATS.contains(&descriptor.format)
-        || !(words[3] >> 28 == IMAGE_TYPE_2D || cube)
+        || !(kind == IMAGE_TYPE_2D || cube || first_layer)
     {
         return None;
     }
@@ -7553,7 +7562,7 @@ fn texel_texture(
     if words[3] >> 28 == IMAGE_TYPE_3D && descriptor.tiling != SwizzleMode::Linear {
         return tiled_volume_texture(&descriptor, words, slot, memory, texels);
     }
-    let (format, selects) = sampled_format(&descriptor, words[3])?;
+    let (format, selects) = sampled_view(&descriptor, words)?;
     let kind = words[3] >> 28;
     let shape = (kind == IMAGE_TYPE_CUBE, kind == IMAGE_TYPE_3D);
     // A tiled cube's faces are an array's layers (D912).
@@ -8034,6 +8043,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         | crate::backend::TextureEncoding::Bc6hUfloat
         | crate::backend::TextureEncoding::Bc5
         | crate::backend::TextureEncoding::R8 { .. } => 0,
+        crate::backend::TextureEncoding::R16 { .. } => 1 << 18 | 1 << 22,
         // Never read from guest memory, so never in the cache (D817).
         crate::backend::TextureEncoding::DepthFloat
         | crate::backend::TextureEncoding::DepthCompare => 1 << 23,
@@ -8043,6 +8053,15 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
 /// A 2D or cube texture's texel format and selects, when both are ones this samples exactly
 /// ([`selects_exactly`]): `8_8_8_8_UNORM` or `8_UNORM`. Which layouts a cube is read in is the
 /// caller's to decide.
+/// [`sampled_format`] for a view a draw reads: an array is sampled flat at its first layer (D920),
+/// and one whose view starts later is not read.
+fn sampled_view(descriptor: &ImageDescriptor, words: [u32; 8]) -> Option<(TexelFormat, [u32; 4])> {
+    if words[3] >> 28 == IMAGE_TYPE_2D_ARRAY && words[4] & BASE_ARRAY_FIELD != 0 {
+        return None;
+    }
+    sampled_format(descriptor, words[3])
+}
+
 fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelFormat, [u32; 4])> {
     let format = match descriptor.format {
         FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
@@ -8050,11 +8069,15 @@ fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelForm
         FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
         FORMAT_8_8_8_8_SRGB => TexelFormat::Rgba8Srgb,
         FORMAT_16_16_16_16_FLOAT => TexelFormat::Rgba16Float,
+        FORMAT_16_UNORM => TexelFormat::R16Unorm,
         _ => return None,
     };
     let selects = destination_selects(word3);
-    (matches!(word3 >> 28, IMAGE_TYPE_2D | IMAGE_TYPE_3D | IMAGE_TYPE_CUBE)
-        && selects_exactly(format, selects))
+    // An array is sampled flat at its first layer, its view checked where it is read (D920).
+    (matches!(
+        word3 >> 28,
+        IMAGE_TYPE_2D | IMAGE_TYPE_3D | IMAGE_TYPE_CUBE | IMAGE_TYPE_2D_ARRAY
+    ) && selects_exactly(format, selects))
     .then_some((format, selects))
 }
 
@@ -8135,6 +8158,10 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
     } = bound
     {
         return with_byte_lanes(bound, format, selects);
+    }
+    // A sixteen-bit texel a word, packed two to a word with its selects as its lanes (D920).
+    if format == TexelFormat::R16Unorm {
+        return packed_half_texture(bound, selects);
     }
     let RenderCommand::BindTexture {
         slot,
@@ -8323,6 +8350,48 @@ fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand
         height,
         sampling,
         encoding: crate::backend::TextureEncoding::R8 { lanes },
+        faces,
+        levels,
+    }
+}
+
+/// A `16_UNORM` texture's binding as [`crate::backend::TextureEncoding::R16`]: the low half of each
+/// of `bound`'s words, packed two to a word, and each channel's source as its `selects` pick it, as
+/// a one-byte texture's are ([`byte_lanes`], D920).
+fn packed_half_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand {
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        faces,
+        levels,
+        ..
+    } = bound
+    else {
+        return bound;
+    };
+    let packed: std::sync::Arc<[u32]> = texels
+        .chunks(2)
+        .map(|two| {
+            (0..).zip(two).fold(0, |word, (half, &texel)| {
+                word | (texel & 0xFFFF) << (16 * half)
+            })
+        })
+        .collect();
+    let encoding = crate::backend::TextureEncoding::R16 {
+        lanes: byte_lanes(selects),
+    };
+    RenderCommand::BindTexture {
+        slot,
+        hash: hash ^ u64::from(encoding_tag(encoding)) ^ crate::content_hash(&selects),
+        texels: packed,
+        width,
+        height,
+        sampling,
+        encoding,
         faces,
         levels,
     }
@@ -10276,6 +10345,19 @@ mod tests {
                 cube: true,
             })
         );
+        // A flat sample of the same cube reads its first face: the target drawn at slice zero
+        // (D920, assumed) - Grand Theft Auto V's pixel shader samples its shadow cubes with
+        // `dim:2D`.
+        assert_eq!(
+            super::depth_texture_from(cube, &TextureSource::default(), None),
+            Some(RenderCommand::BindDepthTexture {
+                slot: 0,
+                target: crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8),
+                sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+                compare: false,
+                cube: false,
+            })
+        );
         cube[4] = 11;
         assert_eq!(
             super::depth_texture_from(cube, &source, None),
@@ -11212,6 +11294,61 @@ mod tests {
             .flat_map(|face| (0..side * side).map(move |i| face << 16 | i))
             .collect();
         assert!(texels.to_vec() == expected, "every face in order");
+    }
+
+    /// A `16_UNORM` array a draw samples flat binds its first layer as `R16`, two texels a word, its
+    /// selects its lanes (D920): Grand Theft Auto V's 64 x 64 x 32 array in `4KB_S`, sampled
+    /// `dim:2D`.
+    #[test]
+    fn a_sixteen_bit_array_sampled_flat_binds_its_first_layer() {
+        use super::{DispatchSurface, RenderCommand, SwizzleMode, texture_from_words};
+        use crate::tiling::SurfaceLayout;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let side = 64_u32;
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled4KbS)
+            .and_then(|layout| layout.at_bytes_per_texel(2))
+            .expect("modelled");
+        let level = crate::registers::chain_level((0x1_0000, 0), (side, side), (1, 0), layout)
+            .expect("a level");
+        let mut bytes = vec![0_u8; 32 * 64 * 64 * 2];
+        let texels: Vec<u32> = (0..side * side).map(|i| (i * 7) & 0xffff).collect();
+        DispatchSurface::Tiled(level)
+            .tile(&texels, &mut bytes[..64 * 64 * 2])
+            .expect("tiled");
+        // Format 7, 64 x 64, `X001` selects, 4KB_S (5), a 2D array (13) of 32 layers from layer 0.
+        let words = [
+            0x100,
+            (7 << 20) | (((side - 1) & 3) << 30),
+            ((side - 1) >> 2) | ((side - 1) << 14) | (1 << 31),
+            4 | 1 << 9 | 5 << 20 | 13 << 28,
+            31,
+            0,
+            0,
+            0,
+        ];
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
+        let Some(RenderCommand::BindTexture {
+            texels: packed,
+            width: 64,
+            height: 64,
+            encoding: crate::backend::TextureEncoding::R16 { .. },
+            ..
+        }) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        let expected: Vec<u32> = texels.chunks(2).map(|two| two[0] | two[1] << 16).collect();
+        assert!(
+            packed.to_vec() == expected,
+            "the first layer, two texels a word"
+        );
     }
 
     /// A compare of a linear `32_FLOAT` image - a depth texture a GL guest uploaded - binds its

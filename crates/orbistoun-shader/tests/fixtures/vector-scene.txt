@@ -38,3 +38,5 @@
 0x0000d0 8 buffer_atomic_fmax v3, v2, s[4:7], 0 offen offset:12
 0x0000d8 8 buffer_load_ushort v0, v2, s[32:35], 0 idxen offset:2
 0x0000e0 8 buffer_load_ushort v1, v3, s[4:7], 0 offen
+0x0000e8 4 s_sub_u32 s0, s7, vcc_lo
+0x0000ec 4 s_not_b32 vcc_lo, vcc_lo

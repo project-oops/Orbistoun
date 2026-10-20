@@ -384,6 +384,11 @@ name = "s_mov_b64"
 
 [[mnemonic]]
 family = "SOP1"
+opcode = 7
+name = "s_not_b32"
+
+[[mnemonic]]
+family = "SOP1"
 opcode = 9
 name = "s_wqm_b32"
 
@@ -421,6 +426,11 @@ name = "s_and_saveexec_b32"
 family = "SOP2"
 opcode = 0
 name = "s_add_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 1
+name = "s_sub_u32"
 
 [[mnemonic]]
 family = "SOP2"

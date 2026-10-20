@@ -7,7 +7,8 @@
 // VOPC 136, DS 7, 8, 32, 222 and 223, MUBUF 50, MIMG 71 and SOP1 55 had no recorded name), and its
 // loading-screen reduction the signed scalar minimum, the two- and four-word local moves, the
 // float local and buffer minimum and maximum (SOP2 6, DS 18, 19, 77, 118 and 255, MUBUF 63, 64),
-// and the sixteen-bit buffer load its next program reads with (MUBUF 10).
+// the sixteen-bit buffer load its next program reads with (MUBUF 10), and the unsigned scalar
+// difference and complement after it (SOP2 1, SOP1 7).
 //
 // Written by hand and assembled, as `unreached.s` is: the reference still decides the bytes and
 // the names. Scalar, vector, constant and literal sources, and a high destination.
@@ -48,3 +49,5 @@ buffer_atomic_fmin v0, v1, s[4:7], 0 offen
 buffer_atomic_fmax v3, v2, s[4:7], 0 offen offset:12
 buffer_load_ushort v0, v2, s[32:35], 0 idxen offset:2
 buffer_load_ushort v1, v3, s[4:7], 0 offen
+s_sub_u32 s0, s7, vcc_lo
+s_not_b32 vcc_lo, vcc_lo

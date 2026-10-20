@@ -261,3 +261,11 @@ s_andn1_saveexec_b64 vcc, -1
 s_min_i32 s0, s1, s2
 s_min_i32 s100, s7, s50
 s_min_i32 s9, s60, s3
+
+// ---- s_sub_u32 and s_not_b32: the next program's difference and complement (PPSA04263) -----
+s_sub_u32 s0, s1, s2
+s_sub_u32 s100, s7, s50
+s_sub_u32 s9, s60, s3
+s_not_b32 s0, s1
+s_not_b32 s100, s7
+s_not_b32 s9, s60

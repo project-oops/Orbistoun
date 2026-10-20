@@ -58,6 +58,8 @@ pub const SUPPORTED: &[&str] = &[
     "ds_read_b64",
     "ds_read_b128",
     "s_min_i32",
+    "s_sub_u32",
+    "s_not_b32",
     "buffer_atomic_add",
     "buffer_atomic_fmin",
     "buffer_atomic_fmax",
@@ -759,6 +761,8 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_andn2_b64"
             | "s_nand_b64"
             | "s_not_b64"
+            | "s_not_b32"
+            | "s_sub_u32"
             | "s_quadmask_b64"
             // The unsigned add sets it to the carry out; the bit test to the bit; the saving and
             // the count to whether the new mask or the count is non-zero.
@@ -3016,6 +3020,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         | "s_nand_b64" => scalar_logic(model, instruction, name),
         // The complement of a mask: `s_not_b64 exec, exec` enters the other side of a branch.
         "s_not_b64" => scalar_not_64(model, instruction),
+        "s_not_b32" => scalar_not_32(model, instruction),
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
@@ -3029,7 +3034,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_orn2_b32" | "s_or_b32"
         | "s_xor_b32" | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32"
         | "s_lshr_b32" | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
-        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" => {
+        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" | "s_sub_u32" => {
             scalar_integer(model, instruction, name)
         }
 
@@ -3636,6 +3641,22 @@ fn scalar_add_with_carry<M: Model + ?Sized>(
 
 /// `s_brev_b32`: a scalar's bits in reverse order, into a scalar register or a lane mask's half used
 /// as one (`s_brev_b32 vcc_hi, -3`). The condition code is untouched.
+/// `s_not_b32 d, s`: the bitwise complement, and the condition code whether it is non-zero
+/// (`S_NOT_B32`); the destination any scalar word, a lane mask's half among them.
+fn scalar_not_32<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let value = model.read_source(instruction, source, 0)?;
+    let inverted = model.not(value);
+    write_scalar_operand(model, instruction, destination, inverted)?;
+    let non_zero = model.is_not_zero(inverted);
+    model.set_condition_code(non_zero);
+    model.count();
+    Ok(())
+}
+
 fn scalar_bit_reverse<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -5076,11 +5097,7 @@ fn scalar_integer<M: Model + ?Sized>(
         // `S_MUL_I32`: the product's low 32 bits, which signed and unsigned multiplication share;
         // the condition code is not written.
         "s_mul_i32" => (model.binary(op::IMUL, left, right), None),
-        // `S_MIN_I32`: the signed minimum, and whether the first source is the smaller.
-        "s_min_i32" => {
-            let less = model.compare(op::SLESS_THAN, left, right);
-            (model.select(less, left, right), Some(less))
-        }
+        "s_sub_u32" | "s_min_i32" => difference_or_minimum(model, name, left, right),
         // `S_MUL_HI_U32`: the unsigned product's high 32 bits; the condition code is not written.
         "s_mul_hi_u32" => (multiply_high(model, left, right), None),
         // `S_LSHR_B32`: `D = S0 >> S1[4:0]`, logical, and whether it is non-zero.
@@ -5127,6 +5144,22 @@ fn scalar_integer<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `S_SUB_U32`: the difference, and the borrow - whether the second source exceeded the first; or
+/// `S_MIN_I32`: the signed minimum, and whether the first source is the smaller.
+fn difference_or_minimum<M: Model + ?Sized>(
+    model: &mut M,
+    name: &str,
+    left: Id,
+    right: Id,
+) -> (Id, Option<Id>) {
+    if name == "s_sub_u32" {
+        let result = model.binary(op::ISUB, left, right);
+        return (result, Some(model.compare(op::ULESS_THAN, left, right)));
+    }
+    let less = model.compare(op::SLESS_THAN, left, right);
+    (model.select(less, left, right), Some(less))
 }
 
 /// `s_andn2_b32` and `s_orn2_b32`: `S0 & ~S1` and `S0 | ~S1`, with the condition code whether the
@@ -12518,8 +12551,8 @@ fn memory<M: Model + ?Sized>(
             // only on the generation they were numbered for.
             let words = access_words(name);
             let (destination, base, offset) = three_operands(instruction)?;
-            let (Operand::Scalar(register), Operand::Scalar(base_register)) = (destination, base)
-            else {
+            let destinations = load_destinations(instruction, destination, words)?;
+            let Operand::Scalar(base_register) = base else {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
                     detail: "a scalar load needs a scalar destination and a scalar base",
@@ -12536,22 +12569,12 @@ fn memory<M: Model + ?Sized>(
                 detail: "negative load offset",
             })?;
 
-            // A destination running off the end of the register file is refused rather than
-            // truncated: the registers stop at 101 and the wide forms take up to eight.
-            let register = u32::from(*register);
-            if register + words > SCALAR_REGISTERS {
-                return Err(TranslateError::Unsupported {
-                    offset: instruction.offset,
-                    detail: "a scalar load runs past the end of the register file",
-                });
-            }
-
             // A traced base is a draw buffer that starts at it (D733): the words are the offset's.
             if let Some(slot) = model.draw_buffer_slot(instruction) {
-                for word in 0..words {
+                for (word, destination) in (0..words).zip(&destinations) {
                     let index = model.constant(bytes / 4 + word);
                     let loaded = model.read_draw_buffer(slot, index)?;
-                    model.write_scalar(register + word, loaded);
+                    write_scalar_operand(model, instruction, destination, loaded)?;
                 }
                 model.count();
                 return Ok(());
@@ -12560,7 +12583,7 @@ fn memory<M: Model + ?Sized>(
             let offset_value = model.constant(bytes);
             let address = model.add(base_value, offset_value);
             let first = model.word_index(address);
-            for word in 0..words {
+            for (word, destination) in (0..words).zip(&destinations) {
                 // Consecutive words, so consecutive indices: the address arithmetic is done once
                 // and stepped.
                 let index = if word == 0 {
@@ -12570,7 +12593,7 @@ fn memory<M: Model + ?Sized>(
                     model.add(first, step)
                 };
                 let loaded = model.read_memory(index);
-                model.write_scalar(register + word, loaded);
+                write_scalar_operand(model, instruction, destination, loaded)?;
             }
             model.count();
             Ok(())
@@ -12600,6 +12623,43 @@ fn memory<M: Model + ?Sized>(
             mnemonic: name.to_owned(),
             detail: NO_TRANSLATION,
         }),
+    }
+}
+
+/// Where a scalar load's `words` land: consecutive registers from its destination, or a lane mask's
+/// low half and then its high one (`s_load_dwordx2 vcc, ...`). A destination running off the end of
+/// the register file is refused rather than truncated: the registers stop at 105 and the wide forms
+/// take up to sixteen.
+fn load_destinations(
+    instruction: &Instruction,
+    destination: &Operand,
+    words: u32,
+) -> Result<Vec<Operand>, TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    match destination {
+        Operand::Scalar(register) => {
+            if u32::from(*register) + words > SCALAR_REGISTERS {
+                return Err(refuse(
+                    "a scalar load runs past the end of the register file",
+                ));
+            }
+            Ok((0..words)
+                .map(|word| Operand::Scalar(*register + u16::try_from(word).unwrap_or(0)))
+                .collect())
+        }
+        Operand::Named(name) if words <= 2 && lane_mask_name(name).is_some() => {
+            let high = name.replace("_lo", "_hi");
+            Ok([Operand::Named(name.clone()), Operand::Named(high)]
+                .into_iter()
+                .take(words as usize)
+                .collect())
+        }
+        _ => Err(refuse(
+            "a scalar load needs a scalar destination and a scalar base",
+        )),
     }
 }
 

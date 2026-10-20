@@ -552,6 +552,13 @@ pub enum TextureEncoding {
         /// Red, green, blue and alpha's source.
         lanes: [ByteLane; 4],
     },
+    /// Sixteen bits a texel, two to a word in row-major order, the first in the low half, which the
+    /// host samples as `R16_UNORM` with each channel read from the texel or a constant as `lanes`
+    /// says (D920): a `16_UNORM` texture bound as its selects read it.
+    R16 {
+        /// Red, green, blue and alpha's source.
+        lanes: [ByteLane; 4],
+    },
 }
 
 /// Where a channel of an [`TextureEncoding::R8`] texel comes from.
