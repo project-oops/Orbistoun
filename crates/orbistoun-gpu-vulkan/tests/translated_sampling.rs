@@ -522,6 +522,45 @@ fn a_depth_compare_sample_translates_to_a_depth_image_and_its_reference() {
     assert!(dref, "it is sampled against the reference");
 }
 
+/// A depth-compare sample of a cube translates to a depth cube image sampled against its reference:
+/// Grand Theft Auto V's lighting compares its point lights' shadow cubes with
+/// `image_sample_c_lz v20, v[0:3], s[8:15], s[36:39] dmask:0x1 dim:SQ_RSRC_IMG_CUBE` (0xf0bc011a),
+/// the reference in `v0`, then the face's two coordinates and the face.
+#[test]
+fn a_depth_compare_sample_of_a_cube_translates_to_a_depth_cube() {
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let words = [
+        0xf0bc_011a_u32,
+        0x0061_0400,
+        0xF800_000F,
+        0x0706_0504,
+        0xBF81_0000,
+    ];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        Window::default(),
+    )
+    .expect("the compare sample of a cube translated");
+    let mut at = 5;
+    let (mut dref, mut depth_cube) = (false, false);
+    while at < module.len() {
+        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
+        // OpTypeImage: its third operand is Dim (Cube is 3), its fourth Depth.
+        depth_cube |=
+            opcode == 25 && module.get(at + 3) == Some(&3) && module.get(at + 4) == Some(&1);
+        dref |= opcode == 90;
+        at += count.max(1);
+    }
+    assert!(depth_cube, "the image is declared a depth cube");
+    assert!(dref, "it is sampled against the reference");
+}
+
 /// The dimensionality code for a cube, fourth in the same order.
 const CUBE: u32 = 3;
 

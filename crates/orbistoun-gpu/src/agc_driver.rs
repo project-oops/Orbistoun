@@ -5626,7 +5626,17 @@ mod command_processor {
                     .spawn(move || {
                         ON_PROCESSOR.set(true);
                         super::note_working_thread("command processor");
-                        for work in receive {
+                        loop {
+                            // With nothing handed to it, the processor polls the memory wait the
+                            // queue stopped at (D932).
+                            let work = match receive.recv_timeout(super::WAIT_POLL) {
+                                Ok(work) => work,
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                    super::resume_stalled();
+                                    continue;
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            };
                             let (bytes, submission) = *work;
                             run_submission(&bytes, submission);
                             let (queued, fell) = &IN_FLIGHT;
@@ -5646,6 +5656,9 @@ mod command_processor {
     /// Queues a prepared submission; carries it out here when no thread could be started.
     pub(super) fn queue(bytes: Vec<u8>, submission: Submission, writes: QueuedWrites) {
         let Some(sender) = sender() else {
+            // With no processor thread, a memory wait the queue stopped at is polled as work comes
+            // (D932).
+            super::resume_stalled();
             run_submission(&bytes, submission);
             return;
         };
@@ -5800,6 +5813,10 @@ mod command_processor {
     }
 }
 
+/// How long the command processor waits for work before it polls a memory wait the queue stopped
+/// at again (D932).
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Carries out one prepared submission: the command processor's memory work, its draws, its
 /// flips' release, and the record of what ran.
 fn run_submission(bytes: &[u8], submission: Submission) {
@@ -5813,6 +5830,13 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         note_fillers(bytes);
         if let Ok(mut record) = execution_record().lock() {
             record.held_back += 1;
+        }
+        // Kept, to run in order once a wait that stopped the queue holds (D932).
+        if waits_on_memory(stalled.as_ref()) {
+            held_streams()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back((bytes.to_vec(), submission.clone()));
         }
         if let Ok(mut slot) = last_submission().lock() {
             *slot = Some(submission);
@@ -5845,10 +5869,108 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         executed = execute_part(bytes, offset, &submission);
     }
     finish(bytes, executed);
+    // A stream a memory wait stopped is kept, to go on from the wait once the word holds (D932).
+    if let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped {
+        *stalled_stream()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(StalledStream {
+            bytes: bytes.to_vec(),
+            submission: submission.clone(),
+            from: offset,
+        });
+    }
     if let Ok(mut slot) = last_submission().lock() {
         *slot = Some(submission);
     }
     resume_aside();
+}
+
+/// Whether the queue stopped at a memory wait, which the command processor goes on polling (D932).
+const fn waits_on_memory(stalled: Option<&cp::CpExecution>) -> bool {
+    matches!(
+        stalled,
+        Some(cp::CpExecution {
+            stopped: cp::Stopped::WaitNeverSatisfied { .. },
+            ..
+        })
+    )
+}
+
+/// The graphics stream a memory wait stopped, and where it goes on from (D932).
+struct StalledStream {
+    bytes: Vec<u8>,
+    submission: Submission,
+    from: u32,
+}
+
+/// The graphics stream a memory wait stopped, while the queue stands at that wait.
+fn stalled_stream() -> &'static Mutex<Option<StalledStream>> {
+    static STALLED: Mutex<Option<StalledStream>> = Mutex::new(None);
+    &STALLED
+}
+
+/// The graphics streams handed to the queue since a memory wait stopped it, in order (D932).
+fn held_streams() -> &'static Mutex<std::collections::VecDeque<(Vec<u8>, Submission)>> {
+    static HELD: Mutex<std::collections::VecDeque<(Vec<u8>, Submission)>> =
+        Mutex::new(std::collections::VecDeque::new());
+    &HELD
+}
+
+/// Polls the wait a graphics stream stopped at, as the command processor polls a `WAIT_REG_MEM`
+/// while the title's threads run (D932): the stream goes on from the wait where the word now holds,
+/// and the streams held behind it run after it in order, until one stops the queue again. Answers
+/// whether anything went further.
+pub(crate) fn resume_stalled() -> bool {
+    let waiting = *queue_stall()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Only while the queue stands at that wait: a stop for any other reason is not polled.
+    if !waits_on_memory(waiting.as_ref()) {
+        return false;
+    }
+    let Some(stalled) = stalled_stream()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return false;
+    };
+    let executed = execute_part(&stalled.bytes, stalled.from, &stalled.submission);
+    if let cp::Stopped::WaitNeverSatisfied { offset, .. } = executed.stopped {
+        let further = offset != stalled.from;
+        if further {
+            finish(&stalled.bytes, executed);
+        }
+        *stalled_stream()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(StalledStream {
+            from: offset,
+            ..stalled
+        });
+        return further;
+    }
+    *queue_stall()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    finish(&stalled.bytes, executed);
+    loop {
+        let stopped = queue_stall()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if stopped {
+            break;
+        }
+        let next = held_streams()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        let Some((bytes, submission)) = next else {
+            break;
+        };
+        run_submission(&bytes, submission);
+    }
+    true
 }
 
 /// Carries out `bytes` from byte `from` on, as part of `submission`.
@@ -7587,6 +7709,62 @@ mod tests {
                 "a write on queue {queue}, behind a wait on queue 1"
             );
         }
+    }
+
+    /// A graphics stream stopped at a memory wait goes on once the word holds, and the streams
+    /// handed to the queue since run after it in order (D932): the command processor polls the
+    /// word while the title's own threads run. Grand Theft Auto V's frame 7001 waits on a word its
+    /// CPU sets, and the render thread waits for that frame.
+    #[test]
+    fn a_graphics_stream_waiting_on_memory_goes_on_once_the_word_holds() {
+        use crate::packet::build::command_header;
+        let _guard = serial();
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; 0x100].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        allow_writes_to(base, 0x100);
+        *super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *super::stalled_stream()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        super::held_streams()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let low = |address: u64| u32::try_from(address & 0xffff_ffff).expect("low half");
+        let high = |address: u64| u32::try_from(address >> 32).expect("high half");
+        let bytes =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // WAIT_REG_MEM, equal, memory: a word that reads zero, waited on to read one.
+        let label = base + 0x80;
+        let wait = bytes(&[
+            command_header(0x3C, 6),
+            3 | 1 << 4,
+            low(label),
+            high(label),
+            1,
+            0xffff_ffff,
+            4,
+        ]);
+        // WRITE_DATA to memory (DST_SEL 5).
+        let write = bytes(&[command_header(0x37, 4), 5 << 8, low(base), high(base), 7]);
+        super::run_submission(&wait, super::Submission::default());
+        super::run_submission(&write, super::Submission::default());
+        let first = |memory: &[u8]| u32::from_le_bytes(memory[..4].try_into().expect("a word"));
+        assert_eq!(first(memory), 0, "held behind the wait");
+        assert!(!super::resume_stalled(), "the word still reads zero");
+        memory[0x80] = 1;
+        assert!(super::resume_stalled(), "the word holds");
+        assert_eq!(first(memory), 7, "the stream held behind it ran");
+        assert!(
+            super::queue_stall()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none(),
+            "the queue no longer stops"
+        );
     }
 
     /// A stream handed to an asynchronous compute ring is carried out though the graphics queue has

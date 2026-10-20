@@ -11086,7 +11086,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
         dimension: shape_dimension(dimension, (is_sample, name)),
         compare: matches!(name, "image_sample_c_lz" | "image_sample_c"),
     };
-    let (cube, volume, compare) = (shape.cube(), shape.volume(), shape.compare);
+    let (volume, compare) = (shape.volume(), shape.compare);
     if dimension != IMAGE_DIMENSION_2D && shape.dimension == Dimension::Flat {
         return Err(TranslateError::ImageDimension {
             offset: instruction.offset,
@@ -11147,9 +11147,10 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             "instruction does not have"
         )));
     }
-    if compare && (cube || volume || mask != 1) {
+    // A compared cube is sampled at its direction against the reference, as a flat one is (D933).
+    if compare && (volume || mask != 1) {
         return Err(refuse(
-            "a depth-compare sample of a cube, a volume or more than one channel is not translated",
+            "a depth-compare sample of a volume or of more than one channel is not translated",
         ));
     }
 
@@ -11647,7 +11648,8 @@ fn sample_coordinate<M: Model + ?Sized>(
     let across = address_element(model, instruction, (addresses, a16), first, lane)?;
     let down = address_element(model, instruction, (addresses, a16), first + 1, lane)?;
     let components = if cube {
-        let face = address_element(model, instruction, (addresses, a16), 2, lane)?;
+        // The face follows the face's two coordinates, behind a compare's reference.
+        let face = address_element(model, instruction, (addresses, a16), first + 2, lane)?;
         cube_direction(model, across, down, face)
             .map(|bits| model.as_float(bits))
             .to_vec()
