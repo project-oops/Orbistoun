@@ -5608,7 +5608,11 @@ impl Model for Wavefront<'_> {
                 return Err(CUBE_AND_FLAT);
             }
             // The first instruction to name a sampler records it, which may come after the first to
-            // name the image.
+            // name the image - a size query names none - and with it the load that filled it, so a
+            // reload from there is the same sampler (D690).
+            if bound.sampler.is_none() && sampler.is_some() {
+                bound.sampler_load = sampler_reaching;
+            }
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }

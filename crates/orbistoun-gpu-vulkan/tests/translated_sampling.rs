@@ -1496,6 +1496,66 @@ fn a_sampler_reloaded_from_its_own_offset_is_the_same_texture() {
     assert_eq!(translated.textures[0].sampler_offset, Some(0x20));
 }
 
+/// A texture first named by an access with no sampler - a size query - takes the load of the sampler
+/// its first sample names, so a reload from there is that sampler again: Grand Theft Auto V's
+/// lighting pixel shader asks `image_get_resinfo` of `s[0:7]` and then samples it twice, reloading
+/// `s[8:11]` from `+0x160` before each sample (D690).
+#[test]
+fn a_size_query_before_its_sampler_keeps_the_sampler_s_load() {
+    use orbistoun_translate::wavefront::{MeshPrimitive, UserData};
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load = |name: &str, dst: u32, offset: u32| {
+        let (family, opcode) = encodings.find_by_name(name).expect("the target has it");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    // image_get_resinfo v[8:9], v0, s[4:11] dmask:0x3 - no sampler.
+    let size_query = [0xF038_0308_u32, mimg_operands(0, 8, IMAGE_DESCRIPTOR, 0)];
+    let words = image_sample_words(39);
+    for word in size_query
+        .into_iter()
+        .chain(s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20))
+        .chain(words)
+        .chain(s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20))
+        .chain(words)
+        .chain([0xBF81_0000])
+    {
+        bytes.extend(word.to_le_bytes());
+    }
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("the sampler reloaded from its own offset is the same sampler");
+    assert_eq!(
+        translated.textures.len(),
+        1,
+        "one texture, queried and sampled twice"
+    );
+}
+
 /// A sampler loaded from the descriptor table is reported with its offset, beside the image's, so a
 /// pipeline reads the guest's own wrap and filter modes: here the image at 0x00 and the sampler at
 /// 0x20 of the table at the stage's first two user-data words, the layout the SDK's GL layer packs
