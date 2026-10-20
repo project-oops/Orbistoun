@@ -1,4 +1,4 @@
-# D931 - A multisampled draw is refused by the register that asked for it
+# D931 - A multisampled draw is named by the register that asked for it
 
 **Status:** decided
 **Date:** 2026-10-20
@@ -12,13 +12,14 @@ places come from Mesa's `gfx103.json`, and their use in a driver from radv. The 
 the host would draw the draw: at one sample, or at a count with the guest's positions, coverage
 mask and per-sample shading.
 
-Until the host draws multisampled targets, every draw that is not at one sample is counted. The
-submission is refused with the first draw's reason, which names the register, the field and its
-value: for example `PA_SC_AA_CONFIG.MSAA_NUM_SAMPLES asks for 4 samples, which are drawn at one`,
-or `CB_COLOR1_ATTRIB stores 2 fragments of 8 samples: EQAA is not modelled`.
+Every draw that is not at one sample is counted in its submission's report
+(`multisampled_draws`). The count keeps the first draw's reason, which names the register, the
+field and its value: for example `PA_SC_AA_CONFIG.MSAA_NUM_SAMPLES asks for 4 samples, which are
+drawn at one`, or `CB_COLOR1_ATTRIB stores 2 fragments of 8 samples: EQAA is not modelled`. Each
+distinct reason is logged once a run. The draw itself is still drawn at one sample.
 
-Some shapes stay refused even once targets are multisampled, because their console behaviour is
-unmeasured. These are:
+Some shapes stay unmodelled even once targets are multisampled, because their console behaviour
+is unmeasured. These are:
 
 - a count of 16
 - EQAA, where there are fewer fragments than samples or fewer depth anchors than samples
@@ -28,12 +29,14 @@ unmeasured. These are:
 - a multisampled draw whose stream never wrote its sample positions
 
 **Why:** a draw at one sample into a target the guest laid out at several writes back memory in
-the wrong layout, with nothing to show for it. A refusal that names the register ranks the
-work by the titles that hit it. It is also what the request to obSCEne (`REQ-20261020T1415Z-ms01`)
+the wrong layout. Naming the register shows which titles draw multisampled, and with what, so the
+work is ranked by them. It is also what the request to obSCEne (`REQ-20261020T1415Z-ms01`)
 measures against.
 
 **Rejected:**
-- Drawing at one sample, as before. The frame looks plausible, while the memory and the samples a
-  later read takes are wrong.
+- Refusing such a submission, so that it is neither drawn nor written back. Titles that show a
+  picture today through a multisampled target would lose it with nothing measured. Whether a
+  title's draws are refused or drawn at the guest's sample count is decided once the count shows
+  where multisampling is used.
 - Taking radv's default sample positions for a stream that wrote none. They are a driver's
   choice, not the console's. The library's context reset may write others.

@@ -1012,6 +1012,9 @@ pub struct SubmissionReport {
     /// Draws whose primitives' layers or viewports are not drawn as the hardware draws them
     /// (D859), and why the first was refused.
     pub unmodelled_layers: (usize, Option<String>),
+    /// Draws whose multisampling state is not drawn as the guest set it ([`crate::msaa`]), and why
+    /// the first was not (D931).
+    pub multisampled_draws: (usize, Option<String>),
 }
 
 impl SubmissionReport {
@@ -6303,6 +6306,9 @@ fn push_geometry_commands(
         );
         // The layer this draw renders, which its primitive shader keeps the primitives of (D859).
         push_draw_layer(commands, &mut layer_sent, |r| sweep.latest(at, r), report);
+        // The multisampling in force at this draw, counted and named while it is drawn at one
+        // sample (D931).
+        crate::msaa::MsaaState::tally(|r| sweep.latest(at, r), &mut report.multisampled_draws);
         // The line width in force at this draw, when the stream set one and it changed.
         if let Some(width) = sweep
             .latest(at, crate::registers::PA_SU_LINE_CNTL)

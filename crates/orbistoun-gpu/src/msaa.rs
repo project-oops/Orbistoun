@@ -8,10 +8,10 @@
 //!
 //! [`MsaaState::at`] reads the state; [`MsaaState::rasterization`] says how the host draws it: at
 //! one sample, or multisampled at a count with its sample positions and coverage mask. What it
-//! cannot model it refuses by name, the register and field and value that asked for it
-//! ([`MsaaRefusal`]): never a draw at one sample that the guest drew at several. Until the host
-//! draws multisampled targets, [`MsaaState::unmodelled`] refuses every draw not at one sample
-//! (D931).
+//! cannot model it names, by the register and field and value that asked for it
+//! ([`MsaaRefusal`]). Until the host draws multisampled targets, a draw not at one sample is drawn
+//! at one, and [`MsaaState::tally`] counts it in the submission's report and says each reason once
+//! a run (D931).
 
 use crate::registers::RegisterWrite;
 
@@ -155,6 +155,15 @@ impl SampleOffset {
 
 /// The sample positions of each pixel of the 2x2 quad: `X0Y0`, `X1Y0`, `X0Y1`, `X1Y1`.
 pub type QuadLocations = [Vec<SampleOffset>; 4];
+
+/// Whether `why` is said for the first time this run.
+fn first_seen(why: &str) -> bool {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    SEEN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(why.to_owned())
+}
 
 /// Sign-extends a four-bit field.
 fn nibble(word: u32, index: u32) -> i8 {
@@ -370,9 +379,13 @@ impl MsaaState {
     }
 
     /// Counts a draw whose state `latest` gives into `tally` when it is [`Self::unmodelled`],
-    /// keeping the first reason: what the draw sweep calls at each draw.
+    /// keeping the first reason: what the draw sweep calls at each draw. Each reason is also said
+    /// once a run, so a run's log names every multisampling shape its title draws with (D931).
     pub fn tally(latest: impl FnMut(u32) -> Option<u32>, tally: &mut (usize, Option<String>)) {
         if let Some(why) = Self::read(latest).unmodelled() {
+            if first_seen(&why) {
+                tracing::warn!("a draw is drawn at one sample: {why}");
+            }
             tally.0 += 1;
             tally.1.get_or_insert(why);
         }
@@ -659,6 +672,14 @@ mod tests {
             tally.1.is_some_and(|first| first.contains("EQAA")),
             "the first reason kept"
         );
+    }
+
+    /// A reason is said once a run: the second sighting is not first.
+    #[test]
+    fn a_reason_is_seen_first_once() {
+        let why = "a reason only this test gives";
+        assert!(first_seen(why));
+        assert!(!first_seen(why));
     }
 
     /// radv's 8x positions (`radv_device.c:979-981`) span two words a pixel.
