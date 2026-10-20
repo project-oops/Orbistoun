@@ -37,6 +37,14 @@ const DB_HTILE_DATA_BASE_HI: u32 = 0xA01E;
 const TILE_SURFACE_ENABLE: u32 = 1 << 29;
 /// An HTILE word's `ZMASK`, bits 3:0 in every layout: zero is a tile in the cleared state.
 const HTILE_ZMASK: u32 = 0xF;
+/// `DB_Z_READ_BASE`, byte `163912` (`0x28048`, `gfx10.json`): the surface the depth test reads.
+const DB_Z_READ_BASE: u32 = 0xA012;
+/// `DB_STENCIL_READ_BASE`, byte `163916` (`0x2804c`): the surface the stencil test reads.
+const DB_STENCIL_READ_BASE: u32 = 0xA013;
+/// `DB_Z_READ_BASE_HI`, byte `163944` (`0x28068`).
+const DB_Z_READ_BASE_HI: u32 = 0xA01A;
+/// `DB_STENCIL_READ_BASE_HI`, byte `163948` (`0x2806c`).
+const DB_STENCIL_READ_BASE_HI: u32 = 0xA01B;
 /// `DB_Z_WRITE_BASE`, byte `163920` (`0x28050`).
 const DB_Z_WRITE_BASE: u32 = 0xA014;
 /// `DB_STENCIL_WRITE_BASE`, byte `163924` (`0x28054`).
@@ -115,6 +123,38 @@ pub struct DepthTarget {
     pub slice: u32,
 }
 
+/// Where a stream's depth and stencil tests read and write, from the latest writes to the base
+/// registers: zero where none is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DepthBases {
+    /// `DB_Z_READ_BASE`'s surface.
+    pub z_read: u64,
+    /// `DB_Z_WRITE_BASE`'s surface.
+    pub z_write: u64,
+    /// `DB_STENCIL_READ_BASE`'s surface.
+    pub stencil_read: u64,
+    /// `DB_STENCIL_WRITE_BASE`'s surface.
+    pub stencil_write: u64,
+}
+
+/// The [`DepthBases`] the latest writes to the base registers name.
+#[must_use]
+pub fn depth_bases_at(writes: &[RegisterWrite]) -> DepthBases {
+    let at = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map_or(0, |write| write.value)
+    };
+    DepthBases {
+        z_read: surface_address(at(DB_Z_READ_BASE), at(DB_Z_READ_BASE_HI)),
+        z_write: surface_address(at(DB_Z_WRITE_BASE), at(DB_Z_WRITE_BASE_HI)),
+        stencil_read: surface_address(at(DB_STENCIL_READ_BASE), at(DB_STENCIL_READ_BASE_HI)),
+        stencil_write: surface_address(at(DB_STENCIL_WRITE_BASE), at(DB_STENCIL_WRITE_BASE_HI)),
+    }
+}
+
 /// The depth target a stream binds, from the latest writes to its registers.
 ///
 /// [`None`] when the stream never sets `DB_Z_INFO`, or sets it to `Z_INVALID`: no depth target is
@@ -134,11 +174,14 @@ pub fn depth_target_at(writes: &[RegisterWrite]) -> Option<DepthTarget> {
     }
     let at = |register| latest(register).unwrap_or(0);
     let tiled = at(DB_Z_INFO) & TILE_SURFACE_ENABLE != 0;
+    // A target the draws only test is named by its read bases alone.
+    let bases = depth_bases_at(writes);
+    let or_read = |write: u64, read: u64| if write == 0 { read } else { write };
     Some(DepthTarget {
         format,
         stencil: decode_stencil_format(at(DB_STENCIL_INFO)),
-        base: surface_address(at(DB_Z_WRITE_BASE), at(DB_Z_WRITE_BASE_HI)),
-        stencil_base: surface_address(at(DB_STENCIL_WRITE_BASE), at(DB_STENCIL_WRITE_BASE_HI)),
+        base: or_read(bases.z_write, bases.z_read),
+        stencil_base: or_read(bases.stencil_write, bases.stencil_read),
         htile: tiled.then(|| surface_address(at(DB_HTILE_DATA_BASE), at(DB_HTILE_DATA_BASE_HI))),
         depth_clear: at(DB_DEPTH_CLEAR),
         slice: (at(DB_DEPTH_VIEW) & 0x7FF) | (at(DB_DEPTH_VIEW) >> 11 & 0x3) << 11,
@@ -697,10 +740,11 @@ impl PendingFills {
 #[cfg(test)]
 mod tests {
     use super::{
-        CullState, DepthFormat, DepthTarget, FrontFace, PendingFills, StencilRefMask, decode_cull,
-        decode_depth_clear, decode_depth_format, decode_render_control, decode_stencil_clear,
-        decode_stencil_format, decode_stencil_ref_mask, depth_stencil_from, depth_target_at,
-        depth_target_id, depth_target_id_at, depth_target_slice_id, surface_address,
+        CullState, DepthBases, DepthFormat, DepthTarget, FrontFace, PendingFills, StencilRefMask,
+        decode_cull, decode_depth_clear, decode_depth_format, decode_render_control,
+        decode_stencil_clear, decode_stencil_format, decode_stencil_ref_mask, depth_bases_at,
+        depth_stencil_from, depth_target_at, depth_target_id, depth_target_id_at,
+        depth_target_slice_id, surface_address,
     };
     use crate::backend::{RenderCommand, ResourceId};
     use crate::cp::Fill;
@@ -770,6 +814,41 @@ mod tests {
         );
         assert_eq!(depth_target_at(&[write(0xA010, 0)]), None, "Z_INVALID");
         assert_eq!(depth_target_at(&[write(0xA014, 0x1)]), None, "no DB_Z_INFO");
+    }
+
+    /// A stream that sets only the read bases - a depth target the draws test and never write -
+    /// binds the surface those name: the depth and stencil tests read `DB_Z_READ_BASE` and
+    /// `DB_STENCIL_READ_BASE` (`gfx10.json`, 0x28048 and 0x2804c). Every base is reported.
+    #[test]
+    fn a_read_only_depth_target_is_its_read_bases() {
+        let writes = [
+            write(0xA010, 0x8000_0183),
+            write(0xA011, 0x2000_0181),
+            write(0xA012, 0x0052_cc00),
+            write(0xA01A, 0x74),
+            write(0xA013, 0x0054_ca00),
+            write(0xA01B, 0x74),
+        ];
+        let target = depth_target_at(&writes).expect("a depth target");
+        assert_eq!(
+            (target.base, target.stencil_base),
+            (0x7400_52cc_0000, 0x7400_54ca_0000)
+        );
+        assert_eq!(
+            depth_bases_at(&writes),
+            DepthBases {
+                z_read: 0x7400_52cc_0000,
+                z_write: 0,
+                stencil_read: 0x7400_54ca_0000,
+                stencil_write: 0,
+            }
+        );
+        // A write base, where one is set, is the surface.
+        let written = [writes.as_slice(), &[write(0xA014, 0x0003_0000)]].concat();
+        assert_eq!(
+            depth_target_at(&written).map(|t| t.base),
+            Some(0x3_0000 << 8)
+        );
     }
 
     /// A depth target's id is its address, apart from colour targets' and shaders'.

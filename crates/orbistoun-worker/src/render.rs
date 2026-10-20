@@ -2313,6 +2313,15 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
             submission.colour_target_bases,
         )
     );
+    // Where its depth and stencil tests read and write: a depth target the draws only read is
+    // named by its read bases.
+    if let Some(bases) = submission.depth_bases {
+        let _ = writeln!(
+            text,
+            "depth target: depth read {:#x}, write {:#x}; stencil read {:#x}, write {:#x}",
+            bases.z_read, bases.z_write, bases.stencil_read, bases.stencil_write
+        );
+    }
     // The primitive the mesh modules were made to emit: a draw of another shape draws nothing.
     let _ = writeln!(
         text,

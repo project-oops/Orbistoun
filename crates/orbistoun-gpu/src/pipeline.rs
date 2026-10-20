@@ -1095,6 +1095,9 @@ pub struct Submission {
     /// How many distinct colour target zero bases the stream wrote: one frame is written back only
     /// when all draws went to one target.
     pub colour_target_bases: usize,
+    /// Where the depth target's tests read and write, where the stream binds one: what a depth or
+    /// stencil texture the draws sample is matched against.
+    pub depth_bases: Option<crate::depth::DepthBases>,
     /// Every colour target zero the draws draw into, one per run of draws into a base: what
     /// carrying the submission out writes, which a later submission's preparation reads only once
     /// it has been carried out (D874). Empty when nothing is drawn.
@@ -1326,6 +1329,9 @@ fn set_render_targets(
         let target = crate::depth::depth_target_at(writes)?;
         Some((crate::depth::depth_target_id(&target), target, extent))
     });
+    submission.depth_bases = depth_target
+        .as_ref()
+        .map(|_| crate::depth::depth_bases_at(writes));
     if let Some(extent) = colour_target_extent_at(&first) {
         let base = colour_target_at(&first).map(|target| target.base);
         let target = colour_target_id(extent, base);
