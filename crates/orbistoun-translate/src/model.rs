@@ -8014,6 +8014,7 @@ pub const SDWA_INTEGER: &[&str] = &[
     "v_add_nc_u32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
+    "v_ashrrev_i32_e32",
     "v_or_b32_e32",
     "v_xor_b32_e32",
     "v_and_b32_e32",
@@ -8946,12 +8947,12 @@ fn sdwa_integer_operation<M: Model + ?Sized>(
         "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, a, b),
         "v_and_b32_e32" => model.binary(op::BITWISE_AND, a, b),
         // The reversed shifts: the amount is the first source.
-        "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" => {
+        "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_ashrrev_i32_e32" => {
             let amount = model.binary(op::BITWISE_AND, a, low_five);
-            let shift = if name == "v_lshlrev_b32_e32" {
-                op::SHIFT_LEFT_LOGICAL
-            } else {
-                op::SHIFT_RIGHT_LOGICAL
+            let shift = match name {
+                "v_lshlrev_b32_e32" => op::SHIFT_LEFT_LOGICAL,
+                "v_lshrrev_b32_e32" => op::SHIFT_RIGHT_LOGICAL,
+                _ => op::SHIFT_RIGHT_ARITHMETIC,
             };
             model.binary(shift, b, amount)
         }

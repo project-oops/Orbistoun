@@ -6933,6 +6933,37 @@ fn an_exclusive_or_works_whole_and_on_a_selected_word() {
     );
 }
 
+/// `v_ashrrev_i32` in its SDWA form shifts its second source right by the first, keeping the sign -
+/// GTA V's lighting shader (`0x300000f9 0x86060600`) shifts a scalar register, bit 31 of the word
+/// marking the second source scalar: 0x8000_0010 >> 4 is 0xf800_0001.
+#[test]
+fn an_sdwa_arithmetic_shift_takes_a_scalar_second_source() {
+    if !device_or_skip("an_sdwa_arithmetic_shift_takes_a_scalar_second_source") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 4)];
+    program.extend(s_mov_literal(2, 0x8000_0010));
+    let [first, word] = vop2_sdwa(
+        "v_ashrrev_i32_e32",
+        1,
+        2,
+        Sdwa {
+            src0: 0,
+            src0_scalar: false,
+            src0_sel: SEL_DWORD,
+            src0_sext: false,
+            src1_sel: SEL_DWORD,
+            src1_sext: false,
+            dst_sel: SEL_DWORD,
+            dst_unused: 0,
+        },
+    );
+    program.extend([first, word | 1 << 31]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 0xf800_0001);
+}
+
 /// A float instruction in its SDWA form over whole registers is its long form: PPSA02664's pixel
 /// shader doubles a product through SDWA's output multiplier (`v_mul_f32_sdwa v1, v2, v8 mul:2`,
 /// modifier word 0x06064602), and the source modifiers take absolute value and negate as the
