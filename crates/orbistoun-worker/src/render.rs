@@ -1032,12 +1032,14 @@ fn dispatch_image(
     orbistoun_gpu_vulkan::compute_images::DispatchImage {
         texels: &image.texels,
         format: match image.format {
-            // A dispatch image is never a packed-float or sRGB one: `dispatch_format` reads neither,
-            // so their arm is the four-byte one's.
+            // A dispatch image is never an sRGB one: `dispatch_format` reads none, so its arm is
+            // the four-byte one's.
             orbistoun_gpu::pipeline::TexelFormat::Rgba8
-            | orbistoun_gpu::pipeline::TexelFormat::Float11_11_10
             | orbistoun_gpu::pipeline::TexelFormat::Rgba8Srgb => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba8
+            }
+            orbistoun_gpu::pipeline::TexelFormat::Float11_11_10 => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Float11_11_10
             }
             orbistoun_gpu::pipeline::TexelFormat::Rgba32Uint => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba32Uint
@@ -1071,6 +1073,8 @@ fn dispatch_image(
         height: image.height,
         depth: image.depth,
         layers: image.layers,
+        sampling: image.sampling,
+        cube: image.cube,
     }
 }
 
@@ -1096,7 +1100,10 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         write_submission(submission, &format!("drawn-{number:02}"));
     }
     keep_submission_before_named_flip(submission);
-    let (&target, extent) = submission.targets.iter().next()?;
+    let Some((&target, extent)) = submission.targets.iter().next() else {
+        tracing::warn!("a submission's draws name no colour target to draw into");
+        return None;
+    };
     let started = std::time::Instant::now();
     // One backend for the run, because the pipeline names each shader and resource to the backend
     // once, on first sight, and a later submission refers to them. It also keeps shader modules and
@@ -1124,7 +1131,14 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         // The target is the frame this backend last produced; with nothing held for it the
         // draws are declined rather than drawn on a clear.
         Before::Held if backend.holds_target(target, (extent.width, extent.height)) => {}
-        Before::Held => return None,
+        Before::Held => {
+            tracing::warn!(
+                "a submission's draws continue a {}x{} frame this backend does not hold for their target",
+                extent.width,
+                extent.height
+            );
+            return None;
+        }
     }
     let outcome = match perf::span(perf::Span::Drive, || drive(backend, submission)) {
         Ok(outcome) => outcome,
@@ -1167,7 +1181,10 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     // A dumped submission's frame is read now, for its snapshot; every other frame stays on the
     // device until it is written back (D714).
     if number < DUMPED_SUBMISSIONS {
-        let frame = perf::measure(perf::Phase::ReadBack, || backend.last_frame())?;
+        let Some(frame) = perf::measure(perf::Phase::ReadBack, || backend.last_frame()) else {
+            tracing::warn!("a dumped submission's frame could not be read back for its snapshot");
+            return None;
+        };
         snapshot_frame(number, frame);
     }
     if let Err(e) = perf::span(perf::Span::SubmitDraws, || backend.submit_draws()) {

@@ -594,16 +594,18 @@ mod refusal_tests {
     }
 }
 
-/// `why` a dispatch's computed buffer could not be resolved, with what its waves reach it with when
-/// each is run on the host (D900): how many distinct descriptors, or why they cannot be run.
-fn probed_note(
+/// The range a dispatch's computed buffer binds where the prefix run could not resolve it (`why`):
+/// what its waves reach it with, each run on the host (D900, [`crate::draw_buffers::reached_range`]).
+/// Refused with `why`, how many distinct descriptors the waves reach it with and where their runs
+/// ended, or why they could not be run.
+fn probed_range(
     why: impl std::fmt::Display,
     source: &orbistoun_translate::draw_buffers::BufferSource,
     (words, state): (&[u32; USER_DATA_WORDS], &crate::dispatch::DispatchState),
     memory: &impl GuestMemory,
-) -> String {
+) -> Result<(u64, u64), String> {
     let orbistoun_translate::draw_buffers::BufferSource::Computed(computed) = source else {
-        return why.to_string();
+        return Err(why.to_string());
     };
     let count = state.user_data.len().min(USER_DATA_WORDS);
     match crate::draw_buffers::dispatch_computed_descriptors(
@@ -616,19 +618,18 @@ fn probed_note(
         ),
         memory,
     ) {
-        Ok(reached) => {
+        Ok(reached) => crate::draw_buffers::reached_range(computed, &reached).map_err(|bound| {
             let ends: Vec<String> = reached
                 .ends
                 .iter()
                 .map(|(at, waves)| format!("{waves} at {at:#x}"))
                 .collect();
             format!(
-                "{why}; run wave by wave, its waves reach it with {} distinct descriptor(s), their runs ending {} (D900)",
-                reached.descriptors.len(),
+                "{why}; run wave by wave, their runs ending {}: {bound}",
                 ends.join(", ")
             )
-        }
-        Err(probe) => format!("{why}; run wave by wave: {probe}"),
+        }),
+        Err(probe) => Err(format!("{why}; run wave by wave: {probe}")),
     }
 }
 
@@ -2385,7 +2386,7 @@ impl Pipeline {
                     range
                 } else {
                     crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)
-                        .map_err(|why| probed_note(why, source, (&words, state), memory))?
+                        .or_else(|why| probed_range(why, source, (&words, state), memory))?
                 };
             // Two copies of one byte disagree only where the dispatch writes one of them: read-only
             // copies of the same bytes agree (D746).
@@ -3395,6 +3396,10 @@ pub struct DispatchTexels {
     /// A 2D array's layers where the program addresses it as one, its texels layer after layer
     /// (D895, D897); `None` where it does not.
     pub layers: Option<u32>,
+    /// The sampler a fetched image is sampled through, where its program names one (D904).
+    pub sampling: Option<crate::registers::TextureSampling>,
+    /// Whether the program samples it as a cube, its six layers the faces (D907).
+    pub cube: bool,
 }
 
 /// A volume's slices, for its texels; `None` for a 2D surface or an array.
@@ -3457,7 +3462,7 @@ fn dispatch_images(
                     .fetched_depth
                     .push((u32::try_from(slot).unwrap_or(u32::MAX), id));
                 (
-                    host_depths(extent),
+                    host_depths(extent, source.layered),
                     (decode_image_descriptor(words).base, 0),
                 )
             }
@@ -3479,15 +3484,17 @@ fn dispatch_images(
 }
 
 /// The placeholder texels of a depth target the host holds, `extent` across and down: the host's
-/// depths fill them on the device (D894).
-fn host_depths((width, height): (u32, u32)) -> DispatchTexels {
+/// depths fill them on the device (D894). One `layered` program reads as an array of one (D906).
+fn host_depths((width, height): (u32, u32), layered: bool) -> DispatchTexels {
     DispatchTexels {
         texels: Vec::new().into(),
         format: TexelFormat::R32Float,
         width,
         height,
         depth: None,
-        layers: None,
+        layers: layered.then_some(1),
+        sampling: None,
+        cube: false,
     }
 }
 
@@ -3503,12 +3510,21 @@ fn stored_image(
     // back there (D894).
     if let Some((id, extent)) = dispatch_depth_target(words, source) {
         return Ok(StoredImage {
-            texels: host_depths(extent),
+            texels: host_depths(extent, source.layered),
             order: None,
             surface: None,
             keys_to_expand: None,
             depth: Some(id),
         });
+    }
+    if source.layered
+        && words[4] & BASE_ARRAY_FIELD != 0
+        && one_later_layer(source, words).is_none()
+    {
+        return Err(format!(
+            "a 2D array store to a view of several layers from a later one (D910): format {}",
+            describe_dispatch_image(&decode_image_descriptor(words), words)
+        ));
     }
     let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
     let spanned = read_spanned(&surface, memory)?;
@@ -3545,11 +3561,10 @@ fn stored_image(
             vec![0; surface.texels() * format.words() as usize].into()
         }
         crate::dcc::Keys::Other => {
-            return Err(concat!(
-                "the stored image's compression keys need per-block addressing, which is not ",
-                "modelled"
-            )
-            .to_owned());
+            return Err(format!(
+                "the stored image's compression keys need per-block addressing, which is not modelled ({})",
+                key_census(&descriptor, format, memory)
+            ));
         }
     };
     let texels = DispatchTexels {
@@ -3563,6 +3578,8 @@ fn stored_image(
         } else {
             None
         },
+        sampling: None,
+        cube: false,
     };
     // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
     let spanned = if keys_to_expand.is_some() {
@@ -3601,6 +3618,31 @@ fn stored_integer(images: &DispatchImages) -> Result<bool, String> {
     Ok(integer)
 }
 
+/// The sampler a dispatch's fetched image is sampled through, where its program names one (D904):
+/// read from the user data or the table the descriptor's own words come from, as a draw's is. A
+/// border colour from the border table is refused: a dispatch reads no table for it.
+fn dispatch_sampling(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+) -> Result<Option<crate::registers::TextureSampling>, String> {
+    let words: Vec<u32> = state
+        .user_data
+        .iter()
+        .map(|word| word.unwrap_or(0))
+        .collect();
+    match user_data_sampler(source, &words, memory) {
+        NamedSampler::NoneNamed => Ok(None),
+        NamedSampler::Unreadable => Err("its sampler is not readable".to_owned()),
+        NamedSampler::Read(sampling)
+            if matches!(sampling.border, crate::registers::BorderColour::Table(_)) =>
+        {
+            Err("its sampler's border colour is the border table's".to_owned())
+        }
+        NamedSampler::Read(sampling) => Ok(Some(sampling)),
+    }
+}
+
 /// One fetched image's texels, read through `source`'s descriptor, and where they were read.
 fn fetched_image(
     state: &crate::dispatch::DispatchState,
@@ -3610,6 +3652,7 @@ fn fetched_image(
 ) -> Result<(DispatchTexels, (u64, u64)), String> {
     let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)
         .map_err(|e| format!("fetched image {}: {e}", source.slot))?;
+    let words = dispatch_descriptor_words(state, source, memory)?;
     let (width, height) = surface.extent();
     let texels = match surface_keys(&descriptor, format, memory)? {
         crate::dcc::Keys::Uncompressed => {
@@ -3624,13 +3667,36 @@ fn fetched_image(
         }
         crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize].into(),
         crate::dcc::Keys::Other => {
-            return Err(concat!(
-                "the fetched image's compression keys need per-block addressing, which is ",
-                "not modelled"
-            )
-            .to_owned());
+            return Err(format!(
+                "the fetched image's compression keys need per-block addressing, which is not modelled ({:?} at {} bytes a texel, format {}, levels {}-{}, {}x{}, {} level(s), type {}, word 4 {:#x}, layered {}, volume {}; {})",
+                descriptor.tiling,
+                format.bytes(),
+                descriptor.format,
+                descriptor.base_level,
+                descriptor.last_level,
+                descriptor.width,
+                descriptor.height,
+                descriptor.levels,
+                words[3] >> 28,
+                words[4],
+                source.layered,
+                source.volume,
+                key_census(&descriptor, format, memory)
+            ));
         }
     };
+    // A view of several layers from a later one of an array the program addresses as one, read
+    // from the first (D910); a view of one later layer was read as that layer alone.
+    let first = if source.layered && one_later_layer(source, words).is_none() {
+        (words[4] & BASE_ARRAY_FIELD) >> 16
+    } else {
+        0
+    };
+    let texels = from_layer(
+        texels,
+        width as usize * height as usize * format.words() as usize,
+        first,
+    );
     Ok((
         DispatchTexels {
             texels,
@@ -3638,14 +3704,65 @@ fn fetched_image(
             width,
             height,
             depth: volume_depth(&surface),
-            layers: if source.layered {
-                surface_layers(&surface)
+            layers: if source.layered || source.cube {
+                surface_layers(&surface).map(|layers| layers - first)
             } else {
                 None
             },
+            sampling: dispatch_sampling(state, source, memory)
+                .map_err(|e| format!("fetched image {}: {e}", source.slot))?,
+            cube: source.cube,
         },
         (surface.base(), surface.bytes() as u64),
     ))
+}
+
+/// The layer a view of one later layer of an array names, `BASE_ARRAY` and `DEPTH` both, where the
+/// program addresses the image as an array (D910); `None` for any other view.
+fn one_later_layer(source: &TextureSource, words: [u32; 8]) -> Option<u32> {
+    let first = (words[4] & BASE_ARRAY_FIELD) >> 16;
+    (source.layered && first > 0 && words[4] & DEPTH_FIELD == first).then_some(first)
+}
+
+/// `descriptor` moved to its array's layer `layer`, as a colour target's slice is placed (D859,
+/// D899): its chain's bytes a layer on, and in a 64 KiB `_X` mode the layer's pipe-bank XOR on its
+/// own. `None` where its layout is not modelled, or in a mode whose layer terms were not read; a
+/// `64KB_S` array has none (`tools/addrlib/equation 64KB_S 4 32 array`).
+fn later_layer(
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    layer: u32,
+) -> Option<ImageDescriptor> {
+    let layout = surface_layout(descriptor, format)?;
+    let xor = match descriptor.tiling {
+        SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled64KbDX | SwizzleMode::Tiled64KbZX => {
+            crate::tiling::array_slice_xor(layer)
+        }
+        SwizzleMode::Tiled64KbS => 0,
+        _ => return None,
+    };
+    let chain = layout.chain_bytes(descriptor.width, descriptor.height, descriptor.levels);
+    Some(ImageDescriptor {
+        base: descriptor.base + u64::from(layer) * chain,
+        pipe_bank_xor: descriptor.pipe_bank_xor ^ xor,
+        ..*descriptor
+    })
+}
+
+/// `texels`, an array's layers each `per_layer` words, from layer `first` on: what a view from a
+/// later layer sees (D910).
+fn from_layer(
+    texels: std::sync::Arc<[u32]>,
+    per_layer: usize,
+    first: u32,
+) -> std::sync::Arc<[u32]> {
+    if first == 0 {
+        return texels;
+    }
+    texels
+        .get(per_layer * first as usize..)
+        .unwrap_or_default()
+        .into()
 }
 
 /// Whether a dispatch's fetched images hold integers, which its module declares for all of them at
@@ -3739,15 +3856,27 @@ fn dispatch_depth_target(
 ) -> Option<(ResourceId, (u32, u32))> {
     let descriptor = decode_image_descriptor(words);
     let depth_tiled = is_depth_swizzle(descriptor.tiling);
+    // A 2D image, or one layer of a 2D array - `BASE_ARRAY` the last layer `DEPTH` names - that a
+    // program reads as an array (D906): the target drawn at that slice (D909).
+    let first_layer = (words[4] & BASE_ARRAY_FIELD) >> 16;
+    let one_layer = if words[3] >> 28 == IMAGE_TYPE_2D {
+        Some(0)
+    } else {
+        (source.layered
+            && words[3] >> 28 == IMAGE_TYPE_2D_ARRAY
+            && words[4] & !(DEPTH_FIELD | BASE_ARRAY_FIELD) == 0
+            && words[4] & DEPTH_FIELD == first_layer)
+            .then_some(first_layer)
+    };
+    let slice = one_layer?;
     (depth_tiled
         && descriptor.format == FORMAT_32_FLOAT
-        && words[3] >> 28 == IMAGE_TYPE_2D
         && !source.volume
         && descriptor.base_level == 0
         && descriptor.last_level == 0)
         .then(|| {
             (
-                crate::depth::depth_target_id_at(descriptor.base),
+                crate::depth::depth_target_slice_id(descriptor.base, slice),
                 (descriptor.width, descriptor.height),
             )
         })
@@ -3819,15 +3948,11 @@ fn dispatch_image_surface(
     // otherwise.
     let volume = words[3] >> 28 == IMAGE_TYPE_3D;
     // A program may address an image as a 2D array, its layers from the first to the last the
-    // descriptor views (D895, D897): a 2D image, an array, or a cube's six faces.
-    if source.layered && words[4] & BASE_ARRAY_FIELD != 0 {
-        return Err(format!(
-            "a 2D array access to a view from a later layer (D897): format {}",
-            describe_dispatch_image(&descriptor, words)
-        ));
-    }
+    // descriptor views (D895, D897): a 2D image, an array, or a cube's six faces. A view from a
+    // later layer is read from the first, the layers before it dropped by its fetch (D910).
     let flat = words[3] >> 28 == IMAGE_TYPE_2D
-        || (source.layered && matches!(words[3] >> 28, IMAGE_TYPE_2D_ARRAY | IMAGE_TYPE_CUBE));
+        || (source.layered && matches!(words[3] >> 28, IMAGE_TYPE_2D_ARRAY | IMAGE_TYPE_CUBE))
+        || (source.cube && words[3] >> 28 == IMAGE_TYPE_CUBE);
     if (!flat && !volume) || volume != source.volume {
         return Err(format!(
             "a dispatch image that is not the shape its program addresses ({}): format {}",
@@ -3835,11 +3960,7 @@ fn dispatch_image_surface(
             describe_dispatch_image(&descriptor, words)
         ));
     }
-    // A ten-bit texel's channels are read in their own order: selects that move them are refused
-    // rather than read as they are.
-    if matches!(format, TexelFormat::Rgb10A2 | TexelFormat::Rgba16Float)
-        && destination_selects(words[3]) != IDENTITY_SELECTS
-    {
+    if reorders_packed_channels(format, words[3]) {
         return Err(format!(
             "a dispatch image whose selects reorder its channels: format {}",
             describe_dispatch_image(&descriptor, words)
@@ -3848,11 +3969,33 @@ fn dispatch_image_surface(
     if descriptor.last_level != descriptor.base_level {
         return Err("a dispatch image view of more than one level".to_owned());
     }
-    let layers = if source.layered {
+    // A view of one later layer alone is that layer's level, placed as a colour target's slice is
+    // (D910); a view of several from a later one is read from the first.
+    let descriptor = match one_later_layer(source, words) {
+        Some(layer) => {
+            let moved = later_layer(&descriptor, format, layer).ok_or_else(|| {
+                format!(
+                    "a view of layer {layer} of an array whose layers are not placed here: format {}",
+                    describe_dispatch_image(&descriptor, words)
+                )
+            })?;
+            words[4] &= !(DEPTH_FIELD | BASE_ARRAY_FIELD);
+            moved
+        }
+        None => descriptor,
+    };
+    // A cube's faces are a six-layer array's layers (D907).
+    let layers = if source.layered || source.cube {
         (words[4] & DEPTH_FIELD) + 1
     } else {
         1
     };
+    if source.cube && layers != 6 {
+        return Err(format!(
+            "a cube sample of an image of {layers} layers, not one cube's six: format {}",
+            describe_dispatch_image(&descriptor, words)
+        ));
+    }
     if descriptor.tiling == SwizzleMode::Linear && layers > 1 {
         return Err(format!(
             "a linear 2D array of more than one layer: format {}",
@@ -3940,7 +4083,7 @@ fn tiled_layers(
 ) -> Option<DispatchSurface> {
     let read = match descriptor.tiling {
         SwizzleMode::Tiled64KbZX => matches!(format.bytes(), 2 | 4),
-        SwizzleMode::Tiled64KbRX => format.bytes() == 4,
+        SwizzleMode::Tiled64KbRX => matches!(format.bytes(), 4 | 8),
         _ => false,
     };
     if !read
@@ -3986,6 +4129,20 @@ fn channel_order(format: TexelFormat, word3: u32) -> Option<[u8; 4]> {
         *slot = u8::try_from(byte).ok()?;
     }
     (seen == 0xF).then_some(order)
+}
+
+/// Whether a packed texel's selects move its channels, which are read in their own order and so
+/// refused rather than read as they are: anything but the identity, or for three packed floats X, Y,
+/// Z and one, the fourth reading one as the host's three-channel view answers it (D908).
+fn reorders_packed_channels(format: TexelFormat, word3: u32) -> bool {
+    let selects = destination_selects(word3);
+    match format {
+        TexelFormat::Rgb10A2 | TexelFormat::Rgba16Float => selects != IDENTITY_SELECTS,
+        TexelFormat::Float11_11_10 => {
+            selects[..3] != IDENTITY_SELECTS[..3] || !matches!(selects[3], 1 | 7)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a one-channel image's selects return what the host's one-channel view does: X, then
@@ -4040,6 +4197,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
         FORMAT_2_10_10_10_UNORM => Ok(TexelFormat::Rgb10A2),
         FORMAT_16_16_16_16_FLOAT => Ok(TexelFormat::Rgba16Float),
+        FORMAT_10_11_11_FLOAT => Ok(TexelFormat::Float11_11_10),
         // A sixteen-byte texel is placed linearly, or in `64KB_D_X`; its other layouts are not
         // modelled.
         FORMAT_32_32_32_32_UINT
@@ -4086,6 +4244,36 @@ mod dispatch_format_tests {
         assert_eq!((format.bytes(), format.is_integer()), (1, true));
     }
 
+    /// A `10_11_11_FLOAT` image (format 36) is three packed unsigned floats a word, as a draw reads
+    /// them (D774): what Grand Theft Auto V's loading-screen program stores to, 1024 x 1024 in
+    /// `64KB_S` (D908).
+    #[test]
+    fn packed_eleven_eleven_ten_floats_are_a_word() {
+        // Format 36, 1024 x 1024, the channels as they are, a one-layer 2D array in 64KB_S (9).
+        let words = [
+            0,
+            36 << 20 | (1023 & 3) << 30,
+            1023 >> 2 | 1023 << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 9 << 20 | 13 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("read");
+        assert_eq!(format, super::TexelFormat::Float11_11_10);
+        assert_eq!((format.bytes(), format.is_integer()), (4, false));
+        // X, Y, Z and one, as Grand Theft Auto V's selects are, or W, read as is; Z in the fourth
+        // place, or Y and X swapped, move channels.
+        let reorders =
+            |selects: u32| super::reorders_packed_channels(format, words[3] & !0xfff | selects);
+        assert!(!reorders(4 | 5 << 3 | 6 << 6 | 1 << 9));
+        assert!(!reorders(4 | 5 << 3 | 6 << 6 | 7 << 9));
+        assert!(reorders(4 | 5 << 3 | 6 << 6 | 6 << 9));
+        assert!(reorders(5 | 4 << 3 | 6 << 6 | 1 << 9));
+    }
+
     /// An `8_8_8_8_UINT` image (`gfx10-rsrc.json:65`, format 60) is four bytes of unsigned
     /// integer a texel: what PPSA04263's compute program copies from level to level, 4KB_S.
     #[test]
@@ -4119,7 +4307,11 @@ fn surface_keys(
         return Ok(crate::dcc::Keys::Uncompressed);
     };
     if descriptor.tiling != SwizzleMode::Tiled64KbRX {
-        return Err("a compressed image in a layout other than 64KB_R_X".to_owned());
+        return Err(format!(
+            "a compressed image in {:?} at {} bytes a texel, a layout other than 64KB_R_X",
+            descriptor.tiling,
+            format.bytes()
+        ));
     }
     let bytes = surface_key_bytes(descriptor, format)
         .ok_or_else(|| "a compressed one-byte-texel mip chain".to_owned())?;
@@ -4127,6 +4319,20 @@ fn surface_keys(
         .read(crate::dcc::meta_start(dcc), bytes)
         .ok_or_else(|| "an image's compression keys are not readable".to_owned())?;
     Ok(crate::dcc::classify(keys))
+}
+
+/// What a compressed image's keys hold, as [`crate::dcc::census`] counts them: what a refusal of
+/// mixed keys says.
+fn key_census(
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    memory: &impl GuestMemory,
+) -> String {
+    descriptor
+        .compression
+        .zip(surface_key_bytes(descriptor, format))
+        .and_then(|(dcc, bytes)| memory.read(crate::dcc::meta_start(dcc), bytes))
+        .map_or_else(|| "keys unreadable".to_owned(), crate::dcc::census)
 }
 
 /// How many bytes a compressed image's keys take, or `None` where their layout is not modelled: a
@@ -7098,10 +7304,17 @@ fn texel_texture(
         return tiled_volume_texture(&descriptor, words, slot, memory, texels);
     }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
-    let shape = (
-        words[3] >> 28 == IMAGE_TYPE_CUBE,
-        words[3] >> 28 == IMAGE_TYPE_3D,
-    );
+    let kind = words[3] >> 28;
+    let shape = (kind == IMAGE_TYPE_CUBE, kind == IMAGE_TYPE_3D);
+    // A tiled cube's faces are an array's layers (D912).
+    if shape.0 && descriptor.tiling != SwizzleMode::Linear {
+        return tiled_cube_texture(
+            &descriptor,
+            words,
+            (format, selects),
+            (slot, memory, texels),
+        );
+    }
     match (descriptor.tiling, format) {
         (SwizzleMode::Linear, TexelFormat::Rgba8 | TexelFormat::Rgba8Srgb) => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling); a one-byte
@@ -7306,6 +7519,46 @@ fn tiled_volume_texture(
         sampling: crate::registers::TextureSampling::default(),
         encoding,
     })
+}
+
+/// A tiled cube's bind: each of its six faces' first level, placed as an array's layer is
+/// ([`later_layer`], D912), in a layout a dispatch reads ([`tiled_surface`]). A cube whose view does
+/// not start at its first face and level, is not one cube's six faces, or is compressed, is `None`.
+fn tiled_cube_texture(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    (format, selects): (TexelFormat, [u32; 4]),
+    (slot, memory, texels): (u32, &impl GuestMemory, &mut TexelCache),
+) -> Option<RenderCommand> {
+    if words[4] & DEPTH_FIELD != ONE_CUBE_LAST_LAYER
+        || words[4] & BASE_ARRAY_FIELD != 0
+        || descriptor.base_level != 0
+        || descriptor.compression.is_some()
+    {
+        return None;
+    }
+    let faces: Vec<DispatchSurface> = (0..CUBE_FACES)
+        .map(|face| {
+            let placed = later_layer(descriptor, format, face)?;
+            tiled_surface(&placed, words, format, false)
+        })
+        .collect::<Option<_>>()?;
+    let first = faces.first()?;
+    let (width, height) = first.extent();
+    let last = faces.last()?;
+    let span = usize::try_from(last.base() - first.base()).ok()? + last.bytes();
+    let encoding = texture_encoding(format);
+    // A cube is another image than the 2D one at the same address and extent.
+    let key = (first.base(), width, height, 1 << 27 | CUBE_FACES);
+    let (hash, shared) = kept_or_read((texels, key, span), encoding, |_| {
+        let mut read = Vec::with_capacity(first.texels() * CUBE_FACES as usize);
+        for face in &faces {
+            read.extend(face.detile(memory.read(face.base(), face.bytes())?));
+        }
+        Some(read)
+    })?;
+    let bound = block_bind(slot, hash, shared, (width, height, CUBE_FACES), encoding);
+    Some(swizzled_texture(bound, format, selects))
 }
 
 /// A `4KB_S` volume's bind: its first level, read by addrlib's thick pattern
@@ -9765,6 +10018,30 @@ mod tests {
             super::dispatch_depth_target(sixteen, &TextureSource::default()),
             None
         );
+        // A one-layer 2D array (type 13, `DEPTH` 0) a program reads as an array is the same
+        // target (D906): Grand Theft Auto V's loading-screen program reads its 1024 x 1024 one so.
+        // A view of layer one alone (`BASE_ARRAY` and `DEPTH` 1) is the target drawn at slice one
+        // (D909). Two layers are not one target.
+        let mut array = image;
+        array[3] = array[3] & !(0xf << 28) | 13 << 28;
+        let layered = TextureSource {
+            layered: true,
+            ..TextureSource::default()
+        };
+        assert_eq!(
+            super::dispatch_depth_target(array, &layered).map(|(id, _)| id),
+            Some(crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8))
+        );
+        array[4] = 1 | 1 << 16;
+        assert_eq!(
+            super::dispatch_depth_target(array, &layered).map(|(id, _)| id),
+            Some(crate::depth::depth_target_slice_id(
+                0x0074_00d6_e500 << 8,
+                1
+            ))
+        );
+        array[4] = 1;
+        assert_eq!(super::dispatch_depth_target(array, &layered), None);
     }
 
     /// A depth compare's texture is the depth target at its descriptor's address, named rather than
@@ -10578,6 +10855,66 @@ mod tests {
         );
     }
 
+    /// A tiled cube binds its six faces, face `f` its first level placed as an array's layer `f` is
+    /// (D912, [`super::later_layer`]): a 32 x 32 `8_8_8_8_UNORM` cube in `64KB_S`, a 64 KiB block a
+    /// face. Grand Theft Auto V samples a 1024 x 1024 `10_11_11_FLOAT` one, its faces stored by
+    /// compute dispatches.
+    #[test]
+    fn a_tiled_cube_binds_its_six_faces() {
+        use super::{DispatchSurface, RenderCommand, SwizzleMode, texture_from_words};
+        use crate::tiling::SurfaceLayout;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let side = 32_u32;
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled64KbS).expect("modelled");
+        let mut bytes = vec![0_u8; 6 * 0x1_0000];
+        for face in 0..6_u32 {
+            let level = crate::registers::chain_level(
+                (0x1_0000 + u64::from(face) * 0x1_0000, 0),
+                (side, side),
+                (1, 0),
+                layout,
+            )
+            .expect("a level");
+            let texels: Vec<u32> = (0..side * side).map(|i| face << 16 | i).collect();
+            let at = face as usize * 0x1_0000;
+            DispatchSurface::Tiled(level)
+                .tile(&texels, &mut bytes[at..at + 0x1_0000])
+                .expect("tiled");
+        }
+        let words = [
+            0x100,
+            (56 << 20) | (((side - 1) & 3) << 30),
+            ((side - 1) >> 2) | ((side - 1) << 14) | (1 << 31),
+            0xb090_0fac,
+            5,
+            0,
+            0,
+            0,
+        ];
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 32,
+            height: 32,
+            faces: 6,
+            ..
+        }) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        let expected: Vec<u32> = (0..6_u32)
+            .flat_map(|face| (0..side * side).map(move |i| face << 16 | i))
+            .collect();
+        assert!(texels.to_vec() == expected, "every face in order");
+    }
+
     /// A compare of a linear `32_FLOAT` image - a depth texture a GL guest uploaded - binds its
     /// depths as they lie, compared through the module's sampler, and only for a compare; without a
     /// sampler it binds nothing.
@@ -11062,6 +11399,115 @@ mod tests {
             None,
             "an array is not a volume"
         );
+    }
+
+    /// A view of one later layer is that layer's level, a chain on and in a `_X` mode with the
+    /// layer's pipe-bank XOR, as a colour target's slice (D910): Grand Theft Auto V stores to layer
+    /// one of a two-layer 1024 x 1024 `10_11_11_FLOAT` array in `64KB_S`, which has no layer terms.
+    #[test]
+    fn a_view_of_one_later_layer_is_that_layer_s_level() {
+        use super::{SwizzleMode, TexelFormat, TextureSource};
+        use crate::registers::ImageDescriptor;
+        let image = |tiling| ImageDescriptor {
+            base: 0x100_0000,
+            width: 1024,
+            height: 1024,
+            format: 36,
+            tiling,
+            pipe_bank_xor: 2,
+            levels: 1,
+            base_level: 0,
+            last_level: 0,
+            compression: None,
+        };
+        let standard = super::later_layer(&image(SwizzleMode::Tiled64KbS), TexelFormat::Rgba8, 1)
+            .expect("placed");
+        assert_eq!((standard.base, standard.pipe_bank_xor), (0x140_0000, 2));
+        let rx = super::later_layer(&image(SwizzleMode::Tiled64KbRX), TexelFormat::Rgba8, 3)
+            .expect("placed");
+        assert_eq!((rx.base, rx.pipe_bank_xor), (0x1c0_0000, 2 ^ 0xc));
+        assert!(super::later_layer(&image(SwizzleMode::Linear), TexelFormat::Rgba8, 1).is_none());
+        let layered = TextureSource {
+            layered: true,
+            ..TextureSource::default()
+        };
+        let words = |word4: u32| [0, 0, 0, 0, word4, 0, 0, 0];
+        assert_eq!(
+            super::one_later_layer(&layered, words(1 | 1 << 16)),
+            Some(1)
+        );
+        assert_eq!(super::one_later_layer(&layered, words(2 | 1 << 16)), None);
+        assert_eq!(super::one_later_layer(&layered, words(0)), None);
+        assert_eq!(
+            super::one_later_layer(&TextureSource::default(), words(1 | 1 << 16)),
+            None
+        );
+    }
+
+    /// A fetch through a view from a later layer sees that layer on: Grand Theft Auto V's
+    /// loading-screen program reads layer one of a two-layer 1024 x 1024 `8_8_8_8_UNORM` array
+    /// (`BASE_ARRAY` 1, `DEPTH` 1), read whole and its first layer dropped (D910).
+    #[test]
+    fn a_view_from_a_later_layer_sees_that_layer_on() {
+        let texels: std::sync::Arc<[u32]> = (0..12).collect::<Vec<u32>>().into();
+        assert_eq!(&*super::from_layer(texels.clone(), 4, 0), &*texels);
+        assert_eq!(
+            &*super::from_layer(texels.clone(), 4, 1),
+            &(4..12).collect::<Vec<u32>>()[..]
+        );
+        assert_eq!(&*super::from_layer(texels, 4, 2), &[8, 9, 10, 11]);
+    }
+
+    /// An eight-byte `64KB_R_X` array's layers take the four-byte one's terms (`tools/addrlib/equation
+    /// 64KB_R_X 8 32 array`: layer beyond its slice `0x800, 0x400, 0x200, 0x100`): Grand Theft Auto
+    /// V's loading-screen program samples a 32 x 32 `16_16_16_16_FLOAT` cube's six faces so (D907).
+    /// Each layer is a block, its 256-byte pieces moved by the layer's XOR.
+    #[test]
+    fn an_eight_byte_array_s_layers_take_the_four_byte_terms() {
+        use super::{DispatchSurface, SwizzleMode, TexelFormat};
+        use crate::registers::ImageDescriptor;
+        let descriptor = ImageDescriptor {
+            base: 0x10_0000,
+            width: 32,
+            height: 32,
+            format: super::FORMAT_16_16_16_16_FLOAT,
+            tiling: SwizzleMode::Tiled64KbRX,
+            pipe_bank_xor: 0,
+            levels: 1,
+            base_level: 0,
+            last_level: 0,
+            compression: None,
+        };
+        let array = super::tiled_layers(&descriptor, TexelFormat::Rgba16Float, 6)
+            .expect("an eight-byte array is read");
+        let DispatchSurface::Volume { slice, depth, .. } = array else {
+            panic!("an array is its layers");
+        };
+        assert_eq!(depth, 6);
+        let flat = DispatchSurface::Tiled(slice);
+        assert_eq!(array.bytes(), 6 * 0x1_0000, "a block a layer");
+        let mut spanned = vec![0_u8; array.bytes()];
+        for layer in 0..6_u32 {
+            let xor = [0, 0x800, 0x400, 0xc00, 0x200, 0xa00][layer as usize];
+            let texels: Vec<u32> = (0..32 * 32 * 2).map(|i| layer << 16 | i).collect();
+            let mut block = vec![0_u8; 0x1_0000];
+            flat.tile(&texels, &mut block).expect("tiles");
+            for piece in (0..0x1_0000).step_by(256) {
+                let at = layer as usize * 0x1_0000 + (piece ^ xor);
+                spanned[at..at + 256].copy_from_slice(&block[piece..piece + 256]);
+            }
+        }
+        let texels = array.detile(&spanned);
+        assert_eq!(texels.len(), 32 * 32 * 2 * 6);
+        for (layer, words) in texels.chunks(32 * 32 * 2).enumerate() {
+            assert!(
+                words
+                    .iter()
+                    .zip(0_u32..)
+                    .all(|(&word, i)| word == (layer as u32) << 16 | i),
+                "layer {layer} in order"
+            );
+        }
     }
 
     /// A one-byte texture's texels are swizzled by a multiply and an or, every select taking the

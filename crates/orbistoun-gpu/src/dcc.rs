@@ -335,9 +335,9 @@ pub fn classify(keys: &[u8]) -> Keys {
 }
 
 /// How many of `keys` mark their block uncompressed, how many cleared to all-zero bits, how many
-/// cleared to the register's colour, and how many compressed, with the most common compressed key:
-/// what a refusal of mixed keys says, since the first three are exact with per-block addressing and
-/// the last needs the block's encoding.
+/// cleared to the register's colour, and how many compressed, with the most common compressed key
+/// and the first and last key byte compressed: what a refusal of mixed keys says, since the first
+/// three are exact with per-block addressing and the last needs the block's encoding.
 #[must_use]
 pub fn census(keys: &[u8]) -> String {
     let mut counts = [0_usize; 256];
@@ -355,8 +355,17 @@ pub fn census(keys: &[u8]) -> String {
         .max_by_key(|&key| counts[usize::from(key)])
         .filter(|_| compressed > 0)
         .map_or_else(String::new, |key| format!(", most often {key:#04x}"));
+    let is_compressed =
+        |key: &u8| ![KEY_UNCOMPRESSED, KEY_CLEAR_0000, KEY_CLEAR_REGISTER].contains(key);
+    let span = keys
+        .iter()
+        .position(is_compressed)
+        .zip(keys.iter().rposition(is_compressed))
+        .map_or_else(String::new, |(first, last)| {
+            format!(", bytes {first:#x} to {last:#x}")
+        });
     format!(
-        "{} key(s): {uncompressed} uncompressed, {cleared} cleared to 0000, {register} cleared to the register, {compressed} compressed{common}",
+        "{} key(s): {uncompressed} uncompressed, {cleared} cleared to 0000, {register} cleared to the register, {compressed} compressed{common}{span}",
         keys.len()
     )
 }
@@ -433,12 +442,13 @@ mod tests {
         assert!(key_equation(2, true).is_none());
     }
 
-    /// A census counts each kind of key and names the commonest compressed one.
+    /// A census counts each kind of key and names the commonest compressed one, and where the
+    /// compressed keys start and end.
     #[test]
     fn a_census_counts_each_kind_of_key() {
         assert_eq!(
             census(&[0xFF, 0x00, 0x00, 0x20, 0x44, 0x44, 0x40]),
-            "7 key(s): 1 uncompressed, 2 cleared to 0000, 1 cleared to the register, 3 compressed, most often 0x44"
+            "7 key(s): 1 uncompressed, 2 cleared to 0000, 1 cleared to the register, 3 compressed, most often 0x44, bytes 0x4 to 0x6"
         );
         assert_eq!(
             census(&[0xFF, 0x00]),

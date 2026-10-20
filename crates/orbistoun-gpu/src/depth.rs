@@ -22,6 +22,9 @@ const DB_RENDER_CONTROL: u32 = 0xA000;
 const DB_STENCIL_CLEAR: u32 = 0xA00A;
 /// `DB_DEPTH_CLEAR`, byte `163884` (`0x2802C`).
 const DB_DEPTH_CLEAR: u32 = 0xA00B;
+/// `DB_DEPTH_VIEW`, byte `163848` (`0x28008`): `SLICE_START` in bits 10:0, its high two bits in
+/// 12:11.
+const DB_DEPTH_VIEW: u32 = 0xA002;
 /// `DB_Z_INFO`, byte `163904` (`0x28040`).
 const DB_Z_INFO: u32 = 0xA010;
 /// `DB_STENCIL_INFO`, byte `163908` (`0x28044`).
@@ -108,6 +111,8 @@ pub struct DepthTarget {
     pub htile: Option<u64>,
     /// `DB_DEPTH_CLEAR`'s bits: the depth a tile HTILE marks cleared reads (D750).
     pub depth_clear: u32,
+    /// The slice of an array the target is, `DB_DEPTH_VIEW.SLICE_START` (D909).
+    pub slice: u32,
 }
 
 /// The depth target a stream binds, from the latest writes to its registers.
@@ -136,16 +141,27 @@ pub fn depth_target_at(writes: &[RegisterWrite]) -> Option<DepthTarget> {
         stencil_base: surface_address(at(DB_STENCIL_WRITE_BASE), at(DB_STENCIL_WRITE_BASE_HI)),
         htile: tiled.then(|| surface_address(at(DB_HTILE_DATA_BASE), at(DB_HTILE_DATA_BASE_HI))),
         depth_clear: at(DB_DEPTH_CLEAR),
+        slice: (at(DB_DEPTH_VIEW) & 0x7FF) | (at(DB_DEPTH_VIEW) >> 11 & 0x3) << 11,
     })
 }
 
-/// The id a backend keeps a depth target's attachment under: its depth surface's address.
+/// The id a backend keeps a depth target's attachment under: its depth surface's address and the
+/// slice of it the target is.
 ///
-/// Distinct surfaces are distinct attachments. Bit 62 keeps depth ids apart from colour targets'
-/// (bit 63) and shaders' (counting up from one); an address in 256-byte units fits in 40 bits.
+/// Distinct surfaces, and distinct slices of one, are distinct attachments (D909). Bit 62 keeps
+/// depth ids apart from colour targets' (bit 63) and shaders' (counting up from one); an address in
+/// 256-byte units fits in 40 bits, and a slice in the thirteen above them.
 #[must_use]
 pub const fn depth_target_id(target: &DepthTarget) -> ResourceId {
-    depth_target_id_at(target.base)
+    depth_target_slice_id(target.base, target.slice)
+}
+
+/// [`depth_target_id`] of slice `slice` of the depth surface at `base`: what a texture descriptor
+/// viewing that one layer of the same address samples (D909).
+#[must_use]
+pub const fn depth_target_slice_id(base: u64, slice: u32) -> ResourceId {
+    let ResourceId(at) = depth_target_id_at(base);
+    ResourceId(at | (slice as u64 & 0x1FFF) << 40)
 }
 
 /// [`depth_target_id`] of the depth target whose surface is at `base`: what a texture descriptor
@@ -677,7 +693,7 @@ mod tests {
         CullState, DepthFormat, DepthTarget, FrontFace, PendingFills, StencilRefMask, decode_cull,
         decode_depth_clear, decode_depth_format, decode_render_control, decode_stencil_clear,
         decode_stencil_format, decode_stencil_ref_mask, depth_stencil_from, depth_target_at,
-        depth_target_id, surface_address,
+        depth_target_id, depth_target_id_at, depth_target_slice_id, surface_address,
     };
     use crate::backend::{RenderCommand, ResourceId};
     use crate::cp::Fill;
@@ -742,6 +758,7 @@ mod tests {
                 stencil_base: 0x400_0000,
                 htile: None,
                 depth_clear: 0,
+                slice: 0,
             })
         );
         assert_eq!(depth_target_at(&[write(0xA010, 0)]), None, "Z_INVALID");
@@ -758,6 +775,7 @@ mod tests {
             stencil_base: 0,
             htile: None,
             depth_clear: 0,
+            slice: 0,
         };
         assert_eq!(
             depth_target_id(&target),
@@ -853,6 +871,7 @@ mod tests {
             stencil_base: 0x20_0000,
             htile: None,
             depth_clear: 0,
+            slice: 0,
         }
     }
 
@@ -908,6 +927,35 @@ mod tests {
             None,
             "a fill short of the surface does not clear it"
         );
+    }
+
+    /// A depth target is the slice `DB_DEPTH_VIEW.SLICE_START` names, bits 10:0 with the high two in
+    /// 12:11 (`gfx103.json`), each slice its own attachment; slice zero keeps the id its base alone
+    /// gave (D909). Grand Theft Auto V draws two 1024 x 1024 depth slices of one array and reads
+    /// slice one back.
+    #[test]
+    fn a_depth_target_is_the_slice_its_view_names() {
+        let writes = |view: u32| {
+            [
+                write(0xA010, 0xaf80_0183),
+                write(0xA014, 0x0401_0000),
+                write(0xA002, view),
+            ]
+        };
+        let first = depth_target_at(&writes(1 << 13)).expect("slice zero");
+        let second = depth_target_at(&writes(1 | 1 << 13)).expect("slice one");
+        let high = depth_target_at(&writes(1 << 11 | 3)).expect("slice 0x803");
+        assert_eq!((first.slice, second.slice, high.slice), (0, 1, 0x803));
+        assert_eq!(
+            depth_target_id(&first),
+            depth_target_id_at(0x4_0100_0000),
+            "slice zero is the base's"
+        );
+        assert_eq!(
+            depth_target_id(&second),
+            depth_target_slice_id(0x4_0100_0000, 1)
+        );
+        assert_ne!(depth_target_id(&first), depth_target_id(&second));
     }
 
     /// A fill of the depth surface's HTILE with tiles in the cleared state clears the attachment to

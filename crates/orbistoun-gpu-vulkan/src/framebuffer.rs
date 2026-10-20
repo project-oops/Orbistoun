@@ -2668,6 +2668,20 @@ pub(crate) struct TextureWords<'a> {
     pub(crate) hash: Option<u64>,
 }
 
+/// Whether a texture of `encoding` with `faces` faces is bound with its guest's mip chain (D833): a
+/// flat image of one word a texel - eight-bit channels, packed floats or `2_10_10_10` - staged level
+/// after level in its own format.
+pub(crate) const fn chains_levels(encoding: orbistoun_gpu::TextureEncoding, faces: u32) -> bool {
+    faces == 1
+        && matches!(
+            encoding,
+            orbistoun_gpu::TextureEncoding::Rgba8
+                | orbistoun_gpu::TextureEncoding::Rgba8Srgb
+                | orbistoun_gpu::TextureEncoding::Float11_11_10
+                | orbistoun_gpu::TextureEncoding::Rgb10A2
+        )
+}
+
 /// Texels a `levels`-level chain of a `width` x `height` image holds: each level's sides the level
 /// above's halved, never below one (D833).
 pub(crate) fn chain_texels(width: u32, height: u32, levels: u32) -> usize {
@@ -2753,7 +2767,7 @@ const MAX_LOD_BIAS: f32 = 15.0;
 /// default - point sampling clamped to the edge - for a texture no sampler names, so a test that
 /// names a texel gets exactly that texel. A depth texture (`compare`) is sampled through a compare
 /// by the descriptor's function, whose values are `VkCompareOp`'s (D817).
-fn sampler_info<'a>(
+pub(crate) fn sampler_info<'a>(
     sampling: orbistoun_gpu::TextureSampling,
     levels: u32,
     compare: bool,
@@ -2824,7 +2838,7 @@ fn sampler_info<'a>(
 
 /// A border colour of the sampler's own, as `VK_EXT_custom_border_color` takes it: the guest's
 /// table entry's four floats, with no format, which the device was created allowing (D837).
-fn border_colour_info(
+pub(crate) fn border_colour_info(
     border: orbistoun_gpu::BorderColour,
 ) -> Option<vk::SamplerCustomBorderColorCreateInfoEXT<'static>> {
     let orbistoun_gpu::BorderColour::Custom(bits) = border else {
@@ -2873,6 +2887,9 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
             vk::Format::R8G8B8A8_SRGB,
             staged(texture.words, texture.width, coarse_level),
         ),
+        orbistoun_gpu::TextureEncoding::Float11_11_10 if flat && texture.levels > 1 => {
+            (vk::Format::B10G11R11_UFLOAT_PACK32, chain())
+        }
         orbistoun_gpu::TextureEncoding::Float11_11_10 => {
             (vk::Format::B10G11R11_UFLOAT_PACK32, as_they_are())
         }
@@ -2881,6 +2898,9 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
             (vk::Format::R16G16B16A16_SFLOAT, as_they_are())
         }
         // The guest's `2_10_10_10_UNORM`, red in the low ten bits, in the same bit order.
+        orbistoun_gpu::TextureEncoding::Rgb10A2 if flat && texture.levels > 1 => {
+            (vk::Format::A2B10G10R10_UNORM_PACK32, chain())
+        }
         orbistoun_gpu::TextureEncoding::Rgb10A2 => {
             (vk::Format::A2B10G10R10_UNORM_PACK32, as_they_are())
         }
@@ -7318,6 +7338,45 @@ pub fn draw_with_windows(
 #[cfg(test)]
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
+
+    /// A flat image of one word a texel stages its guest's whole mip chain in its own format (D833):
+    /// packed floats and `2_10_10_10` as eight-bit texels do. Grand Theft Auto V binds a chained
+    /// `10_11_11_FLOAT` texture.
+    #[test]
+    fn a_one_word_texel_chain_stages_every_level() {
+        let words = vec![0_u32; super::chain_texels(4, 4, 3)];
+        for (encoding, format) in [
+            (
+                orbistoun_gpu::TextureEncoding::Float11_11_10,
+                ash::vk::Format::B10G11R11_UFLOAT_PACK32,
+            ),
+            (
+                orbistoun_gpu::TextureEncoding::Rgb10A2,
+                ash::vk::Format::A2B10G10R10_UNORM_PACK32,
+            ),
+        ] {
+            let texture = super::TextureWords {
+                words: &words,
+                width: 4,
+                height: Some(4),
+                encoding,
+                faces: 1,
+                slices: None,
+                levels: 3,
+                hash: None,
+            };
+            let (staged_format, staged) = super::staged_texture(&texture, false);
+            assert!(
+                staged_format == format && staged.levels == 3,
+                "{encoding:?}"
+            );
+            assert!(super::chains_levels(encoding, 1));
+            assert!(
+                !super::chains_levels(encoding, 6),
+                "a cube's faces are not chained"
+            );
+        }
+    }
 
     /// A joined chunk's words, the first chunk's with its own counts, are the words its own draw
     /// would have.

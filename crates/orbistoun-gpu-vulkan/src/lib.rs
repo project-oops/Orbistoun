@@ -580,13 +580,9 @@ impl VulkanBackend {
                 ((width as usize) * (height as usize)).div_ceil(4)
             }
         };
-        // A mip chain's levels follow the base, each its own extent (D833): four-byte texels of a
+        // A mip chain's levels follow the base, each its own extent (D833): one-word texels of a
         // flat image only.
-        let chained = matches!(
-            encoding,
-            orbistoun_gpu::TextureEncoding::Rgba8 | orbistoun_gpu::TextureEncoding::Rgba8Srgb
-        ) && faces == 1;
-        if levels != 1 && !chained {
+        if levels != 1 && !framebuffer::chains_levels(encoding, faces) {
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "BindTexture of a mip chain that is not a flat four-byte image",

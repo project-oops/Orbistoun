@@ -664,19 +664,23 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     }
 }
 
-/// `sceAgcCbDispatch(cb, x, y, z, ..)` writes the dispatch hardware wrote for the same arguments:
-/// the thread-group counts in DW1-DW3 and the initiator `0x41` whatever `arg4` and `arg5` are
-/// (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15). PPSA03416's own call first.
+/// `sceAgcCbDispatch(cb, x, y, z, modifier, ..)` writes the dispatch hardware wrote for the same
+/// arguments: the thread-group counts in DW1-DW3 and the initiator `0x41` with the modifier's bits
+/// `0xa038` (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15, where no modifier
+/// measured set any of them, and `166-agc/dcb-dispatch-indirect`, where all of them did). PPSA03416's
+/// own call first. A modifier with `CS_W32_EN` (bit 15) dispatches a program of 32 lanes a wave, as
+/// Grand Theft Auto V's shaders record theirs (D903).
 #[test]
 fn cb_dispatch_writes_its_dimensions_as_hardware_did() {
     // Rows `pm4-title`, `pm4-arg1-only` .. `pm4-arg5-only`: the header, DW1-DW3, the initiator.
-    for (arguments, dimensions) in [
-        ([0xa00, 1, 1, 1, 0xc], [0xa00, 1, 1]),
-        ([0x11, 0, 0, 0, 0], [0x11, 0, 0]),
-        ([0, 0x22, 0, 0, 0], [0, 0x22, 0]),
-        ([0, 0, 0x33, 0, 0], [0, 0, 0x33]),
-        ([0, 0, 0, 0x44, 0], [0, 0, 0]),
-        ([0, 0, 0, 0, 0x55], [0, 0, 0]),
+    for (arguments, dimensions, initiator) in [
+        ([0xa00, 1, 1, 1, 0xc], [0xa00, 1, 1], 0x41),
+        ([0x11, 0, 0, 0, 0], [0x11, 0, 0], 0x41),
+        ([0, 0x22, 0, 0, 0], [0, 0x22, 0], 0x41),
+        ([0, 0, 0x33, 0, 0], [0, 0, 0x33], 0x41),
+        ([0, 0, 0, 0x44, 0], [0, 0, 0], 0x41),
+        ([0, 0, 0, 0, 0x55], [0, 0, 0], 0x41),
+        ([0x4f, 1, 1, 0x8001, 0], [0x4f, 1, 1], 0x8041),
     ] {
         let w = Writer::new(0x400);
         let mut args = [0u64; GUEST_ARG_REGISTERS];
@@ -689,7 +693,7 @@ fn cb_dispatch_writes_its_dimensions_as_hardware_did() {
             dimensions[0],
             dimensions[1],
             dimensions[2],
-            0x41,
+            initiator,
         ]
         .iter()
         .flat_map(|word| word.to_le_bytes())

@@ -34,6 +34,9 @@ pub enum DispatchFormat {
     Rgb10A2,
     /// Four sixteen-bit floats, the guest's `16_16_16_16_FLOAT`: two words a texel.
     Rgba16Float,
+    /// Three packed unsigned floats, the guest's `10_11_11_FLOAT`: eleven bits of red from the low
+    /// end, eleven of green, ten of blue, a word a texel (D908).
+    Float11_11_10,
 }
 
 impl DispatchFormat {
@@ -49,13 +52,19 @@ impl DispatchFormat {
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
             Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         }
     }
 
     /// Bytes one texel takes.
     const fn bytes(self) -> usize {
         match self {
-            Self::Rgba8 | Self::Rgba8Uint | Self::Rgb10A2 | Self::R32Uint | Self::R32Float => 4,
+            Self::Rgba8
+            | Self::Rgba8Uint
+            | Self::Rgb10A2
+            | Self::Float11_11_10
+            | Self::R32Uint
+            | Self::R32Float => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::R16Uint => 2,
             Self::Rgba16Float => 8,
@@ -91,6 +100,12 @@ pub struct DispatchImage<'a> {
     /// Layers of a 2D array the program addresses as one, its texels layer after layer (D895,
     /// D897); `None` for an image it does not.
     pub layers: Option<u32>,
+    /// The sampler a fetched image is sampled through, where its program names one (D904); `None`
+    /// for one only fetched, bound with the kept sampler a fetch ignores.
+    pub sampling: Option<orbistoun_gpu::TextureSampling>,
+    /// Whether the program samples it as a cube, its six layers the faces, seen through a cube view
+    /// (D907).
+    pub cube: bool,
 }
 
 impl DispatchImage<'_> {
@@ -130,21 +145,19 @@ struct Bound {
     height: u32,
     depth: Option<u32>,
     layers: Option<u32>,
+    /// The sampler a fetched image is bound with; `None` for a stored one.
+    sampler: Option<vk::Sampler>,
 }
 
-/// A dispatch's images on the device, with the sampler the fetched one is bound with.
+/// A dispatch's images on the device, each fetched one with the sampler it is bound with.
 pub(crate) struct BoundImages {
     images: Vec<Bound>,
-    sampler: Option<vk::Sampler>,
 }
 
 impl BoundImages {
     /// No images: a dispatch that reads and writes only its window.
     pub(crate) const fn none() -> Self {
-        Self {
-            images: Vec::new(),
-            sampler: None,
-        }
+        Self { images: Vec::new() }
     }
 
     /// Creates each image and fills its host buffer with its texels.
@@ -197,8 +210,14 @@ impl BoundImages {
                     })
                 }
             };
+            let sampler = if stored {
+                Ok(None)
+            } else {
+                image_sampler(device, image.sampling).map(Some)
+            };
+            let created = created.and_then(|made| sampler.map(|sampler| (made, sampler)));
             match created {
-                Ok((image_handle, memory, view, staging, staging_memory)) => {
+                Ok(((image_handle, memory, view, staging, staging_memory), sampler)) => {
                     bound.images.push(Bound {
                         binding,
                         stored,
@@ -212,17 +231,9 @@ impl BoundImages {
                         height: image.height,
                         depth: image.depth,
                         layers: image.layers,
+                        sampler,
                     });
                 }
-                Err(e) => {
-                    bound.destroy(device);
-                    return Err(e);
-                }
-            }
-        }
-        if bound.images.iter().any(|image| !image.stored) {
-            match kept_sampler(device) {
-                Ok(sampler) => bound.sampler = Some(sampler),
                 Err(e) => {
                     bound.destroy(device);
                     return Err(e);
@@ -267,7 +278,7 @@ impl BoundImages {
                 let info = vk::DescriptorImageInfo::default()
                     .image_view(image.view)
                     .image_layout(layout(image.stored));
-                [match (image.stored, self.sampler) {
+                [match (image.stored, image.sampler) {
                     (false, Some(sampler)) => info.sampler(sampler),
                     _ => info,
                 }]
@@ -565,16 +576,25 @@ fn create_image(
     };
     // A volume is a three-dimensional image of its slices, seen through a view of the same type,
     // which is what a module's three-dimensional storage image binds (D823); an array the program
-    // addresses as one is seen through an array view of its layers (D897).
+    // addresses as one is seen through an array view of its layers (D897), and a cube through a
+    // cube view of its six (D907).
     let (image_type, view_type) = if texels.depth.is_some() {
         (vk::ImageType::TYPE_3D, vk::ImageViewType::TYPE_3D)
+    } else if texels.cube {
+        (vk::ImageType::TYPE_2D, vk::ImageViewType::CUBE)
     } else if texels.layers.is_some() {
         (vk::ImageType::TYPE_2D, vk::ImageViewType::TYPE_2D_ARRAY)
     } else {
         (vk::ImageType::TYPE_2D, vk::ImageViewType::TYPE_2D)
     };
     let layers = texels.layers.unwrap_or(1);
+    let flags = if texels.cube {
+        vk::ImageCreateFlags::CUBE_COMPATIBLE
+    } else {
+        vk::ImageCreateFlags::empty()
+    };
     let info = vk::ImageCreateInfo::default()
+        .flags(flags)
         .image_type(image_type)
         .format(texels.format.vulkan())
         .extent(vk::Extent3D {
@@ -822,6 +842,39 @@ fn take_spare(
     )))
 }
 
+/// The sampler a fetched image is bound with: its guest sampler's, made once for each setting on a
+/// device and kept (D904), or the kept one a fetch ignores.
+fn image_sampler(
+    device: &ash::Device,
+    sampling: Option<orbistoun_gpu::TextureSampling>,
+) -> Result<vk::Sampler, DispatchError> {
+    type Kept = Vec<(u64, orbistoun_gpu::TextureSampling, vk::Sampler)>;
+    static KEPT: std::sync::Mutex<Kept> = std::sync::Mutex::new(Vec::new());
+    let Some(sampling) = sampling else {
+        return kept_sampler(device);
+    };
+    let raw = vk::Handle::as_raw(device.handle());
+    let mut kept = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, _, sampler)) = kept
+        .iter()
+        .find(|(on, kept, _)| *on == raw && *kept == sampling)
+    {
+        return Ok(*sampler);
+    }
+    let mut custom = crate::framebuffer::border_colour_info(sampling.border);
+    let mut info = crate::framebuffer::sampler_info(sampling, 1, false);
+    if let Some(custom) = custom.as_mut() {
+        info = info.push_next(custom);
+    }
+    // SAFETY: the device is live and the create info outlives the call.
+    let sampler = unsafe { device.create_sampler(&info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_sampler(dispatch)", e))?;
+    kept.push((raw, sampling, sampler));
+    Ok(sampler)
+}
+
 /// The sampler every fetched image is bound with, kept per device: its settings never change.
 fn kept_sampler(device: &ash::Device) -> Result<vk::Sampler, DispatchError> {
     static KEPT: std::sync::Mutex<Option<(u64, vk::Sampler)>> = std::sync::Mutex::new(None);
@@ -892,6 +945,8 @@ mod tests {
                 height: HEIGHT,
                 depth: None,
                 layers: None,
+                sampling: None,
+                cube: false,
             }),
             stored: &[],
         }
@@ -920,11 +975,11 @@ mod tests {
         let (width, height) = (WIDTH, HEIGHT);
         let first_texels = vec![1; (width * height) as usize];
         let first = BoundImages::create(context, &images(&first_texels)).expect("created");
-        let (image, sampler) = (first.images[0].image, first.sampler);
+        let (image, sampler) = (first.images[0].image, first.images[0].sampler);
         first.destroy(device);
         let second_texels = vec![0x0203_0405; (width * height) as usize];
         let second = BoundImages::create(context, &images(&second_texels)).expect("created");
-        let reused = (second.images[0].image, second.sampler);
+        let reused = (second.images[0].image, second.images[0].sampler);
         let staged = crate::compute::read_back(
             device,
             &crate::compute::DispatchBuffer {

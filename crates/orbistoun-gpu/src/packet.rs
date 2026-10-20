@@ -249,15 +249,21 @@ pub mod build {
         ]
     }
 
-    /// The `DISPATCH_DIRECT` `sceAgcCbDispatch(cb, x, y, z, ..)` writes: header `0xc0031500` (no
-    /// shader-type bit, unlike [`dispatch_direct`]'s), the three thread-group counts, and the
-    /// initiator `0x41` - `COMPUTE_SHADER_EN` (bit 0) and bit 6 - which no argument measured
-    /// changes (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15).
+    /// The `DISPATCH_DIRECT` `sceAgcCbDispatch(cb, x, y, z, modifier, ..)` writes: header
+    /// `0xc0031500` (no shader-type bit, unlike [`dispatch_direct`]'s), the three thread-group
+    /// counts, and the initiator `0x41` - `COMPUTE_SHADER_EN` (bit 0) and bit 6 - with the
+    /// modifier's bits, as an indirect dispatch's (obSCEne `reports/report-1791286625.txt`
+    /// 12105-12185, REQ cd15, where no modifier measured set any of them; D903). `CS_W32_EN`
+    /// (bit 15) among them is a program of 32 lanes a wave.
     #[must_use]
-    pub fn agc_dispatch_direct(x: u32, y: u32, z: u32) -> [u32; 5] {
-        /// The measured initiator.
-        const INITIATOR: u32 = 0x41;
-        [command_header(DISPATCH_DIRECT, 4), x, y, z, INITIATOR]
+    pub fn agc_dispatch_direct(x: u32, y: u32, z: u32, modifier: u32) -> [u32; 5] {
+        [
+            command_header(DISPATCH_DIRECT, 4),
+            x,
+            y,
+            z,
+            indirect_initiator(modifier),
+        ]
     }
 
     /// Opcodes measured coming out of the hardware's own command builders.
@@ -608,9 +614,9 @@ pub mod build {
         ]
     }
 
-    /// The initiator an indirect dispatch's modifier makes: `0x41` with the modifier's bits
-    /// `0xa038`, as obSCEne measured three modifiers (0 to `0x41`, `0x20` to `0x61`, all ones to
-    /// `0xa079`; `166-agc/dcb-dispatch-indirect`).
+    /// The initiator a dispatch's modifier makes: `0x41` with the modifier's bits `0xa038`, as
+    /// obSCEne measured three modifiers of an indirect dispatch (0 to `0x41`, `0x20` to `0x61`, all
+    /// ones to `0xa079`; `166-agc/dcb-dispatch-indirect`).
     const fn indirect_initiator(modifier: u32) -> u32 {
         0x41 | (modifier & 0xa038)
     }

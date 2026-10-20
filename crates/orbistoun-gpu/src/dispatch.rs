@@ -91,19 +91,8 @@ fn check_initiator(
     if initiator_word & initiator::COMPUTE_SHADER_EN == 0 {
         return Err("the dispatch initiator does not enable the compute shader");
     }
-    for (bit, why) in [
-        (
-            initiator::USE_THREAD_DIMENSIONS,
-            "a grid given in threads (USE_THREAD_DIMENSIONS) is not modelled",
-        ),
-        (
-            initiator::ORDERED_APPEND_ENBL,
-            "ordered append (ORDERED_APPEND_ENBL) is not modelled",
-        ),
-    ] {
-        if initiator_word & bit != 0 {
-            return Err(why);
-        }
+    if initiator_word & initiator::ORDERED_APPEND_ENBL != 0 {
+        return Err("ordered append (ORDERED_APPEND_ENBL) is not modelled");
     }
     if initiator_word & initiator::FORCE_START_AT_000 == 0 {
         // A start the queue never wrote is its zero (D752, assumed); one it wrote is read.
@@ -114,12 +103,69 @@ fn check_initiator(
     Ok(())
 }
 
+/// The threads of the last group along each dimension where `PARTIAL_TG_EN` asks for a partial one,
+/// `NUM_THREAD_PARTIAL`'s, or `None`. radv and radeonsi write a whole group's count where the grid
+/// divides evenly, never zero (`radv_cmd_buffer.c:14779-14785`); a group of zero threads, or more
+/// than a whole one, is not one a dispatch asks for.
+fn partial_group(
+    initiator_word: u32,
+    threads: [u32; 3],
+    partial_threads: [u32; 3],
+) -> Result<Option<[u32; 3]>, &'static str> {
+    if initiator_word & initiator::PARTIAL_TG_EN == 0 {
+        return Ok(None);
+    }
+    if partial_threads
+        .iter()
+        .zip(&threads)
+        .any(|(&partial, &full)| partial == 0 || partial > full)
+    {
+        return Err("a partial thread group of none, or more than a whole group's, threads");
+    }
+    Ok(Some(partial_threads))
+}
+
+/// The groups covering a grid of `grid` threads in groups of `full`, and the partial last group's
+/// threads, as radv sets up an unaligned dispatch (`USE_THREAD_DIMENSIONS`,
+/// `radv_cmd_buffer.c:14795-14863`): along each dimension the groups that cover it, the last
+/// running the remainder under `PARTIAL_TG_EN` (`partial`), or a whole group's where the grid divides
+/// evenly (D905).
+fn thread_groups(
+    grid: [u32; 3],
+    full: [u32; 3],
+    partial: Option<[u32; 3]>,
+) -> Result<([u32; 3], Option<[u32; 3]>), &'static str> {
+    let mut groups = [0; 3];
+    for i in 0..3 {
+        if full[i] == 0 {
+            return Err("a grid given in threads, in groups of none");
+        }
+        groups[i] = grid[i].div_ceil(full[i]);
+        let remainder = match grid[i] % full[i] {
+            0 => full[i],
+            threads => threads,
+        };
+        match partial {
+            None if remainder != full[i] => {
+                return Err(
+                    "a grid given in threads that groups do not divide, with no partial group",
+                );
+            }
+            Some(partial) if partial[i] != remainder => {
+                return Err("a grid given in threads whose partial group is not its remainder");
+            }
+            _ => {}
+        }
+    }
+    Ok((groups, partial))
+}
+
 /// Reads the dispatch at `packet_offset` from the writes before it.
 ///
 /// # Errors
 ///
 /// A register the dispatch depends on that the stream never wrote, or a field asking for something
-/// not modelled: a partial group, thread dimensions in place of groups, ordered append, scratch
+/// not modelled: a partial group, a grid in threads no group shape covers, ordered append, scratch
 /// memory, a trap handler or exceptions, the group-size register, or a start that is not zero.
 pub fn state_at(
     writes: &[RegisterWrite],
@@ -186,24 +232,16 @@ pub fn state_at(
         *slot = word & 0xFFFF;
         *partial = word >> 16;
     }
-    let partial = if initiator_word & initiator::PARTIAL_TG_EN == 0 {
-        None
+    let partial = partial_group(initiator_word, threads, partial_threads)?;
+    let (groups, partial) = if initiator_word & initiator::USE_THREAD_DIMENSIONS == 0 {
+        (groups, partial)
     } else {
-        // radv and radeonsi write a whole group's count where the grid divides evenly, never zero
-        // (`radv_cmd_buffer.c:14779-14785`); a group of zero threads, or more than a whole one,
-        // is not one a dispatch asks for.
-        if partial_threads
-            .iter()
-            .zip(&threads)
-            .any(|(&partial, &full)| partial == 0 || partial > full)
-        {
-            return Err("a partial thread group of none, or more than a whole group's, threads");
-        }
-        Some(PartialGroups {
-            last: groups.map(|count| count.saturating_sub(1)),
-            threads: partial_threads,
-        })
+        thread_groups(groups, threads, partial)?
     };
+    let partial = partial.map(|partial_threads| PartialGroups {
+        last: groups.map(|count| count.saturating_sub(1)),
+        threads: partial_threads,
+    });
 
     let user_data: Vec<Option<u32>> = (0..user_sgprs).map(|i| latest(USER_DATA_0 + i)).collect();
     // A word never written is passed as zero and the translator refuses a program that reads it.
@@ -531,6 +569,39 @@ mod tests {
         let unforced = state_at(&clear_writes(), 0x100, [4, 1, 1], 0x41).expect("runs");
         let forced = state_at(&clear_writes(), 0x100, [4, 1, 1], 0x45).expect("runs");
         assert_eq!(unforced, forced);
+    }
+
+    /// A grid given in threads (`USE_THREAD_DIMENSIONS`) runs the groups that cover it, as radv
+    /// sets one up for an unaligned dispatch (`radv_cmd_buffer.c:14795-14863`): Grand Theft Auto V's
+    /// first dispatch gives `0x4800` threads of 64 under initiator `0x61`. A remainder runs in a
+    /// partial last group of exactly that many threads, and is refused without one (D905).
+    #[test]
+    fn a_grid_given_in_threads_runs_the_groups_covering_it() {
+        let state = state_at(&clear_writes(), 0x100, [0x4800, 1, 1], 0x61).expect("runs");
+        assert_eq!((state.groups, state.inputs.partial), ([0x120, 1, 1], None));
+
+        let mut partial = clear_writes();
+        partial.push(write(NUM_THREAD_X, 36 << 16 | 0x40));
+        partial.push(write(NUM_THREAD_X + 1, 1 << 16 | 1));
+        partial.push(write(NUM_THREAD_X + 2, 1 << 16 | 1));
+        let state = state_at(&partial, 0x100, [100, 1, 1], 0x63).expect("runs");
+        assert_eq!(state.groups, [2, 1, 1]);
+        assert_eq!(
+            state.inputs.partial,
+            Some(PartialGroups {
+                last: [1, 0, 0],
+                threads: [36, 1, 1],
+            })
+        );
+
+        assert!(
+            state_at(&clear_writes(), 0x100, [100, 1, 1], 0x61).is_err(),
+            "a remainder with no partial group"
+        );
+        assert!(
+            state_at(&partial, 0x100, [101, 1, 1], 0x63).is_err(),
+            "a partial group of other than the remainder"
+        );
     }
 
     /// What is not modelled is refused by name; a write after the dispatch is not its state.

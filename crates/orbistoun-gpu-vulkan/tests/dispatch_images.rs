@@ -82,6 +82,38 @@ const COPY_A16_D16: [u32; 9] = [
 /// One 8 x 8 group, a thread per texel.
 const SIDE: u32 = 8;
 
+/// A one-thread program translated as a compute module with twenty user-data words: its module, and
+/// the images it samples and stores.
+fn one_thread(
+    program: &[u32],
+) -> Result<
+    (Vec<u32>, orbistoun_translate::wavefront::ImageSources),
+    orbistoun_translate::TranslateError,
+> {
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 20,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [1, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .map(|(module, _, images)| (module, images))
+}
+
 fn translated(program: &[u32]) -> Vec<u32> {
     translated_for(program, [false; 2])
 }
@@ -154,6 +186,8 @@ fn a_dispatch_copies_one_image_into_another() {
                         height: SIDE,
                         depth: None,
                         layers: None,
+                        sampling: None,
+                        cube: false,
                     }),
                     stored: &[DispatchImage {
                         texels: &destination,
@@ -162,6 +196,8 @@ fn a_dispatch_copies_one_image_into_another() {
                         height: SIDE,
                         depth: None,
                         layers: None,
+                        sampling: None,
+                        cube: false,
                     }],
                 },
             )
@@ -231,6 +267,8 @@ fn a_dispatch_stores_to_two_images() {
         height: SIDE,
         depth: None,
         layers: None,
+        sampling: None,
+        cube: false,
     };
     let done = dispatch_guest(
         &module,
@@ -307,6 +345,8 @@ fn a_one_layer_image_addressed_as_an_array_is_its_layer_zero() {
         height: SIDE,
         depth: None,
         layers: Some(1),
+        sampling: None,
+        cube: false,
     };
     for (layer, expected) in [(0, &source), (1, &destination)] {
         let mut push = [0; 17];
@@ -395,6 +435,8 @@ fn a_dispatch_fetches_the_layer_of_an_array_its_address_names() {
                     height: SIDE,
                     depth: None,
                     layers: Some(layers),
+                    sampling: None,
+                    cube: false,
                 }),
                 stored: &[DispatchImage {
                     texels: &destination,
@@ -403,6 +445,8 @@ fn a_dispatch_fetches_the_layer_of_an_array_its_address_names() {
                     height: SIDE,
                     depth: None,
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 }],
             },
         )
@@ -473,6 +517,8 @@ fn a_dispatch_stores_to_the_layer_of_an_array_its_address_names() {
         height: SIDE,
         depth: None,
         layers: Some(layers),
+        sampling: None,
+        cube: false,
     };
     for layer in 0..=layers {
         let mut push = [0; 17];
@@ -496,6 +542,400 @@ fn a_dispatch_stores_to_the_layer_of_an_array_its_address_names() {
         }
         assert_eq!(done.stored.first(), Some(&expected), "layer {layer}");
     }
+}
+
+/// A dispatch samples a texture through its guest sampler (D904): a black and white pair of texels
+/// sampled at their middle reads the two averaged through a linear filter, and one of them through
+/// a point filter. Grand Theft Auto V's compute program at `0x74005b75c000` samples level zero
+/// (`image_sample_lz`); a sample whose level derivatives choose is refused, a dispatch having none.
+#[test]
+fn a_dispatch_samples_through_its_guest_sampler() {
+    use orbistoun_gpu::{TextureFilter, TextureSampling};
+    if !device_or_skip("a dispatch's guest sampler") {
+        return;
+    }
+    // v_mov_b32 v2, 0; v_mov_b32 v3, 0; v_mov_b32 v0, 0.5; v_mov_b32 v1, 0.5;
+    // <sample> v[4:7], v[0:1], s[0:7], s[8:11] dmask:0xf dim:2D; s_waitcnt;
+    // image_store v[4:7], v[2:3], s[12:19] dmask:0xf dim:2D unorm; s_endpgm.
+    let program = |sample: u32| {
+        [
+            0x7e04_0280_u32,
+            0x7e06_0280,
+            0x7e00_02f0,
+            0x7e02_02f0,
+            sample,
+            0x0040_0400,
+            0xbf8c_3f70,
+            0xf020_1f08,
+            0x0003_0402,
+            0xbf81_0000,
+            0xbf9f_0000,
+        ]
+    };
+    // image_sample_lz, then image_sample.
+    let (module, (textures, _)) =
+        one_thread(&program(0xf09c_0f08)).expect("a level-zero sample translates");
+    assert_eq!(
+        textures.first().and_then(|t| t.sampler_user_data),
+        Some(8),
+        "the sampler from the user data"
+    );
+    assert!(
+        one_thread(&program(0xf080_0f08)).is_err(),
+        "a sample whose level derivatives choose"
+    );
+    let black_and_white = [0xff00_0000_u32, 0xffff_ffff];
+    let destination = [0_u32];
+    let linear = TextureSampling {
+        magnify: TextureFilter::Linear,
+        minify: TextureFilter::Linear,
+        ..TextureSampling::CLAMPED_POINT
+    };
+    for (sampling, averaged) in [(linear, true), (TextureSampling::CLAMPED_POINT, false)] {
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 20], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(DispatchImage {
+                    texels: &black_and_white,
+                    format: DispatchFormat::Rgba8,
+                    width: 2,
+                    height: 1,
+                    depth: None,
+                    layers: None,
+                    sampling: Some(sampling),
+                    cube: false,
+                }),
+                stored: &[DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba8,
+                    width: 1,
+                    height: 1,
+                    depth: None,
+                    layers: None,
+                    sampling: None,
+                    cube: false,
+                }],
+            },
+        )
+        .expect("dispatched");
+        let texel = done.stored.first().and_then(|t| t.first()).copied();
+        let red = texel.map(|t| t & 0xff);
+        if averaged {
+            assert!(
+                matches!(red, Some(0x7f | 0x80)),
+                "linear: the two averaged, {texel:x?}"
+            );
+        } else {
+            assert!(
+                matches!(red, Some(0x00 | 0xff)),
+                "point: one texel, {texel:x?}"
+            );
+        }
+    }
+}
+
+/// A gather returns one channel - the one its mask's one bit names - of the four texels a sample at
+/// its position would filter, in SPIR-V's `OpImageGather` order: (0, 1), (1, 1), (1, 0), (0, 0)
+/// (D913). Grand Theft Auto V's fragment shader does `image_gather4_lz v[0:3], v[4:5], s[0:7],
+/// s[8:11] dmask:0x1` (words 0xf11c0108 0x00400004); at the middle of a 2 x 2 image of reds
+/// 0x10, 0x20 (top) and 0x30, 0x40 (bottom) it returns 0x30, 0x40, 0x20 and 0x10.
+#[test]
+fn a_gather_returns_one_channel_of_four_texels() {
+    if !device_or_skip("a dispatch's gather") {
+        return;
+    }
+    // v_mov_b32 v8, 0; v_mov_b32 v9, 0; v_mov_b32 v4, 0.5; v_mov_b32 v5, 0.5;
+    // image_gather4_lz v[0:3], v[4:5], s[0:7], s[8:11] dmask:0x1 dim:2D; s_waitcnt;
+    // image_store v[0:3], v[8:9], s[12:19] dmask:0xf dim:2D; s_endpgm.
+    let words = [
+        0x7e10_0280_u32,
+        0x7e12_0280,
+        0x7e08_02f0,
+        0x7e0a_02f0,
+        0xf11c_0108,
+        0x0040_0004,
+        0xbf8c_3f70,
+        0xf020_1f08,
+        0x0003_0008,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, _) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 20,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [1, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("a gather translates");
+    let reds = [0xff00_0010_u32, 0xff00_0020, 0xff00_0030, 0xff00_0040];
+    let destination = [0_u32];
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 20], [1, 1, 1]),
+        &DispatchImages {
+            more_fetched: &[],
+            fetched: Some(DispatchImage {
+                texels: &reds,
+                format: DispatchFormat::Rgba8,
+                width: 2,
+                height: 2,
+                depth: None,
+                layers: None,
+                sampling: None,
+                cube: false,
+            }),
+            stored: &[DispatchImage {
+                texels: &destination,
+                format: DispatchFormat::Rgba8,
+                width: 1,
+                height: 1,
+                depth: None,
+                layers: None,
+                sampling: None,
+                cube: false,
+            }],
+        },
+    )
+    .expect("dispatched");
+    assert_eq!(done.stored.first(), Some(&vec![0x1020_4030]));
+}
+
+/// A dispatch stores packed eleven-, eleven- and ten-bit floats as the guest's `10_11_11_FLOAT`
+/// holds them, red from the low end (D908): `(1.0, 0.5, 2.0)` is `0x3c0 | 0x380 << 11 | 0x200 << 22`.
+#[test]
+fn a_dispatch_stores_packed_eleven_eleven_ten_floats() {
+    if !device_or_skip("a dispatch's packed floats") {
+        return;
+    }
+    // v_mov_b32 v8, 0; v_mov_b32 v9, 0; v_mov_b32 v4, 1.0; v_mov_b32 v5, 0.5; v_mov_b32 v6, 2.0;
+    // v_mov_b32 v7, 1.0; image_store v[4:7], v[8:9], s[12:19] dmask:0xf dim:2D; s_endpgm.
+    let words = [
+        0x7e10_0280_u32,
+        0x7e12_0280,
+        0x7e08_02f2,
+        0x7e0a_02f0,
+        0x7e0c_02f4,
+        0x7e0e_02f2,
+        0xf020_1f08,
+        0x0003_0408,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, _) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 20,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [1, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("a store translates");
+    let destination = [0_u32];
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 20], [1, 1, 1]),
+        &DispatchImages {
+            more_fetched: &[],
+            fetched: None,
+            stored: &[DispatchImage {
+                texels: &destination,
+                format: DispatchFormat::Float11_11_10,
+                width: 1,
+                height: 1,
+                depth: None,
+                layers: None,
+                sampling: None,
+                cube: false,
+            }],
+        },
+    )
+    .expect("dispatched");
+    assert_eq!(done.stored.first(), Some(&vec![0x801c_03c0]));
+}
+
+/// A dispatch samples a cube through a cube view of its six faces (D907): a 1 x 1 cube of six
+/// colours sampled at the middle of face `f` (`image_sample_lz dim:CUBE` at `(1.5, 1.5, f)`, the
+/// face coordinates as ACO offsets them) reads face `f`'s colour. Grand Theft Auto V's
+/// loading-screen program samples a 32 x 32 `16_16_16_16_FLOAT` cube so.
+#[test]
+fn a_dispatch_samples_a_cube_s_faces() {
+    if !device_or_skip("a dispatch's cube") {
+        return;
+    }
+    // v_mov_b32 v8, 0; v_mov_b32 v9, 0; v_mov_b32 v0, 1.5; v_mov_b32 v1, 1.5; v_mov_b32 v2, face;
+    // image_sample_lz v[4:7], v[0:2], s[0:7], s[8:11] dmask:0xf dim:CUBE; s_waitcnt;
+    // image_store v[4:7], v[8:9], s[12:19] dmask:0xf dim:2D unorm; s_endpgm.
+    let program = |face: f32| {
+        [
+            0x7e10_0280_u32,
+            0x7e12_0280,
+            0x7e00_02ff,
+            1.5f32.to_bits(),
+            0x7e02_02ff,
+            1.5f32.to_bits(),
+            0x7e04_02ff,
+            face.to_bits(),
+            0xf09c_0f18,
+            0x0040_0400,
+            0xbf8c_3f70,
+            0xf020_1f08,
+            0x0003_0408,
+            0xbf81_0000,
+            0xbf9f_0000,
+        ]
+    };
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let faces = [
+        0xff00_00ff_u32,
+        0xff00_ff00,
+        0xffff_0000,
+        0xff00_ffff,
+        0xffff_00ff,
+        0xffff_ff00,
+    ];
+    let destination = [0_u32];
+    for (face, &colour) in (0_u8..).zip(&faces) {
+        let bytes: Vec<u8> = program(f32::from(face))
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, (textures, _)) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 20,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false, false, false],
+                    thread_id_components: 2,
+                    threads: [1, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                ..UserData::default()
+            },
+        )
+        .expect("a cube sample translates");
+        assert!(
+            textures.first().is_some_and(|t| t.cube),
+            "sampled as a cube"
+        );
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 20], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(DispatchImage {
+                    texels: &faces,
+                    format: DispatchFormat::Rgba8,
+                    width: 1,
+                    height: 1,
+                    depth: None,
+                    layers: Some(6),
+                    sampling: None,
+                    cube: true,
+                }),
+                stored: &[DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba8,
+                    width: 1,
+                    height: 1,
+                    depth: None,
+                    layers: None,
+                    sampling: None,
+                    cube: false,
+                }],
+            },
+        )
+        .expect("dispatched");
+        assert_eq!(done.stored.first(), Some(&vec![colour]), "face {face}");
+    }
+}
+
+/// A store names the image the load reaching it read, as a sample does (D690): registers loaded
+/// from one place in the table for a fetch and reloaded from another for a store name two images.
+/// Grand Theft Auto V's compute program at `0x74005b75c000` loads `s[0:7]` from its table again
+/// just before its last store.
+#[test]
+fn a_store_names_the_descriptor_its_reaching_load_read() {
+    // s_load_dwordx8 s[0:7], s[12:13], 0x0; s_waitcnt;
+    // image_load v[4:7], v[0:1], s[0:7] dmask:0xf dim:2D;
+    // s_load_dwordx8 s[0:7], s[12:13], 0x40; s_waitcnt;
+    // image_store v[4:7], v[0:1], s[0:7] dmask:0xf dim:2D; s_endpgm.
+    let words = [
+        0xf40c_0006_u32,
+        0xfa00_0000,
+        0xbf8c_c07f,
+        0xf000_1f08,
+        0x0000_0400,
+        0xf40c_0006,
+        0xfa00_0040,
+        0xbf8c_c07f,
+        0xf020_1f08,
+        0x0000_0400,
+        0xbf81_0000,
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (_, _, (textures, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 14,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("a store through a reloaded descriptor translates");
+    assert_eq!(textures.first().and_then(|t| t.table_offset), Some(0));
+    assert_eq!(storage.first().and_then(|t| t.table_offset), Some(0x40));
 }
 
 /// A program that rewrites only the type of image descriptors it loaded from its table keeps the
@@ -660,6 +1100,8 @@ fn an_inactive_thread_stores_nothing() {
                         height: SIDE,
                         depth: None,
                         layers: None,
+                        sampling: None,
+                        cube: false,
                     }),
                     stored: &[DispatchImage {
                         texels: &destination,
@@ -668,6 +1110,8 @@ fn an_inactive_thread_stores_nothing() {
                         height: SIDE,
                         depth: None,
                         layers: None,
+                        sampling: None,
+                        cube: false,
                     }],
                 },
             )
@@ -714,6 +1158,8 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
             height: SIDE,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
         // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
@@ -819,6 +1265,8 @@ fn a_dispatch_stores_to_a_volume() {
                     height: EDGE,
                     depth: Some(EDGE),
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 }],
             },
         )
@@ -897,6 +1345,8 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
                     height: EDGE,
                     depth: Some(EDGE),
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 }],
             },
         )
@@ -937,6 +1387,8 @@ fn a_dispatch_copies_a_single_channel_image() {
             height: SIDE,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         let done = dispatch_guest(
             &translated(&COPY_R8),
@@ -974,6 +1426,8 @@ fn a_dispatch_copies_an_eight_bit_integer_image() {
             height: SIDE,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         let done = dispatch_guest(
             &translated_for(&COPY_R8, [true, true]),
@@ -1094,6 +1548,8 @@ fn a_dispatch_asks_an_image_s_size() {
                     height: 4,
                     depth: None,
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 }),
                 stored: &[DispatchImage {
                     texels: &destination,
@@ -1102,6 +1558,8 @@ fn a_dispatch_asks_an_image_s_size() {
                     height: SIDE,
                     depth: None,
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 }],
             },
         )
@@ -1187,6 +1645,8 @@ fn a_dispatch_fetches_from_two_images() {
             height: SIDE,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         let first = vec![0x1111_1111_u32; (SIDE * SIDE) as usize];
         let second: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0a0b_0c00 | i).collect();
@@ -1232,6 +1692,8 @@ fn a_dispatch_copies_a_half_float_image() {
             height: SIDE,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         let done = dispatch_guest(
             &translated(&COPY),

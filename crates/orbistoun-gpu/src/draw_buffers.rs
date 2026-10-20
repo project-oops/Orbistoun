@@ -1305,27 +1305,11 @@ fn resolve_range_now(
             else {
                 return Ok((0, 0));
             };
-            let base = crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base);
-            match (computed.through, soffset) {
-                (ComputedAccess::Descriptor { reads, .. }, Some(soffset)) => (
-                    base,
-                    u64::from(soffset) + descriptor_extent_to(values, reads, last_index(reads))?,
-                ),
-                // At an offset the host cannot know, the whole buffer, wherever the access lands
-                // in it (D901).
-                (ComputedAccess::Descriptor { .. }, None) => {
-                    (base, decode_buffer_descriptor(values).byte_len())
-                }
-                // A scalar load reads its words from the base plus the scalar offset, which the
-                // translated load does not add: the range starts there.
-                (ComputedAccess::Pointer { end, .. }, Some(soffset)) => {
-                    let base = u64::from(values[0]) | u64::from(values[1] & 0xffff) << 32;
-                    (base.wrapping_add(u64::from(soffset)), u64::from(end))
-                }
-                (ComputedAccess::Pointer { .. }, None) => {
-                    return Err("a scalar load's base at an offset the host cannot know".into());
-                }
-            }
+            let last = match computed.through {
+                ComputedAccess::Descriptor { reads, .. } => last_index(reads),
+                ComputedAccess::Pointer { .. } => None,
+            };
+            computed_range(computed.through, (values, soffset), last)?
         }
         BufferSource::Descriptor { words, reads } => {
             let (words, reads) = (*words, *reads);
@@ -1340,8 +1324,13 @@ fn resolve_range_now(
             )
         }
     };
-    // The module reads whole words counted from the range's first byte, as the hardware does from
-    // a word-aligned base.
+    checked_range((address, length))
+}
+
+/// `(address, length)` where one binding can hold it: the module reads whole words counted from the
+/// range's first byte, as the hardware does from a word-aligned base, and no more than
+/// [`MOST_BYTES`] (D733).
+fn checked_range((address, length): (u64, u64)) -> Result<(u64, u64), Refusal> {
     if address % 4 != 0 {
         return Err("a draw buffer whose base is not word-aligned (D733)".into());
     }
@@ -1349,6 +1338,62 @@ fn resolve_range_now(
         return Err("a draw buffer larger than one draw binds (D733)".into());
     }
     Ok((address, length))
+}
+
+/// The range a computed access binds through the descriptor or base `values` and scalar offset
+/// `soffset` the program reaches it with: from the descriptor's base, through the offset the shader
+/// adds to every address and the extent the descriptor admits past it - the records through
+/// `last_index` where the draw's ids bound them (D879). At an offset the host cannot know, the
+/// whole buffer, wherever the access lands in it (D901). A scalar load reads its words from the base
+/// plus the offset, which the translated load does not add: its range starts there.
+fn computed_range(
+    through: ComputedAccess,
+    (values, soffset): ([u32; 4], Option<u32>),
+    last_index: Option<u64>,
+) -> Result<(u64, u64), Refusal> {
+    let base = crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base);
+    Ok(match (through, soffset) {
+        (ComputedAccess::Descriptor { reads, .. }, Some(soffset)) => (
+            base,
+            u64::from(soffset) + descriptor_extent_to(values, reads, last_index)?,
+        ),
+        (ComputedAccess::Descriptor { .. }, None) => {
+            (base, decode_buffer_descriptor(values).byte_len())
+        }
+        (ComputedAccess::Pointer { end, .. }, Some(soffset)) => {
+            let base = u64::from(values[0]) | u64::from(values[1] & 0xffff) << 32;
+            (base.wrapping_add(u64::from(soffset)), u64::from(end))
+        }
+        (ComputedAccess::Pointer { .. }, None) => {
+            return Err("a scalar load's base at an offset the host cannot know".into());
+        }
+    })
+}
+
+/// The range a computed access binds from what a dispatch's waves reach it with, run on the host
+/// (D900): nothing where no wave reaches it - its program branches past it in every one - the one
+/// descriptor's range where every wave reaches it with the same, refused where they reach it with
+/// several, one binding holding one buffer.
+///
+/// # Errors
+///
+/// A refusal naming how many descriptors the waves reach it with, or why the one cannot be bound.
+pub(crate) fn reached_range(
+    computed: &Computed,
+    reached: &ReachedDescriptors,
+) -> Result<(u64, u64), Refusal> {
+    let mut found = reached.descriptors.iter();
+    match (found.next(), found.next()) {
+        (None, _) => Ok((0, 0)),
+        (Some(&(values, soffset)), None) => {
+            checked_range(computed_range(computed.through, (values, Some(soffset)), None)?)
+        }
+        (Some(_), Some(_)) => Err(format!(
+            "its waves reach it with {} distinct descriptors, which one binding does not hold (D900)",
+            reached.descriptors.len()
+        )
+        .into()),
+    }
 }
 
 /// The ids a fan's chunk reads as a list (D898): `primitives` triangles from the fan's `start`-th,
@@ -2203,6 +2248,41 @@ mod tests {
         );
         let pointer = computed(ComputedAccess::Pointer { base: 0, end: 16 });
         assert!(super::resolve_range(&pointer, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// A computed access a dispatch's waves were run to (D900): one no wave reaches binds nothing;
+    /// one every wave reaches with the same descriptor binds that descriptor's range, from its base
+    /// through the offset and the extent past it; one they reach with several is refused, one
+    /// binding holding one buffer. Grand Theft Auto V's waterfall dispatch skips its access in
+    /// every wave, all 79 leaving at the branch before it.
+    #[test]
+    fn a_reached_descriptor_binds_its_range() {
+        use orbistoun_translate::draw_buffers::{Computed, ComputedAccess};
+        let computed = Computed {
+            prefix: Vec::new(),
+            at: 0,
+            through: ComputedAccess::Descriptor {
+                first: 0,
+                reads: vector(Some(16), true),
+            },
+            soffset: 8,
+            first_register: 4,
+            user_data: 2,
+            program_address: None,
+        };
+        let mut reached = super::ReachedDescriptors::default();
+        assert_eq!(super::reached_range(&computed, &reached), Ok((0, 0)));
+        reached
+            .descriptors
+            .insert(([0x2000, 16 << 16, 4, STRUCTURED], 16));
+        assert_eq!(
+            super::reached_range(&computed, &reached),
+            Ok((0x2000, 16 + 4 * 16))
+        );
+        reached
+            .descriptors
+            .insert(([0x3000, 16 << 16, 4, STRUCTURED], 0));
+        assert!(super::reached_range(&computed, &reached).is_err());
     }
 
     /// Past the most answers kept, the oldest goes and every other stays, rather than all of

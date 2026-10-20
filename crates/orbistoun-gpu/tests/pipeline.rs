@@ -430,6 +430,7 @@ fn a_depth_state_stream_reaches_the_backend_as_depth_commands() {
         stencil_base: 0,
         htile: None,
         depth_clear: 0,
+        slice: 0,
     });
 
     let position = |wanted: &dyn Fn(&RenderCommand) -> bool| {

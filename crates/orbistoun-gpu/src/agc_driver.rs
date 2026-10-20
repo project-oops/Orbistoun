@@ -7012,6 +7012,8 @@ mod tests {
                     height: 8,
                     depth: None,
                     layers: None,
+                    sampling: None,
+                    cube: false,
                 },
                 order: None,
                 surface: Some((surface, vec![0; surface.bytes()])),
@@ -7071,6 +7073,8 @@ mod tests {
             height,
             depth: None,
             layers: None,
+            sampling: None,
+            cube: false,
         };
         let image = |texels: DispatchTexels, order| DispatchImages {
             stored: vec![StoredImage {
@@ -7127,6 +7131,8 @@ mod tests {
                 height,
                 depth: None,
                 layers: None,
+                sampling: None,
+                cube: false,
             },
             Some(order),
         );
