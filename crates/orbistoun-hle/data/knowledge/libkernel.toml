@@ -2777,3 +2777,55 @@ known_by = "assumed"
 assumptions = ["Existence is what the reference emulators answer; obSCEne has not measured the call."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceKernelDeleteEqueue"
+arity = 1
+purpose = "(equeue): deletes an event queue and every event registered against it."
+edge_cases = [
+    "One argument: PPSA25872 passes only rdi (image+0x16df3fb).",
+    "orbistoun wakes a thread waiting on the queue and answers it the bad-queue ESRCH; a queue nobody created is ESRCH too (D930).",
+]
+known_by = "guest-observed"
+assumptions = ["What a waiter blocked on a deleted queue sees, and the code for a bad handle, are assumed (kq01 section 8)."]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelDeleteUserEvent"
+arity = 2
+purpose = "(equeue, id): removes a user event and any delivery it had pending."
+edge_cases = [
+    "Two arguments: PPSA25872 passes the queue and id 0 (image+0x11c452f).",
+    "orbistoun applies it as EV_DELETE; an id nobody added is ENOENT (D930).",
+]
+known_by = "guest-observed"
+assumptions = ["The ENOENT code for an unregistered id is assumed from FreeBSD kern_event.c:1873-1876 (kq01 section 6)."]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelGetEventId"
+arity = 1
+purpose = "(event): the identifier of an event sceKernelWaitEqueue delivered."
+edge_cases = [
+    "PPSA25872 calls it on a user event (filter -11) it triggered with ids 0 and 1 and compares the answer against both (image+0x11c4212).",
+    "orbistoun answers the u64 at +0x00 of the event, the ident of struct kevent as D560 places it; a null event answers the placeholder.",
+]
+known_by = "assumed"
+assumptions = ["That it reads the kevent ident at +0x00 is assumed from D560's layout, not measured (obSCEne REQ-20261020T1315Z-kq01 section 9)."]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelTriggerUserEvent"
+arity = 3
+purpose = "(equeue, id, udata): fires a user event registered against the queue."
+edge_cases = [
+    "Three arguments: PPSA25872 zeroes edx before the call (image+0x16f1e32) and triggers ids 0, 1 and 999.",
+    "orbistoun applies it as a kevent change with NOTE_TRIGGER: the event is delivered once by the next wait however many triggers came before it, carrying the last trigger's udata; an id nobody added is ENOENT (D930).",
+]
+known_by = "guest-observed"
+assumptions = ["The udata a coalesced trigger leaves and the ENOENT code for an unregistered id are assumed from FreeBSD kern_event.c (kq01 sections 3 and 6)."]
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-20"

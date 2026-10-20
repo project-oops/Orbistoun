@@ -11,6 +11,7 @@
 
 pub mod apr;
 pub mod direct;
+pub mod equeue;
 pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
@@ -212,6 +213,9 @@ guest_module! {
         "sceKernelWaitEqueue" => 5,
         // (event): one delivered event's filter.
         "sceKernelGetEventFilter" => 1,
+        // Read off the guest's calls (D930): PPSA25872 zeroes `edx` for the trigger's third.
+        "sceKernelDeleteEqueue" => 1, "sceKernelTriggerUserEvent" => 3,
+        "sceKernelDeleteUserEvent" => 2, "sceKernelGetEventId" => 1,
         // Arities read off the guest's calls: Get takes a handle and two adjacent out-parameters, Set a
         // handle, a policy and a param pointer, and the two-argument pair a handle and one value.
         "scePthreadGetschedparam" => 3, "scePthreadSetschedparam" => 3,
@@ -3788,16 +3792,71 @@ fn kernel_get_event_filter(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceKernelAddUserEventEdge(equeue, identifier)`.
-///
-/// Registers a user event against a queue. A bad handle is refused with the vendor `ESRCH`
-/// (`0x80020003`) the event-flag family answers on the hardware, rather than success for a queue
-/// that does not exist (D524). Delivery is in [`kernel_wait_equeue`].
+/// `sceKernelGetEventId(event)`: the identifier of an event [`kernel_wait_equeue`] delivered, the
+/// `u64` at `+0x00` of `struct kevent` (D560). Read as [`kernel_get_event_filter`] reads its field,
+/// and assumed the same way: PPSA25872 takes it from a user event it triggered with ids 0 and 1
+/// and compares it against both (image+0x11c4212). A null event answers the placeholder.
+fn kernel_get_event_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's delivered event, by the call's contract; read through the checked
+    // accessor.
+    unsafe { guest::read_u64(args[0]) }.unwrap_or(u64::from(GuestError::Unimplemented.as_raw()))
+}
+
+/// The answer to a refused queue change (D930): a queue nobody created is the vendor `ESRCH` the
+/// event-flag family answers on the hardware (D524), an event nobody added FreeBSD's `ENOENT`, and
+/// a malformed change its `EINVAL`.
+fn equeue_refusal(refusal: equeue::Refusal) -> u64 {
+    let errno = match refusal {
+        equeue::Refusal::NoQueue => orbistoun_core::errno::NO_SUCH,
+        equeue::Refusal::NoEvent => orbistoun_core::errno::NO_ENTRY,
+        equeue::Refusal::Invalid => orbistoun_core::errno::INVALID,
+        equeue::Refusal::TimedOut => ETIMEDOUT,
+    };
+    u64::from(GuestError::vendor(errno).as_raw())
+}
+
+/// Applies one user-event change to a queue and answers as [`equeue_refusal`] does.
+fn user_event_change(queue: u64, ident: u64, actions: u16, note: u32, udata: u64) -> u64 {
+    let change = equeue::Change {
+        ident,
+        filter: equeue::EVFILT_USER,
+        flags: actions,
+        fflags: note,
+        data: 0,
+        udata,
+    };
+    equeue::apply(queue, change).map_or_else(equeue_refusal, |()| OK)
+}
+
+/// `sceKernelAddUserEventEdge(equeue, identifier)`: adds a user event that resets once delivered,
+/// `EV_ADD | EV_CLEAR` (D930). [`kernel_trigger_user_event`] fires it, and [`kernel_wait_equeue`]
+/// delivers it once per run of triggers.
 fn kernel_add_user_event_edge(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if sync::register_event(args[0], args[1]) {
+    user_event_change(args[0], args[1], equeue::EV_ADD | equeue::EV_CLEAR, 0, 0)
+}
+
+/// `sceKernelTriggerUserEvent(equeue, identifier, udata)`: fires a user event, `NOTE_TRIGGER`,
+/// leaving `udata` on it as a change without `EV_KEEPUDATA` does (D930).
+fn kernel_trigger_user_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    user_event_change(args[0], args[1], 0, equeue::NOTE_TRIGGER, args[2])
+}
+
+/// `sceKernelDeleteUserEvent(equeue, identifier)`: removes a user event, `EV_DELETE`, along with a
+/// delivery it had pending (D930).
+fn kernel_delete_user_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    user_event_change(args[0], args[1], equeue::EV_DELETE, 0, 0)
+}
+
+/// `sceKernelDeleteEqueue(equeue)`: deletes a queue and every event registered against it, waking
+/// a thread waiting on it (D930). A queue nobody created is the vendor `ESRCH`.
+fn kernel_delete_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if equeue::delete_equeue(args[0]) {
         OK
     } else {
-        u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw())
+        equeue_refusal(equeue::Refusal::NoQueue)
     }
 }
 
@@ -3922,16 +3981,20 @@ const ETIMEDOUT: u32 = 60;
 /// `sceKernelWaitEqueue(equeue, events, wanted, delivered, timeout)`.
 ///
 /// Arity five, with the guest's own argument roles: a queue handle, an event buffer, the number
-/// wanted, an out-count, and a pointer to a microsecond timeout (null in observed calls). The
+/// wanted (`kevent(2)`'s `int nevents`), an out-count, and a pointer to a microsecond timeout. The
 /// delivered structure is `struct kevent`; see [`sync::PendingEvent`].
 ///
-/// A bad handle is refused with the vendor `ESRCH` (`0x80020003`) the rest of this family
-/// answers on the hardware.
+/// The timeout is a 32-bit count: PPSA25872 stores a dword 0 and passes its address to drain a
+/// queue, calling until the wait answers non-zero (image+0x11c4208..0x11c4259), so the four bytes
+/// after it are whatever its stack held (D930).
+///
+/// A bad handle, or a queue deleted while the caller waited on it, is refused with the vendor
+/// `ESRCH` (`0x80020003`) the rest of this family answers on the hardware.
 fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::equeue_exists(args[0]) {
-        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+        return equeue_refusal(equeue::Refusal::NoQueue);
     }
-    let Ok(wanted) = usize::try_from(args[2]) else {
+    let Ok(wanted) = usize::try_from(i32::from_ne_bytes((args[2] as u32).to_ne_bytes())) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     if args[1] == 0 || wanted == 0 {
@@ -3944,17 +4007,18 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         sync::Blocking::Forever
     } else {
         // SAFETY: an address the guest passed for this call, valid by its contract.
-        match unsafe { guest::read_u64(args[4]) } {
+        match unsafe { guest::read_u32(args[4]) } {
             Some(micros) => sync::Blocking::Until(
-                std::time::Instant::now() + std::time::Duration::from_micros(micros),
+                std::time::Instant::now() + std::time::Duration::from_micros(u64::from(micros)),
             ),
             // A timeout pointer that does not read is not a zero timeout.
             None => return u64::from(GuestError::InvalidArgument.as_raw()),
         }
     };
-    let Some(events) = sync::wait_events(args[0], wanted, until) else {
-        // Nothing arrived within the caller's patience: a timeout, not success with nothing written.
-        return u64::from(GuestError::vendor(ETIMEDOUT).as_raw());
+    // Nothing arrived within the caller's patience is a timeout, not success with nothing written.
+    let events = match equeue::wait_events(args[0], wanted, until) {
+        Ok(events) => events,
+        Err(refusal) => return equeue_refusal(refusal),
     };
     // A thread woken by a flip has waited until the display showed it (D786).
     if let Some(latest) = events.iter().map(|event| event.display_nanos).max() {
@@ -7158,6 +7222,10 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelAddUserEventEdge", kernel_add_user_event_edge),
     ("sceKernelWaitEqueue", kernel_wait_equeue),
     ("sceKernelGetEventFilter", kernel_get_event_filter),
+    ("sceKernelGetEventId", kernel_get_event_id),
+    ("sceKernelDeleteEqueue", kernel_delete_equeue),
+    ("sceKernelTriggerUserEvent", kernel_trigger_user_event),
+    ("sceKernelDeleteUserEvent", kernel_delete_user_event),
     ("scePthreadGetschedparam", pthread_getschedparam),
     ("scePthreadSetschedparam", pthread_setschedparam),
     ("scePthreadSetprio", pthread_setprio),
@@ -7673,6 +7741,103 @@ mod tests {
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = event.as_ptr() as u64;
         assert_eq!(super::kernel_get_event_filter(&args) as i64, -14);
+    }
+
+    /// A user event goes from trigger to wait as PPSA25872 drives it (D930): added with the edge
+    /// call, triggered with an id it later compares against, drained by waits on a dword timeout
+    /// of 0 until the wait answers non-zero.
+    #[test]
+    fn a_triggered_user_event_is_waited_for_and_drained() {
+        let queue = super::sync::create_equeue("user");
+        assert_eq!(
+            super::kernel_add_user_event_edge(&args([queue, 1, 0x7fff_0001, 0])),
+            super::OK
+        );
+        assert_eq!(
+            super::kernel_trigger_user_event(&args([queue, 1, 0xbeef, 0])),
+            super::OK
+        );
+        assert_eq!(
+            super::kernel_trigger_user_event(&args([queue, 1, 0xbeef, 0])),
+            super::OK,
+            "a second trigger before the wait"
+        );
+        let mut events = [0xcc_u8; 0x40];
+        let mut count = 0xcccc_cccc_u32;
+        // The guest's dword 0, and above it stack bytes that read as 71 minutes if taken as a u64.
+        let timeout = [0_u32, 1];
+        let mut wait = [0_u64; GUEST_ARG_REGISTERS];
+        wait[..5].copy_from_slice(&[
+            queue,
+            events.as_mut_ptr() as u64,
+            2,
+            std::ptr::from_mut(&mut count) as u64,
+            timeout.as_ptr() as u64,
+        ]);
+        assert_eq!(super::kernel_wait_equeue(&wait), super::OK);
+        assert_eq!(count, 1, "two triggers, one event");
+        let delivered = super::sync::PendingEvent {
+            ident: 1,
+            filter: -11,
+            flags: 0x20,
+            fflags: 0,
+            data: 0,
+            udata: 0xbeef,
+            display_nanos: 0,
+        }
+        .to_bytes();
+        assert_eq!(&events[..0x20], &delivered);
+        assert_eq!(&events[0x20..], &[0xcc; 0x20], "only one written");
+        assert_eq!(
+            super::kernel_get_event_id(&args([events.as_ptr() as u64, 0, 0, 0])),
+            1
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(super::kernel_wait_equeue(&wait), 0x8002_003c);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "a dword 0 is no wait"
+        );
+    }
+
+    /// Changes to missing events and queues are refused by name, not accepted (D930).
+    #[test]
+    fn user_event_and_queue_refusals() {
+        let queue = super::sync::create_equeue("refusals");
+        assert_eq!(
+            super::kernel_trigger_user_event(&args([queue, 0x99, 0, 0])),
+            0x8002_0002,
+            "an event nobody added is ENOENT"
+        );
+        assert_eq!(
+            super::kernel_add_user_event_edge(&args([queue, 0x22, 0, 0])),
+            super::OK
+        );
+        assert_eq!(
+            super::kernel_delete_user_event(&args([queue, 0x22, 0, 0])),
+            super::OK
+        );
+        assert_eq!(
+            super::kernel_delete_user_event(&args([queue, 0x22, 0, 0])),
+            0x8002_0002
+        );
+        assert_eq!(
+            super::kernel_delete_equeue(&args([queue, 0, 0, 0])),
+            super::OK
+        );
+        assert_eq!(
+            super::kernel_delete_equeue(&args([queue, 0, 0, 0])),
+            0x8002_0003
+        );
+        assert_eq!(
+            super::kernel_trigger_user_event(&args([queue, 0x22, 0, 0])),
+            0x8002_0003
+        );
+        let mut events = [0_u8; 0x20];
+        assert_eq!(
+            super::kernel_wait_equeue(&args([queue, events.as_mut_ptr() as u64, 1, 0])),
+            0x8002_0003
+        );
     }
 
     /// Makes a thread this crate has issued, for the calls that check a handle.
