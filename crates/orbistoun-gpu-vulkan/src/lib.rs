@@ -359,6 +359,9 @@ pub struct VulkanBackend {
     /// Each depth target's depths as last read back for a depth compare (D817), with their hash;
     /// a draw on the target drops them, so the next compare reads what it drew.
     depth_reads: BTreeMap<ResourceId, (std::sync::Arc<[u32]>, u64)>,
+    /// Each depth target's stencil as last read back for a draw that loads it (D927), with its
+    /// hash; dropped as its depths are.
+    stencil_reads: BTreeMap<ResourceId, (std::sync::Arc<[u32]>, u64)>,
     /// The guest's clip-to-pixel transform for the next draw: the latest `SetViewportTransform`;
     /// `None` maps clip space over the whole attachment the host's way.
     viewport_transform: Option<orbistoun_gpu::ViewportTransform>,
@@ -437,6 +440,7 @@ impl VulkanBackend {
             depths: BTreeMap::new(),
             depth_clears: BTreeMap::new(),
             depth_reads: BTreeMap::new(),
+            stencil_reads: BTreeMap::new(),
             viewport_transform: None,
             guest_memory: Vec::new(),
             guest_memory_generation: 0,
@@ -566,7 +570,8 @@ impl VulkanBackend {
             | orbistoun_gpu::TextureEncoding::Rgba8Srgb
             | orbistoun_gpu::TextureEncoding::Rgb10A2
             | orbistoun_gpu::TextureEncoding::DepthFloat
-            | orbistoun_gpu::TextureEncoding::DepthCompare => (width as usize) * (height as usize),
+            | orbistoun_gpu::TextureEncoding::DepthCompare
+            | orbistoun_gpu::TextureEncoding::IntegerBits => (width as usize) * (height as usize),
             orbistoun_gpu::TextureEncoding::Bc3
             | orbistoun_gpu::TextureEncoding::Bc3Srgb
             | orbistoun_gpu::TextureEncoding::Bc6hUfloat
@@ -720,6 +725,31 @@ impl VulkanBackend {
         Ok(Some((read, hash, extent)))
     }
 
+    /// Depth target `target`'s stencil as the draws before left it, one value a texel widened to a
+    /// word, with their hash and its extent: read back once per drawing onto it (D927). `None` for
+    /// a target this backend never drew.
+    ///
+    /// # Errors
+    ///
+    /// When it holds no stencil, or the device could not read it back.
+    fn stencil_texels(&mut self, target: ResourceId) -> Result<Option<DepthTexels>, BackendError> {
+        let Some(attachment) = self.depths.get(&target) else {
+            return Ok(None);
+        };
+        let extent = attachment.extent();
+        if let Some((read, hash)) = self.stencil_reads.get(&target) {
+            return Ok(Some((std::sync::Arc::clone(read), *hash, extent)));
+        }
+        let read: std::sync::Arc<[u32]> = attachment
+            .read_stencil()
+            .map_err(|e| BackendError::Device(format!("stencil read: {e:?}")))?
+            .into();
+        let hash = orbistoun_gpu::content_hash(&read);
+        self.stencil_reads
+            .insert(target, (std::sync::Arc::clone(&read), hash));
+        Ok(Some((read, hash, extent)))
+    }
+
     /// Replaces depth target `target`'s depths with `texels`, one float's bits a texel: what a
     /// dispatch that stores to it wrote (D894). Its read-back depths are then these. `false` for a
     /// target this backend never drew.
@@ -756,6 +786,7 @@ impl VulkanBackend {
             compare,
             cube,
             layered,
+            stencil,
         } = command
         else {
             return Ok(());
@@ -772,7 +803,13 @@ impl VulkanBackend {
         let mut extent = None;
         for face in 0..faces {
             let face_target = orbistoun_gpu::depth::depth_target_slice_of(target, face);
-            let Some((texels, hash, face_extent)) = self.depth_texels(face_target)? else {
+            // The stencil plane's values, or the depths (D927).
+            let fetched = if stencil {
+                self.stencil_texels(face_target)?
+            } else {
+                self.depth_texels(face_target)?
+            };
+            let Some((texels, hash, face_extent)) = fetched else {
                 self.refused += 1;
                 return Err(BackendError::Unsupported {
                     command: "BindDepthTexture of a depth target this backend never drew",
@@ -807,7 +844,9 @@ impl VulkanBackend {
             texels,
             width,
             height,
-            encoding: if compare {
+            encoding: if stencil {
+                orbistoun_gpu::TextureEncoding::IntegerBits
+            } else if compare {
                 orbistoun_gpu::TextureEncoding::DepthCompare
             } else {
                 orbistoun_gpu::TextureEncoding::DepthFloat
@@ -1777,6 +1816,7 @@ impl VulkanBackend {
         // A draw on a depth target changes what a compare of it reads (D817).
         if let Some(id) = self.current_depth {
             self.depth_reads.remove(&id);
+            self.stencil_reads.remove(&id);
         }
         // The bound depth target's attachment, sized to the colour target, and the clear it starts
         // from; a depth state with no exact Vulkan form is refused like a blend state.

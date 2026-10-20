@@ -5123,10 +5123,12 @@ impl Pipeline {
             return;
         }
         span(Span::TextureBind, || {
+            let stencil = stencil_plane(&submission.commands, submission.depth_bases);
             submission.report.bound_textures = bind_textures(
                 &mut submission.commands,
                 (&self.texture_sources, &mut self.texels),
                 memory,
+                stencil,
                 (
                     &mut submission.report.unbound_textures,
                     &mut submission.report.first_unbound_texture,
@@ -6755,6 +6757,7 @@ fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
+    stencil: Option<StencilPlane>,
     (unbound, first_unbound): (&mut usize, &mut Option<String>),
 ) -> Vec<ImageDescriptor> {
     let mut named = NamedTextures::default();
@@ -6794,20 +6797,7 @@ fn bind_textures(
                     .and_then(|module| sources.get(&module))
                     .map_or(&[][..], Vec::as_slice);
                 // A module this pipeline did not translate gets the one default texture source.
-                let default = [TextureSource {
-                    slot: 0,
-                    table_offset: None,
-                    table: TableBase::default(),
-                    sampler_offset: None,
-                    user_data: None,
-                    sampler_user_data: None,
-                    cube: false,
-                    volume: false,
-                    compare: false,
-                    saturated: [false; 2],
-                    level_user_data: None,
-                    layered: false,
-                }];
+                let default = [TextureSource::default()];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
                 } else {
@@ -6818,13 +6808,18 @@ fn bind_textures(
                     // A descriptor still in the user data the stage was seeded with is read from
                     // those words, with a sampler beside it there.
                     if let Some(first) = source.user_data {
-                        let bound = read_from_user
-                            .entry(user_texture_key(source, first, user))
-                            .or_insert_with(|| {
-                                user_data_texture(source, first, user, memory, texels)
-                            })
-                            .clone()
-                            .filter(|bound| shaped_for(bound, source));
+                        let plane = stencil.and_then(|plane| {
+                            stencil_texture(source, user_words(user, first)?, plane)
+                        });
+                        let bound = plane.or_else(|| {
+                            read_from_user
+                                .entry(user_texture_key(source, first, user))
+                                .or_insert_with(|| {
+                                    user_data_texture(source, first, user, memory, texels)
+                                })
+                                .clone()
+                                .filter(|bound| shaped_for(bound, source))
+                        });
                         named.note(bound.as_ref(), || user_words(user, first));
                         if bound.is_none() {
                             *unbound += 1;
@@ -6848,10 +6843,16 @@ fn bind_textures(
                     // Named once a submission, as it is first read: not again for each draw.
                     let fresh =
                         !read.contains_key(&(at, source.slot, sampler_at, source.saturated));
-                    let bound = read
-                        .entry((at, source.slot, sampler_at, source.saturated))
-                        .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
-                        .clone();
+                    let plane = stencil.and_then(|plane| {
+                        stencil_texture(source, read_descriptor(at, memory)?, plane)
+                    });
+                    let bound = plane.or_else(|| {
+                        read.entry((at, source.slot, sampler_at, source.saturated))
+                            .or_insert_with(|| {
+                                table_texture(source, (at, sampler_at), memory, texels)
+                            })
+                            .clone()
+                    });
                     let bound = bound.filter(|bound| shaped_for(bound, source));
                     named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
                     let bound = bound.or_else(|| unreached_texture(source, at, memory));
@@ -6908,6 +6909,59 @@ fn unreached_texture(
     let base = decode_image_descriptor(words).base;
     let null = null_texture(source.slot, source.cube);
     (memory.read(base, 1).is_none() && shaped_for(&null, source)).then_some(null)
+}
+
+/// A submission's stencil plane: where its tests read and write the stencil, and the depth target
+/// that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StencilPlane {
+    /// The stencil surface's read and write bases (`DB_STENCIL_READ_BASE`, `_WRITE_BASE`).
+    bases: [u64; 2],
+    /// The depth target the plane belongs to.
+    target: ResourceId,
+}
+
+/// The stencil plane of the depth target a submission's commands bind, where its bases are known.
+fn stencil_plane(
+    commands: &[RenderCommand],
+    bases: Option<crate::depth::DepthBases>,
+) -> Option<StencilPlane> {
+    let bases = bases?;
+    let target = commands.iter().find_map(|command| match command {
+        RenderCommand::SetRenderTargets { depth, .. } => *depth,
+        _ => None,
+    })?;
+    Some(StencilPlane {
+        bases: [bases.stencil_read, bases.stencil_write],
+        target,
+    })
+}
+
+/// The stencil plane `words` describe, loaded by `source` (D927): an `8_UINT` image under a depth
+/// swizzle, flat, at the base the submission's stencil tests read or write. Each texel binds as its
+/// value's bits, which a load answers as they are. [`None`] for any other descriptor, or a module
+/// that samples it compared, as a cube or a volume.
+fn stencil_texture(
+    source: &TextureSource,
+    words: [u32; 8],
+    plane: StencilPlane,
+) -> Option<RenderCommand> {
+    let descriptor = decode_image_descriptor(words);
+    (descriptor.format == FORMAT_8_UINT
+        && is_depth_swizzle(descriptor.tiling)
+        && words[3] >> 28 == IMAGE_TYPE_2D
+        && descriptor.base != 0
+        && plane.bases.contains(&descriptor.base)
+        && !(source.compare || source.cube || source.volume || source.layered))
+        .then_some(RenderCommand::BindDepthTexture {
+            slot: source.slot,
+            target: plane.target,
+            sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+            compare: false,
+            cube: false,
+            layered: false,
+            stencil: true,
+        })
 }
 
 /// The textures [`bind_textures`] bound, each by its descriptor, once.
@@ -7556,6 +7610,7 @@ fn depth_texture_from(
         compare,
         cube,
         layered,
+        stencil: false,
     })
 }
 
@@ -8074,7 +8129,8 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         crate::backend::TextureEncoding::R16 { .. } => 1 << 18 | 1 << 22,
         // Never read from guest memory, so never in the cache (D817).
         crate::backend::TextureEncoding::DepthFloat
-        | crate::backend::TextureEncoding::DepthCompare => 1 << 23,
+        | crate::backend::TextureEncoding::DepthCompare
+        | crate::backend::TextureEncoding::IntegerBits => 1 << 23,
     }
 }
 
@@ -10095,6 +10151,7 @@ mod tests {
             &mut commands,
             (&sources, &mut super::TexelCache::new()),
             &memory,
+            None,
             (&mut unbound, &mut None),
         );
         assert_eq!(unbound, 0);
@@ -10178,6 +10235,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &Memory,
+                None,
                 (&mut unbound, &mut None),
             );
             let texels = commands.iter().find_map(|command| match command {
@@ -10188,6 +10246,93 @@ mod tests {
         };
         assert_eq!(bind(0x6000), (0, Some(vec![0])), "every select SQ_SEL_0");
         assert_eq!(bind(0x6000 | 4), (1, None), "X reads the texel");
+    }
+
+    /// An `8_UINT` descriptor at the base the submission's stencil tests read binds that depth
+    /// target's stencil plane, as its values' bits (D927): Grand Theft Auto V's lighting loads the
+    /// scene's stencil from its table at 0x7400_54ca_0000. With no such plane it is not bound.
+    #[test]
+    fn the_stencil_plane_binds_where_the_tests_read_it() {
+        use super::{
+            RenderCommand, ShaderStage, StencilPlane, TableBase, TextureSource, bind_textures,
+        };
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let descriptor = [
+            0x0054_ca00_u32,
+            0xc050_0074,
+            0x021b_c3bf,
+            0x9180_0204,
+            0,
+            0x0070_0000,
+            0,
+            0,
+        ];
+        let target = crate::depth::depth_target_id_at(0x7400_52cc_0000);
+        let bind = |plane: Option<StencilPlane>| {
+            let mut table = vec![0_u8; 0x100];
+            for (word, bytes) in descriptor.iter().zip(table[0x40..0x60].chunks_exact_mut(4)) {
+                bytes.copy_from_slice(&word.to_le_bytes());
+            }
+            let shader = ResourceId(5);
+            let mut words = [0u32; super::USER_DATA_WORDS];
+            words[0] = 0x1000;
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 5,
+                    table_offset: Some(0x40),
+                    table: TableBase::default(),
+                    ..TextureSource::default()
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &Memory(table),
+                plane,
+                (&mut unbound, &mut None),
+            );
+            let bound = commands.iter().find_map(|command| match command {
+                RenderCommand::BindDepthTexture {
+                    slot,
+                    target,
+                    stencil,
+                    ..
+                } => Some((*slot, *target, *stencil)),
+                _ => None,
+            });
+            (unbound, bound)
+        };
+        let plane = StencilPlane {
+            bases: [0x7400_54ca_0000, 0],
+            target,
+        };
+        assert_eq!(bind(Some(plane)), (0, Some((5, target, true))));
+        // With no plane, the descriptor names memory this test does not map: the null texture, not
+        // the stencil (D921).
+        assert_eq!(bind(None), (0, None), "no stencil plane bound");
     }
 
     /// A table slot whose descriptor names an image in no guest memory binds the null texture
@@ -10249,6 +10394,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &Memory(table),
+                None,
                 (&mut unbound, &mut None),
             );
             let texels = commands.iter().find_map(|command| match command {
@@ -10324,6 +10470,7 @@ mod tests {
             &mut commands,
             (&sources, &mut super::TexelCache::new()),
             &Memory,
+            None,
             (&mut unbound, &mut first),
         );
         assert_eq!(unbound, 1);
@@ -10409,6 +10556,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &memory,
+                None,
                 (&mut unbound, &mut None),
             );
             let sampling = commands.iter().find_map(|command| match command {
@@ -10454,6 +10602,7 @@ mod tests {
                 compare: false,
                 cube: true,
                 layered: false,
+                stencil: false,
             })
         );
         // A flat sample of the same cube reads its first face: the target drawn at slice zero
@@ -10468,6 +10617,7 @@ mod tests {
                 compare: false,
                 cube: false,
                 layered: false,
+                stencil: false,
             })
         );
         // A load of it by face reads the six slices as an array's layers (D922): Grand Theft Auto
@@ -10485,6 +10635,7 @@ mod tests {
                 compare: false,
                 cube: false,
                 layered: true,
+                stencil: false,
             })
         );
         cube[4] = 11;
@@ -10619,6 +10770,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &memory,
+                None,
                 (&mut unbound, &mut None),
             );
             let bound = commands.iter().find_map(|command| match command {
@@ -10822,6 +10974,7 @@ mod tests {
             &mut commands,
             (&sources, &mut super::TexelCache::new()),
             &memory,
+            None,
             (&mut unbound, &mut None),
         );
         let bound = commands
@@ -12386,6 +12539,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &memory,
+                None,
                 (&mut unbound, &mut None),
             );
             let bound = commands.iter().find_map(|command| match command {

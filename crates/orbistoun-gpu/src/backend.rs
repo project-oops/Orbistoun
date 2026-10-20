@@ -283,6 +283,9 @@ pub enum RenderCommand {
         /// Whether the same six slices are read as the layers of an array, where the module loads
         /// a face by its index (D922).
         layered: bool,
+        /// Whether it is the target's stencil plane rather than its depth: each texel's stencil
+        /// value as [`TextureEncoding::IntegerBits`] (D927).
+        stencil: bool,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).
@@ -547,6 +550,9 @@ pub enum TextureEncoding {
     DepthFloat,
     /// [`Self::DepthFloat`] sampled through a compare by the sampler's function (D817).
     DepthCompare,
+    /// One word a texel, an unsigned integer texel's value as the bits a load answers, which the
+    /// host fetches through `R32_SFLOAT` unconverted: a stencil plane a draw loads (D927).
+    IntegerBits,
     /// One byte a texel, four to a word in row-major order, the first in the low byte, which the
     /// host samples as `R8_UNORM` with each channel read from the byte or a constant as `lanes`
     /// says: a one-byte texture bound as its selects read it, at a quarter of the words a widened

@@ -2920,6 +2920,9 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
         // A depth target's depths as the host attachment held them (D817).
         orbistoun_gpu::TextureEncoding::DepthFloat
         | orbistoun_gpu::TextureEncoding::DepthCompare => (vk::Format::D32_SFLOAT, as_they_are()),
+        // An integer texel's value as the bits a load answers, fetched unconverted: a 32-bit float
+        // format passes its bits through a fetch, which neither filters nor converts (D927).
+        orbistoun_gpu::TextureEncoding::IntegerBits => (vk::Format::R32_SFLOAT, as_they_are()),
         // One byte a texel, tightly packed as the copy reads a one-byte format; its lanes are the
         // view's (`texture_components`). Sampling and linear filtering of `R8_UNORM` with optimal
         // tiling are required of every implementation (Vulkan's required format support table).
