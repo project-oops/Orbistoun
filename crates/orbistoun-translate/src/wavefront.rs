@@ -2143,6 +2143,8 @@ pub struct Wavefront<'a> {
     point_size: Option<u32>,
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
+    /// Which fetched images, by slot, are unsigned integer ones (D916).
+    integer_fetched: u32,
     /// The coordinates each texture slot's samples saturate (D743).
     saturated: [[bool; 2]; MAX_TEXTURES],
     /// The four-component unsigned vector an integer image's texel is, declared on first use.
@@ -3097,6 +3099,7 @@ impl<'a> Wavefront<'a> {
             position_vectors: user_data.position_vectors,
             point_size: user_data.point_size,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
+            integer_fetched: user_data.compute.unwrap_or_default().integer_fetched,
             saturated: user_data.saturated,
             uvec4: None,
             mesh,
@@ -5622,7 +5625,8 @@ impl Model for Wavefront<'_> {
         // Element type, then: two-dimensional, not depth, not arrayed, single-sampled, used with a
         // sampler, and no declared format - the same seven values the hand-written oracle declares.
         // A compute dispatch's fetched image may be an unsigned integer one, declared as such.
-        let integer = self.stage == Stage::Compute && self.integer_images[0];
+        let integer = self.stage == Stage::Compute
+            && (self.integer_images[0] || self.integer_fetched >> source.slot & 1 != 0);
         let (element, result) = if integer {
             (self.u32_type, self.unsigned_vec4())
         } else {

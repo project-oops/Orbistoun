@@ -379,6 +379,7 @@ pub fn plan(
                         threads: [count, 1, 1],
                     }),
                     integer_images: [false; 2],
+                    integer_fetched: 0,
                     // Its lanes' vertex ids, which its `v0` holds.
                     first_thread: first,
                 },

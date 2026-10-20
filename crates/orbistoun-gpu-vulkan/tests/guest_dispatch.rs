@@ -144,6 +144,7 @@ fn translated_for(
                 unwritten_user_data: unwritten,
                 partial,
                 integer_images: [false; 2],
+                integer_fetched: 0,
                 first_thread: 0,
             }),
             per_invocation: subgroup,

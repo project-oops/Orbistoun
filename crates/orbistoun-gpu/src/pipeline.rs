@@ -2292,7 +2292,8 @@ impl Pipeline {
         let placed = placed.unwrap_or_default();
         // The images' numeric types come from the descriptors the translation names, so a module
         // translated for float images whose images are integer ones is translated again for them.
-        let mut integer_images = state.inputs.integer_images;
+        // Fetched images slot by slot, stored ones together (D893, D916).
+        let mut integer_images = (state.inputs.integer_fetched, state.inputs.integer_images[1]);
         let ((module, module_hash), images) = loop {
             let (module, sources) = self.dispatch_module(
                 (&decoded, program, address),
@@ -2301,7 +2302,7 @@ impl Pipeline {
                 integer_images,
             )?;
             let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
-            let wanted = [fetched_integer(&images)?, stored_integer(&images)?];
+            let wanted = (fetched_integer(&images), stored_integer(&images)?);
             if wanted == integer_images {
                 break (module, images);
             }
@@ -2509,11 +2510,12 @@ impl Pipeline {
             Window,
             Option<orbistoun_translate::wavefront::BufferFormats>,
         ),
-        integer_images: [bool; 2],
+        (integer_fetched, integer_stored): (u32, bool),
     ) -> Result<(DispatchModule, orbistoun_translate::wavefront::ImageSources), String> {
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
         let inputs = orbistoun_translate::wavefront::ComputeInputs {
-            integer_images,
+            integer_images: [false, integer_stored],
+            integer_fetched,
             ..state.inputs
         };
         // A program reading its own address - a descriptor whose base is its own constant data -
@@ -2579,8 +2581,8 @@ impl Pipeline {
             // A partial group's shape is read from the push block, so only whether it has one is
             // part of the module's name: every grid a program runs over shares one module (D855).
             ^ u64::from(inputs.partial.is_some()) << 9
-            ^ u64::from(integer_images[0]) << 62
-            ^ u64::from(integer_images[1]) << 63
+            ^ u64::from(integer_fetched).rotate_left(44)
+            ^ u64::from(integer_stored) << 63
             // A streamout pass drops the exports a dispatch of the same program would refuse.
             ^ u64::from(state.vertex_streamout) << 61
             // A streamout wave's first vertex is compiled in (D861).
@@ -3088,6 +3090,10 @@ pub enum TexelFormat {
     R32Uint,
     /// One sixteen-bit unsigned channel, a texel half a word: the guest's `16_UINT`.
     R16Uint,
+    /// One sixteen-bit normalised channel, a texel half a word: the guest's `16_UNORM` (D916).
+    R16Unorm,
+    /// Two thirty-two-bit unsigned channels, a texel two words: the guest's `32_32_UINT` (D916).
+    Rg32Uint,
     /// One thirty-two-bit float channel, a texel a word: the guest's `32_FLOAT`.
     R32Float,
     /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
@@ -3114,8 +3120,8 @@ impl TexelFormat {
             | Self::R32Float
             | Self::Rgba8Uint => 4,
             Self::R8 | Self::R8Uint => 1,
-            Self::R16Uint => 2,
-            Self::Rgba16Float => 8,
+            Self::R16Uint | Self::R16Unorm => 2,
+            Self::Rgba16Float | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
         }
     }
@@ -3131,7 +3137,12 @@ impl TexelFormat {
     pub const fn is_integer(self) -> bool {
         matches!(
             self,
-            Self::Rgba32Uint | Self::R32Uint | Self::R16Uint | Self::R8Uint | Self::Rgba8Uint
+            Self::Rgba32Uint
+                | Self::Rg32Uint
+                | Self::R32Uint
+                | Self::R16Uint
+                | Self::R8Uint
+                | Self::Rgba8Uint
         )
     }
 }
@@ -3268,7 +3279,7 @@ impl DispatchSurface {
                 .chunks_exact(slice.words() * 4)
                 .zip(0_u32..)
                 .flat_map(|(bytes, z)| {
-                    let words = slice_words(&words_of_bytes(bytes), z);
+                    let words = slice_words(&words_of_bytes(bytes), z, slice.layout);
                     slice.detile_mapped(&words, |w| w)
                 })
                 .collect(),
@@ -3340,12 +3351,16 @@ impl DispatchSurface {
                     .zip(texels.chunks(per_slice))
                     .zip(0_u32..)
                 {
-                    let mut words = slice_words(&words_of_bytes(bytes), z);
+                    let mut words = slice_words(&words_of_bytes(bytes), z, slice.layout);
                     slice
                         .tile_mapped(texels, &mut words, |w| w)
                         .map_err(|e| format!("{e:?}"))?;
                     // The slice's XOR undoes itself.
-                    for (bytes, word) in bytes.chunks_exact_mut(4).zip(slice_words(&words, z)) {
+                    for (bytes, word) in
+                        bytes
+                            .chunks_exact_mut(4)
+                            .zip(slice_words(&words, z, slice.layout))
+                    {
                         bytes.copy_from_slice(&word.to_le_bytes());
                     }
                 }
@@ -3449,10 +3464,16 @@ fn words_of_bytes(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
-/// Slice `z` of a 32-bpp `64KB_R_X` volume with its slice XOR undone, or put back: word `i` of the
-/// one is word `i ^ (xor / 4)` of the other. The XOR is under a block, so no word leaves its block.
-fn slice_words(words: &[u32], z: u32) -> Vec<u32> {
-    let xor = crate::tiling::slice_xor_64kb_rx_bpp4(z).unwrap_or(0) / 4;
+/// Slice `z` of a 64 KiB `_X` volume or array with its slice XOR undone, or put back: word `i` of
+/// the one is word `i ^ (xor / 4)` of the other. The XOR is under a block, so no word leaves its
+/// block. A `layout` with no layer terms - a standard swizzle (`tools/addrlib/equation 4KB_S 2 32
+/// array`) - has none (D916).
+fn slice_words(words: &[u32], z: u32, layout: crate::tiling::SurfaceLayout) -> Vec<u32> {
+    let xor = if layout.layers_xor() {
+        crate::tiling::slice_xor_64kb_rx_bpp4(z).unwrap_or(0) / 4
+    } else {
+        0
+    };
     (0..words.len()).map(|i| words[i ^ xor]).collect()
 }
 
@@ -3844,20 +3865,14 @@ fn from_layer(
 
 /// Whether a dispatch's fetched images hold integers, which its module declares for all of them at
 /// once: refused where some do and some do not.
-fn fetched_integer(images: &DispatchImages) -> Result<bool, String> {
-    let mut each = images
+fn fetched_integer(images: &DispatchImages) -> u32 {
+    images
         .fetched
         .iter()
         .chain(images.more_fetched.iter().map(|(texels, _)| texels))
-        .map(|texels| texels.format.is_integer());
-    let first = each.next().unwrap_or(false);
-    if each.any(|integer| integer != first) {
-        return Err(
-            "the program fetches from integer and float images, which one module declares alike"
-                .to_owned(),
-        );
-    }
-    Ok(first)
+        .zip(0_u32..)
+        .filter(|(texels, _)| texels.format.is_integer())
+        .fold(0, |mask, (_, slot)| mask | 1 << slot)
 }
 
 /// The texels dispatch images last detiled to, each with the surface and the bytes it came from: a
@@ -4158,14 +4173,16 @@ fn tiled_layers(
     format: TexelFormat,
     layers: u32,
 ) -> Option<DispatchSurface> {
-    let read = match descriptor.tiling {
-        SwizzleMode::Tiled64KbZX => matches!(format.bytes(), 2 | 4),
-        SwizzleMode::Tiled64KbRX => matches!(format.bytes(), 4 | 8),
-        _ => false,
+    // A standard swizzle's layers carry no XOR, however many (D916).
+    let (read, standard) = match descriptor.tiling {
+        SwizzleMode::Tiled64KbZX => (matches!(format.bytes(), 2 | 4), false),
+        SwizzleMode::Tiled64KbRX => (matches!(format.bytes(), 4 | 8), false),
+        SwizzleMode::Tiled4KbS | SwizzleMode::Tiled64KbS => (true, true),
+        _ => (false, false),
     };
     if !read
         || descriptor.levels != 1
-        || crate::tiling::slice_xor_64kb_rx_bpp4(layers - 1).is_none()
+        || (!standard && crate::tiling::slice_xor_64kb_rx_bpp4(layers - 1).is_none())
     {
         return None;
     }
@@ -4220,6 +4237,13 @@ fn reorders_packed_channels(format: TexelFormat, word3: u32) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a two-channel image's selects return what the host's two-channel view does: X, Y, then
+/// zero and one - spelt as the constants, or as the channels the image does not have (D916).
+fn two_channel_selects(word3: u32) -> bool {
+    let [x, y, z, w] = destination_selects(word3);
+    x == SELECT_X && y == SELECT_X + 1 && matches!(z, 0 | 6) && matches!(w, 1 | 7)
 }
 
 /// Whether a one-channel image's selects return what the host's one-channel view does: X, then
@@ -4289,6 +4313,8 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         // the host's one-channel view answers too - or written, where the selects say nothing.
         FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
         FORMAT_16_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R16Uint),
+        FORMAT_16_UNORM if one_channel_selects(words[3]) => Ok(TexelFormat::R16Unorm),
+        FORMAT_32_32_UINT if two_channel_selects(words[3]) => Ok(TexelFormat::Rg32Uint),
         FORMAT_8_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R8Uint),
         FORMAT_32_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Float),
         _ => Err(format!(
@@ -4319,6 +4345,96 @@ mod dispatch_format_tests {
         let format = super::dispatch_format(&descriptor, words).expect("bound");
         assert_eq!(format, super::TexelFormat::R8Uint);
         assert_eq!((format.bytes(), format.is_integer()), (1, true));
+    }
+
+    /// A dispatch's fetched images are typed slot by slot: a float image in slot zero and an integer
+    /// one in slot one ask for the module that declares slot one alone unsigned (D916). Grand Theft
+    /// Auto V's loading-screen program fetches both kinds.
+    #[test]
+    fn fetched_images_are_typed_slot_by_slot() {
+        let texels = |format| super::DispatchTexels {
+            texels: Vec::new().into(),
+            format,
+            width: 1,
+            height: 1,
+            depth: None,
+            layers: None,
+            sampling: None,
+            cube: false,
+        };
+        let images = super::DispatchImages {
+            fetched: Some(texels(super::TexelFormat::Rgba8)),
+            more_fetched: vec![(texels(super::TexelFormat::R32Uint), (0, 0))],
+            ..super::DispatchImages::default()
+        };
+        assert_eq!(super::fetched_integer(&images), 0b10);
+    }
+
+    /// A `32_32_UINT` image (format 62) read through two channels is two words of unsigned integer
+    /// (D916): what Grand Theft Auto V's loading-screen program stores to, 960 x 540 in `64KB_R_X`.
+    #[test]
+    fn two_thirty_two_bit_unsigned_channels_are_two_words() {
+        // Format 62, 960 x 540, `XY01` selects, a 2D image in 64KB_R_X (swizzle mode 27).
+        let words = [
+            0,
+            62 << 20 | (0x3bf & 3) << 30,
+            0x3bf >> 2 | 0x21b << 14,
+            4 | 5 << 3 | 1 << 9 | 27 << 20 | 9 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("read");
+        assert_eq!(format, super::TexelFormat::Rg32Uint);
+        assert_eq!(
+            (format.bytes(), format.words(), format.is_integer()),
+            (8, 2, true)
+        );
+    }
+
+    /// A `16_UNORM` image (format 7) read through one channel is half a word of normalised value
+    /// (D916): what Grand Theft Auto V's loading-screen program fetches, 64 x 64 x 32 in `4KB_S`.
+    #[test]
+    fn a_sixteen_bit_normalised_image_is_half_a_word() {
+        // Format 7, 64 x 64, `X001` selects, a 2D array in 4KB_S (swizzle mode 5), 32 layers.
+        let words = [
+            0,
+            7 << 20 | (63 & 3) << 30,
+            63 >> 2 | 63 << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 5 << 20 | 13 << 28,
+            31,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("read");
+        assert_eq!(format, super::TexelFormat::R16Unorm);
+        assert_eq!((format.bytes(), format.is_integer()), (2, false));
+        // Its 32 layers lie a slice of blocks apart with no XOR: a standard swizzle has none.
+        let array = super::tiled_layers(&descriptor, format, 32).expect("an array is read");
+        let super::DispatchSurface::Volume { slice, depth, .. } = array else {
+            panic!("an array is its layers");
+        };
+        assert_eq!((depth, slice.words() * 4), (32, 64 * 64 * 2));
+        let flat = super::DispatchSurface::Tiled(slice);
+        let mut spanned = vec![0_u8; array.bytes()];
+        for layer in 0..32_u32 {
+            let texels: Vec<u32> = (0..64 * 64).map(|i| (layer << 12 | i) & 0xffff).collect();
+            let at = layer as usize * 64 * 64 * 2;
+            flat.tile(&texels, &mut spanned[at..at + 64 * 64 * 2])
+                .expect("tiles");
+        }
+        let texels = array.detile(&spanned);
+        assert!(
+            texels
+                .iter()
+                .zip(0_u32..)
+                .all(|(&texel, i)| texel == (((i / 4096) << 12) | (i % 4096)) & 0xffff),
+            "every layer in order"
+        );
     }
 
     /// A `10_11_11_FLOAT` image (format 36) is three packed unsigned floats a word, as a draw reads
@@ -6613,6 +6729,10 @@ const FORMAT_32_32_32_32_UINT: u32 = 75;
 const FORMAT_32_UINT: u32 = 20;
 /// `16_UINT`, one sixteen-bit unsigned channel (`gfx10-rsrc.json`, enum `GFX10_FORMAT` 11).
 const FORMAT_16_UINT: u32 = 11;
+/// `GFX10_FORMAT_16_UNORM` (`gfx10-rsrc.json`, value 7): one normalised sixteen-bit channel.
+const FORMAT_16_UNORM: u32 = 7;
+/// `GFX10_FORMAT_32_32_UINT` (`gfx10-rsrc.json`, value 62): two unsigned thirty-two-bit channels.
+const FORMAT_32_32_UINT: u32 = 62;
 /// `GFX10_FORMAT_2_10_10_10_UNORM` (`gfx10-rsrc.json`): red, green and blue ten bits each from the
 /// low end, alpha two.
 const FORMAT_2_10_10_10_UNORM: u32 = 50;
@@ -7944,6 +8064,8 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
         | TexelFormat::R16Uint
+        | TexelFormat::R16Unorm
+        | TexelFormat::Rg32Uint
         | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
     }
 }
@@ -8227,6 +8349,8 @@ fn swizzle_texels_by_channel(
                 | TexelFormat::Rgba16Float
                 | TexelFormat::R32Uint
                 | TexelFormat::R16Uint
+                | TexelFormat::R16Unorm
+                | TexelFormat::Rg32Uint
                 | TexelFormat::R32Float
                 | TexelFormat::Float11_11_10
                 | TexelFormat::Rgba8Srgb
@@ -8508,6 +8632,7 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::Rx64KbBpp16 => 1 << 30,
         crate::tiling::SurfaceLayout::Zx64Kb => 1 << 23 | 1 << 15,
         crate::tiling::SurfaceLayout::Zx64KbBpp2 => 1 << 24 | 1 << 15,
+        crate::tiling::SurfaceLayout::S4KbBpp2 => 1 << 25 | 1 << 15,
     }
 }
 

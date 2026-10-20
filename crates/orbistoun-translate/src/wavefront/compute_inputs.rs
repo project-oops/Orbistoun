@@ -45,6 +45,11 @@ pub struct ComputeInputs {
     /// shader's sampled type agree. Raw words move through them unconverted.
     #[serde(default)]
     pub integer_images: [bool; 2],
+    /// Which fetched images, by texture slot, have an unsigned integer format, one bit a slot: a
+    /// program may fetch from both kinds, each declared as its own is (D916). A slot is integer
+    /// where either this bit or `integer_images[0]` says so.
+    #[serde(default)]
+    pub integer_fetched: u32,
     /// What is added to every thread's x id: zero for a dispatch, and for a streamout pass's wave
     /// of a larger draw the vertex its first lane is, which its `v0` - the vertex id - holds
     /// (D861).
@@ -641,6 +646,7 @@ mod tests {
             unwritten_user_data: 0,
             partial: None,
             integer_images: [false; 2],
+            integer_fetched: 0,
             first_thread: 0,
         }
     }

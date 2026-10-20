@@ -1768,6 +1768,7 @@ mod tests {
                         unwritten_user_data: 0,
                         partial: None,
                         integer_images: [false; 2],
+                        integer_fetched: 0,
                         first_thread: 0,
                     }),
                     ..UserData::default()

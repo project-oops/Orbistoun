@@ -1982,6 +1982,25 @@ fn a_plain_sdwa_one_source_instruction_is_its_short_form() {
     assert_eq!(vector(&registers, 0) & 0xffff, 0x3c00);
 }
 
+/// A one-source instruction's SDWA form reads the part of its source the word selects: Grand Theft
+/// Auto V's compute program does `v_cvt_f32_u32_sdwa v1, v1 src0_sel:BYTE_1` (words 0x7e020cf9
+/// 0x00010601). Byte one of 0x2a00 is 42, which converts to 42.0.
+#[test]
+fn an_sdwa_one_source_instruction_reads_the_part_its_word_selects() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_one_source_instruction_reads_the_part_its_word_selects") {
+        return;
+    }
+    let convert = head("v_cvt_f32_u32_e32") | 1 << 17 | SDWA_MARKER;
+    assert_eq!(convert, 0x7e02_0cf9, "Grand Theft Auto V's first word");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0x0000_2a00));
+    program.extend([convert, 0x0001_0601]);
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(vector(&registers, 1), 42.0f32.to_bits());
+}
+
 /// A carry lands in an ordinary scalar register, one word in a wave of 32: Grand Theft Auto V's
 /// compute program does `v_add_co_u32 v0, s0, v27, v2` (words 0xd70f0000 0x0002051b). All ones
 /// plus one carries in every running lane.

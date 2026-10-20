@@ -2915,7 +2915,8 @@ pub fn instruction<M: Model + ?Sized>(
             return sdwa_carry(model, instruction, name, word);
         }
         if !SDWA_INTEGER.contains(&name) && plain_sdwa_one_source(word) {
-            return self::instruction(model, &plain_short_form(instruction, word)?);
+            let plain = plain_short_form(model, instruction, word)?;
+            return self::instruction(model, &plain);
         }
         return sdwa_integer(model, instruction, name, word);
     }
@@ -7995,24 +7996,45 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
             })
 }
 
-/// Whether a one-source instruction's SDWA word asks for nothing its plain form does not: its
-/// source and destination whole, no sign extension, clamp, output multiplier, negate or absolute
-/// value. Such a form is its plain form on the source the word names.
+/// Whether a one-source instruction's SDWA word asks for nothing its plain form does not but a part
+/// of its source: its destination whole, no clamp, output multiplier, negate or absolute value.
+/// Such a form is its plain form on the part of the source the word selects.
 const fn plain_sdwa_one_source(word: u32) -> bool {
-    let fields_whole = (word >> 16 & 0xf) == SDWA_DWORD && (word >> 8 & 0x7) == SDWA_DWORD;
-    fields_whole && word & (1 << 13 | 0x3 << 14 | 0x3 << 20) == 0
+    (word >> 8 & 0x7) == SDWA_DWORD && word & (1 << 13 | 0x3 << 14 | 0x3 << 20) == 0
 }
 
 /// A one-source instruction's plain SDWA form ([`plain_sdwa_one_source`]) as its short form: the
-/// word's source in the first source's field and operand, the word dropped.
-fn plain_short_form(instruction: &Instruction, word: u32) -> Result<Instruction, TranslateError> {
+/// word's source in the first source's field and operand, the word dropped. Where the word selects
+/// part of the source, that part is first written into the destination in each running lane, and
+/// the short form reads it there: the one source is the instruction's only read.
+fn plain_short_form<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    word: u32,
+) -> Result<Instruction, TranslateError> {
     let fields = SdwaFields::read(word);
-    let source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    let code = if fields.src0_scalar {
+    let mut source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
+    let mut code = if fields.src0_scalar {
         fields.src0
     } else {
         0x100 | fields.src0
     };
+    if fields.select[0] != (SDWA_DWORD, false) {
+        let Some(Operand::Vector(destination)) = instruction.operands.first() else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "an SDWA source select whose destination is not a vector register",
+            });
+        };
+        let destination = *destination;
+        for lane in running_lanes(model) {
+            let value = model.read_source(instruction, &source, lane)?;
+            let part = sdwa_select(model, instruction, value, fields.select[0])?;
+            model.write_vector_lane(u32::from(destination), lane, part);
+        }
+        source = Operand::Vector(destination);
+        code = 0x100 | u32::from(destination);
+    }
     let mut plain = instruction.clone();
     plain.word = plain.word & !0x1ff | code;
     plain.second_word = None;
