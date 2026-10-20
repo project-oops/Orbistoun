@@ -1907,8 +1907,11 @@ impl GuestCp<'_> {
                 if unread.get(slot).copied().unwrap_or(false) {
                     return Ok(crate::dispatch::BufferBefore::Unread(span / 4));
                 }
-                let read = cp::CpMemory::read(self, address, span)
-                    .ok_or("a buffer it binds is not readable guest memory")?;
+                let read = cp::CpMemory::read(self, address, span).ok_or_else(|| {
+                    format!(
+                        "buffer {slot}, {span:#x} bytes at {address:#x}, is not readable guest memory"
+                    )
+                })?;
                 Ok(crate::dispatch::BufferBefore::Words(
                     read.chunks_exact(4)
                         .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))

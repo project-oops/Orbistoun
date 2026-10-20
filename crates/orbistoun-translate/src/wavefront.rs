@@ -5577,22 +5577,22 @@ impl Model for Wavefront<'_> {
                 table == Some(bound.source.table) && bound.source.table_offset == Some(offset)
             })
         };
-        let rebound = reaching.is_some()
-            && self
-                .textures
-                .iter()
-                .any(|b| b.descriptor == descriptor && b.disturbed && !loaded_by(b));
         // One image read through another sampler is another texture, its own slot (D690): a
         // sampler only conflicts with a sampler, and a fetch names none.
         let other_sampler =
             |b: &BoundTexture| matches!((b.sampler, sampler), (Some(was), Some(now)) if was != now);
-        if !rebound
-            && let Some(bound) = self.textures.iter_mut().find(|b| {
-                b.descriptor == descriptor
-                    && (reaching.is_none() || !b.disturbed || loaded_by(b))
-                    && !other_sampler(b)
-            })
-        {
+        // Where the load that filled the registers is known, it names the texture: one already
+        // loaded from there is that texture again, whatever came between, and any other is new.
+        let found = if reaching.is_some() {
+            self.textures
+                .iter_mut()
+                .find(|b| loaded_by(b) && !other_sampler(b))
+        } else {
+            self.textures
+                .iter_mut()
+                .find(|b| b.descriptor == descriptor && !other_sampler(b))
+        };
+        if let Some(bound) = found {
             // The same load reached it again: the same texture.
             if bound.disturbed && loaded_by(bound) {
                 bound.disturbed = false;

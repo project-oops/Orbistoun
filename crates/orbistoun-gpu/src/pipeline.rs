@@ -608,8 +608,34 @@ fn probed_range(
         return Err(why.to_string());
     };
     let count = state.user_data.len().min(USER_DATA_WORDS);
+    // A descriptor only the group's ids decide is found group by group (D914); one the lanes
+    // decide, wave by wave.
+    let by_group = crate::draw_buffers::dispatch_group_descriptors(
+        computed,
+        (&words[..count], state.inputs, state.groups),
+        memory,
+    );
+    let by_group = match by_group {
+        Ok(reached) => {
+            return crate::draw_buffers::reached_range(computed, &reached)
+                .map_err(|bound| format!("{why}; replayed group by group: {bound}"));
+        }
+        Err(refused) => refused,
+    };
+    let run = |sample| {
+        crate::draw_buffers::dispatch_computed_descriptors(
+            (computed, state.program, sample),
+            (
+                &words[..count],
+                state.inputs,
+                state.groups,
+                state.width.lanes(),
+            ),
+            memory,
+        )
+    };
     match crate::draw_buffers::dispatch_computed_descriptors(
-        (computed, state.program),
+        (computed, state.program, None),
         (
             &words[..count],
             state.inputs,
@@ -629,7 +655,50 @@ fn probed_range(
                 ends.join(", ")
             )
         }),
-        Err(probe) => Err(format!("{why}; run wave by wave: {probe}")),
+        Err(probe) => Err(format!(
+            "{why}; replayed group by group: {by_group}; run wave by wave: {probe}{}",
+            sampled_note(run(Some(SAMPLED_GROUPS)))
+        )),
+    }
+}
+
+/// How many groups' first waves a refusal of a dispatch too large to run whole runs, to say what
+/// they reach (D900).
+const SAMPLED_GROUPS: usize = 16;
+
+/// What the first waves of a few groups reach a computed access with, for a refusal: how many
+/// distinct descriptors, the span of their bases, and where the runs ended - or why they could not
+/// run.
+fn sampled_note(
+    sampled: Result<crate::draw_buffers::ReachedDescriptors, std::borrow::Cow<'static, str>>,
+) -> String {
+    match sampled {
+        Ok(reached) => {
+            let bases: Vec<u64> = reached
+                .descriptors
+                .iter()
+                .map(|(words, _)| u64::from(words[0]) | u64::from(words[1] & 0xFFFF) << 32)
+                .collect();
+            let low = bases.iter().min().copied().unwrap_or(0);
+            let high = bases.iter().max().copied().unwrap_or(0);
+            let offsets: std::collections::BTreeSet<u32> = reached
+                .descriptors
+                .iter()
+                .map(|&(_, soffset)| soffset)
+                .collect();
+            let ends: Vec<String> = reached
+                .ends
+                .iter()
+                .map(|(at, waves)| format!("{waves} at {at:#x}"))
+                .collect();
+            format!(
+                "; the first waves of {SAMPLED_GROUPS} groups reach it with {} distinct descriptor(s), bases {low:#x}..={high:#x}, {} distinct scalar offset(s), runs ending {}",
+                reached.descriptors.len(),
+                offsets.len(),
+                ends.join(", ")
+            )
+        }
+        Err(why) => format!("; the first waves of {SAMPLED_GROUPS} groups: {why}"),
     }
 }
 
@@ -2357,6 +2426,10 @@ impl Pipeline {
             UserData {
                 count,
                 draw_buffers: true,
+                // A descriptor whose base is the program's own constant data is found from where
+                // the program was loaded (D842).
+                program_address: decode_reads_own_address(decoded, &self.encodings)
+                    .then_some(state.program),
                 ..UserData::default()
             },
         )
@@ -2443,6 +2516,9 @@ impl Pipeline {
             integer_images,
             ..state.inputs
         };
+        // A program reading its own address - a descriptor whose base is its own constant data -
+        // is told where it was loaded, as a draw's is (D842).
+        let program_address = self.own_address(address, (program, Some(decoded)));
         let user_data = UserData {
             first_register: 0,
             count,
@@ -2466,10 +2542,11 @@ impl Pipeline {
             point_size: None,
             saturated: UNSATURATED,
             local_words: state.local_words,
-            program_address: None,
+            program_address,
             integer_targets: 0,
         };
         let key = content_hash(program)
+            ^ program_address_salt(program_address)
             // The formats are compiled in, so a dispatch through other formats is another module.
             ^ formats.map_or(0, |formats| {
                 let words: Vec<u64> = formats
@@ -8951,13 +9028,7 @@ fn reads_own_address(
         again = decode_program(shader, encodings, operands);
         &again
     };
-    let reads = decoded.instructions.iter().any(|instruction| {
-        instruction
-            .encoding
-            .and_then(|encoding| encodings.encodings().get(usize::from(encoding)))
-            .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
-            == Some("s_getpc_b64")
-    });
+    let reads = decode_reads_own_address(decoded, encodings);
     if let Ok(mut known) = known.lock() {
         if known.len() >= KEPT {
             known.clear();
@@ -8965,6 +9036,17 @@ fn reads_own_address(
         known.insert(hash, reads);
     }
     reads
+}
+
+/// Whether a decoded program reads its own address: has an `s_getpc_b64` (D842).
+fn decode_reads_own_address(decoded: &orbistoun_shader::Decode, encodings: &EncodingTable) -> bool {
+    decoded.instructions.iter().any(|instruction| {
+        instruction
+            .encoding
+            .and_then(|encoding| encodings.encodings().get(usize::from(encoding)))
+            .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
+            == Some("s_getpc_b64")
+    })
 }
 
 fn layout_salt(user_data: &UserData) -> u64 {

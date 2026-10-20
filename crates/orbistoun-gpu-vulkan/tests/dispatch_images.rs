@@ -889,6 +889,32 @@ fn a_dispatch_samples_a_cube_s_faces() {
     }
 }
 
+/// Registers reloaded from a table offset a texture was already loaded from are that texture again,
+/// however often other loads came between (D690): Grand Theft Auto V's loading-screen program
+/// reloads `s[16:23]` from offset 0x60 before each of its many samples, between loads from 0x20 and
+/// 0x40, and each reload took a binding of its own until sixteen ran out.
+#[test]
+fn a_reload_from_a_texture_s_offset_is_that_texture() {
+    // s_load_dwordx8 s[16:23], s[12:13], 0x60; s_waitcnt; image_sample_lz v2, v0, s[16:23], s[8:11]
+    // dmask:0x1; the same through a load from 0x40, then from 0x60 again; s_endpgm.
+    let load = |offset: u32| [0xf40c_0406_u32, 0xfa00_0000 | offset];
+    let sample = [0xf09c_0108_u32, 0x0044_0200];
+    let wait = 0xbf8c_c07f_u32;
+    let mut words = Vec::new();
+    words.extend(load(0x60));
+    words.push(wait);
+    words.extend(sample);
+    for offset in [0x40, 0x60] {
+        words.extend(load(offset));
+        words.push(wait);
+        words.extend(sample);
+    }
+    words.push(0xbf81_0000);
+    let (_, (textures, _)) = one_thread(&words).expect("the samples translate");
+    let offsets: Vec<Option<u32>> = textures.iter().map(|t| t.table_offset).collect();
+    assert_eq!(offsets, [Some(0x60), Some(0x40)], "two textures, not three");
+}
+
 /// A store names the image the load reaching it read, as a sample does (D690): registers loaded
 /// from one place in the table for a fetch and reloaded from another for a store name two images.
 /// Grand Theft Auto V's compute program at `0x74005b75c000` loads `s[0:7]` from its table again

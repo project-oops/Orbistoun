@@ -692,6 +692,12 @@ fn lane_mask_source<M: Model + ?Sized>(
             let low = model.read_scalar(u32::from(*from));
             Ok((low, model.constant(0)))
         }
+        // A wave of 32's mask is one word, which a mask's high half holds as well (`vcc_hi`).
+        Operand::Named(name) if model.lanes() <= 32 && lane_mask_high_name(name).is_some() => {
+            let mask = lane_mask_high_name(name).unwrap_or(VCC_LOW_HALF);
+            let (_, high) = model.read_lane_mask(mask)?;
+            Ok((high, model.constant(0)))
+        }
         _ => sixty_four_bit_source(model, instruction, source),
     }
 }
@@ -2908,6 +2914,9 @@ pub fn instruction<M: Model + ?Sized>(
         if SDWA_CARRY.contains(&name) {
             return sdwa_carry(model, instruction, name, word);
         }
+        if !SDWA_INTEGER.contains(&name) && plain_sdwa_one_source(word) {
+            return self::instruction(model, &plain_short_form(instruction, word)?);
+        }
         return sdwa_integer(model, instruction, name, word);
     }
 
@@ -3976,36 +3985,48 @@ fn carry_arithmetic<M: Model + ?Sized>(
     carry_arithmetic_of_parts(model, instruction, name, [(SDWA_DWORD, false); 2])
 }
 
-/// Where a carry goes: the lane mask it names, and whether only its high half - a wave of 32's
-/// whole carry, in `vcc_hi` - or `None` for `null`, which drops the carry as the guest asked.
+/// Where a carry goes.
+#[derive(Clone, Copy)]
+enum CarryDestination {
+    /// A lane mask, whole, or only its high half - a wave of 32's whole carry, in `vcc_hi`.
+    Mask(&'static str, bool),
+    /// Ordinary scalar registers from this one: one word in a wave of 32, a pair in a wave of 64.
+    Registers(u32),
+}
+
+/// Where a carry goes, or `None` for `null`, which drops the carry as the guest asked.
 fn carry_destination<M: Model + ?Sized>(
     model: &M,
     instruction: &Instruction,
     destination: &Operand,
-) -> Result<Option<(&'static str, bool)>, TranslateError> {
+) -> Result<Option<CarryDestination>, TranslateError> {
     match destination {
         _ if discards(destination) => Ok(None),
         Operand::Named(name) => lane_mask_name(name)
-            .map(|mask| (mask, false))
+            .map(|mask| CarryDestination::Mask(mask, false))
             .or_else(|| {
                 lane_mask_high_name(name)
                     .filter(|_| model.lanes() <= 32)
-                    .map(|mask| (mask, true))
+                    .map(|mask| CarryDestination::Mask(mask, true))
             })
             .map(Some)
             .ok_or(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: "a carry destination this translator does not know",
             }),
-        // An ordinary register pair as the carry destination is legal but needs a general
-        // per-register write the lane-mask methods do not offer, so it is refused rather than
-        // dropped.
+        Operand::Scalar(register) => {
+            let words = if model.lanes() > 32 { 2 } else { 1 };
+            if u32::from(*register) + words > SCALAR_REGISTERS {
+                return Err(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: "a carry destination runs past the scalar registers",
+                });
+            }
+            Ok(Some(CarryDestination::Registers(u32::from(*register))))
+        }
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: concat!(
-                "carry arithmetic into an ordinary register pair is not ",
-                "translated yet; only the condition mask is"
-            ),
+            detail: "a carry destination this translator does not know",
         }),
     }
 }
@@ -4114,8 +4135,16 @@ fn carry_arithmetic_of_parts<M: Model + ?Sized>(
     // The carry, where the instruction asked for one. It falls out of the same arithmetic as the
     // sum, so only the write is conditional.
     match mask_name {
-        Some((mask_name, true)) => write_mask_high(model, mask_name, mask.0)?,
-        Some((mask_name, false)) => model.write_lane_mask(mask_name, mask.0, mask.1)?,
+        Some(CarryDestination::Mask(mask_name, true)) => write_mask_high(model, mask_name, mask.0)?,
+        Some(CarryDestination::Mask(mask_name, false)) => {
+            model.write_lane_mask(mask_name, mask.0, mask.1)?;
+        }
+        Some(CarryDestination::Registers(register)) => {
+            model.write_scalar(register, mask.0);
+            if model.lanes() > 32 {
+                model.write_scalar(register + 1, mask.1);
+            }
+        }
         None => {}
     }
     model.count();
@@ -5841,11 +5870,11 @@ fn and_save_exec_32<M: Model + ?Sized>(
             detail: "s_and_saveexec_b32 does not have a destination and a source",
         });
     };
-    let register = scalar_destination(instruction, destination)?;
     let source = model.read_source(instruction, source, 0)?;
     let (exec_low, exec_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
     let low = model.binary(op::BITWISE_AND, source, exec_low);
-    model.write_scalar(register, exec_low);
+    // Any scalar word, `vcc_hi` among them in a wave of 32.
+    write_scalar_operand(model, instruction, destination, exec_low)?;
     model.write_lane_mask(EXEC_LOW_HALF, low, exec_high)?;
     let non_zero = model.is_not_zero(low);
     model.set_condition_code(non_zero);
@@ -6784,8 +6813,12 @@ fn buffer_out_of_bounds<M: Model + ?Sized>(
     let mut out = reach_past;
     let is_two = model.compare(op::IEQUAL, mode, two);
     out = select_bool(model, is_two, no_records, out);
+    // Mode one checks the index alone; with no stride, the offset as mode three does (D915,
+    // assumed: GCN's stride-zero rule).
     let is_one = model.compare(op::IEQUAL, mode, one);
-    out = select_bool(model, is_one, index_past, out);
+    let no_stride = model.compare(op::IEQUAL, resource.stride, zero);
+    let index_or_raw = select_bool(model, no_stride, reach_past, index_past);
+    out = select_bool(model, is_one, index_or_raw, out);
     let is_zero = model.compare(op::IEQUAL, mode, zero);
     out = select_bool(model, is_zero, structured, out);
 
@@ -7945,14 +7978,48 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
         && instruction
             .encoding
             .and_then(|index| encodings.encodings().get(usize::from(index)))
-            .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
-            .is_some_and(|name| {
+            .and_then(|family| {
+                encodings
+                    .mnemonic_for(&family.name, instruction.opcode)
+                    .map(|name| (family.name.as_str(), name))
+            })
+            .is_some_and(|(family, name)| {
                 SDWA_INTEGER.contains(&name)
                     || SDWA_FLOAT_UNARY.contains(&name)
                     || SDWA_COMPARE.contains(&name)
                     || SDWA_CARRY.contains(&name)
                     || sdwa_float_long_form(name).is_some()
+                    || (family == "VOP1"
+                        && SUPPORTED.contains(&name)
+                        && instruction.second_word.is_some_and(plain_sdwa_one_source))
             })
+}
+
+/// Whether a one-source instruction's SDWA word asks for nothing its plain form does not: its
+/// source and destination whole, no sign extension, clamp, output multiplier, negate or absolute
+/// value. Such a form is its plain form on the source the word names.
+const fn plain_sdwa_one_source(word: u32) -> bool {
+    let fields_whole = (word >> 16 & 0xf) == SDWA_DWORD && (word >> 8 & 0x7) == SDWA_DWORD;
+    fields_whole && word & (1 << 13 | 0x3 << 14 | 0x3 << 20) == 0
+}
+
+/// A one-source instruction's plain SDWA form ([`plain_sdwa_one_source`]) as its short form: the
+/// word's source in the first source's field and operand, the word dropped.
+fn plain_short_form(instruction: &Instruction, word: u32) -> Result<Instruction, TranslateError> {
+    let fields = SdwaFields::read(word);
+    let source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
+    let code = if fields.src0_scalar {
+        fields.src0
+    } else {
+        0x100 | fields.src0
+    };
+    let mut plain = instruction.clone();
+    plain.word = plain.word & !0x1ff | code;
+    plain.second_word = None;
+    if let Some(slot) = plain.operands.get_mut(1) {
+        *slot = source;
+    }
+    Ok(plain)
 }
 
 /// An `SDWA_FLOAT` instruction in its SDWA form: over whole registers, its long form `long` under
@@ -9261,7 +9328,6 @@ fn scalar_pack<M: Model + ?Sized>(
     name: &str,
 ) -> Result<(), TranslateError> {
     let (destination, first, second) = three_operands(instruction)?;
-    let register = scalar_destination(instruction, destination)?;
     let first = model.read_source(instruction, first, 0)?;
     let second = model.read_source(instruction, second, 0)?;
     let sixteen = model.constant(16);
@@ -9276,7 +9342,7 @@ fn scalar_pack<M: Model + ?Sized>(
         let high = model.binary(op::BITWISE_AND, second, high_half);
         model.binary(op::BITWISE_OR, low, high)
     };
-    model.write_scalar(register, packed);
+    write_scalar_operand(model, instruction, destination, packed)?;
     model.count();
     Ok(())
 }

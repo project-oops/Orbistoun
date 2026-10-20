@@ -1963,6 +1963,105 @@ fn a_wave32_carry_lands_in_the_condition_mask_s_high_half() {
     );
 }
 
+/// A one-source instruction in an SDWA form over whole registers with no modifier is its plain
+/// form on the source the word names: Grand Theft Auto V's compute program does
+/// `v_cvt_f16_f32_sdwa v0, v13` (words 0x7e0014f9 0x0006060d). 1.0 converts to the half 0x3c00.
+#[test]
+fn a_plain_sdwa_one_source_instruction_is_its_short_form() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("a_plain_sdwa_one_source_instruction_is_its_short_form") {
+        return;
+    }
+    let convert = head("v_cvt_f16_f32_e32") | SDWA_MARKER;
+    assert_eq!(convert, 0x7e00_14f9, "Grand Theft Auto V's first word");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(13, 1.0f32.to_bits()));
+    program.extend([convert, 0x0006_060d]);
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(vector(&registers, 0) & 0xffff, 0x3c00);
+}
+
+/// A carry lands in an ordinary scalar register, one word in a wave of 32: Grand Theft Auto V's
+/// compute program does `v_add_co_u32 v0, s0, v27, v2` (words 0xd70f0000 0x0002051b). All ones
+/// plus one carries in every running lane.
+#[test]
+fn a_carry_lands_in_an_ordinary_scalar_register() {
+    if !device_or_skip("a_carry_lands_in_an_ordinary_scalar_register") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, u32::MAX));
+    program.extend(v_mov_literal(1, 1));
+    program.extend([head("v_add_co_u32") | 2 | 3 << 8, 256 | 257 << 9]);
+    program.push(sop1("s_mov_b32", 2, 126));
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_ne!(scalar(&registers, 2), 0, "lanes run");
+    assert_eq!(
+        scalar(&registers, 3),
+        scalar(&registers, 2),
+        "every lane carried"
+    );
+}
+
+/// A wave of 32's scalar result lands in the condition mask's high half as in any register: Grand
+/// Theft Auto V's compute program does `s_and_saveexec_b32 vcc_hi, s0` (word 0xbeeb3c00), saving the
+/// execution mask there.
+#[test]
+fn a_wave32_scalar_result_lands_in_the_condition_mask_s_high_half() {
+    if !device_or_skip("a_wave32_scalar_result_lands_in_the_condition_mask_s_high_half") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    assert_eq!(
+        sop1("s_and_saveexec_b32", 0x6b, 0),
+        0xbeeb_3c00,
+        "Grand Theft Auto V's word"
+    );
+    let program = [
+        sop1("s_mov_b32", 0, 0xc1),
+        sop1("s_and_saveexec_b32", 0x6b, 0),
+        sop1("s_mov_b32", 1, 0x6b),
+        sop1("s_mov_b32", 2, 126),
+        s_endpgm(),
+    ];
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_ne!(scalar(&registers, 2), 0, "lanes run");
+    assert_eq!(
+        scalar(&registers, 1),
+        scalar(&registers, 2),
+        "the mask saved"
+    );
+}
+
+/// A wave of 32 reads a carry in from the condition mask's high half as from any word: Grand Theft
+/// Auto V's compute program does `v_add_co_ci_u32_e64 v44, vcc_lo, 0, v32, vcc_hi` (words
+/// 0xd5286a2c 0x01ae4080). With every lane's bit set, 0 + 5 + 1 is 6.
+#[test]
+fn a_wave32_carry_in_reads_the_condition_mask_s_high_half() {
+    if !device_or_skip("a_wave32_carry_in_reads_the_condition_mask_s_high_half") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    assert_eq!(
+        head("v_add_co_ci_u32_e64") | 0x2c | 0x6a << 8,
+        0xd528_6a2c,
+        "Grand Theft Auto V's first word"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 5));
+    program.push(sop1("s_mov_b32", 107, 0xc1));
+    program.extend([
+        head("v_add_co_ci_u32_e64") | 2 | 0x6a << 8,
+        0x80 | 0x101 << 9 | 0x6b << 18,
+    ]);
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(vector(&registers, 2), 6, "the carry came in");
+}
+
 /// `v_cmp_class_f32` answers whether the first source's class is one the second's mask names (AMD's
 /// published RDNA instruction set, VOPC): bit 0 a signalling NaN, 1 a quiet one, 2 to 5 negative
 /// infinity, normal, denormal and zero, 6 to 9 positive zero, denormal, normal and infinity.
@@ -5304,6 +5403,34 @@ fn a_buffer_access_past_the_record_count_reads_zero_and_drops_its_write() {
         vector(&registers, 3),
         0,
         "a read past the end returns zero, not the register's previous contents"
+    );
+    assert_eq!(memory[4], 0, "and the write that went with it never landed");
+}
+
+/// With no stride, `OOB_SELECT` 1 checks the offset against the record count in bytes as the raw
+/// mode does (D915, assumed): Grand Theft Auto V's compute program reads a 32-byte table of its own
+/// constant data through `0x10005004`. Byte sixteen of eight reads zero and drops its write.
+#[test]
+fn a_strideless_structured_access_past_its_records_reads_zero() {
+    if !device_or_skip("a_strideless_structured_access_past_its_records_reads_zero") {
+        return;
+    }
+    let mut program = [
+        s_mov_b32_literal(4, 0),
+        s_mov_b32_literal(5, 0),
+        s_mov_b32_literal(6, 8),
+        s_mov_b32_literal(7, 1 << 28),
+    ]
+    .concat();
+    program.extend([v_mov_inline(0, 16), v_mov_code(1, F_2), v_mov_inline(3, 7)]);
+    program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    program.extend(mubuf("buffer_load_dword", 3, 0, 4, INLINE_0, OFFEN));
+    program.push(s_endpgm());
+    let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        vector(&registers, 3),
+        0,
+        "a read past the records returns zero"
     );
     assert_eq!(memory[4], 0, "and the write that went with it never landed");
 }

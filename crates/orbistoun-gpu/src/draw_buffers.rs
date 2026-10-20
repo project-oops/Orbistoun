@@ -83,8 +83,10 @@ pub fn descriptor_extent_to(
         // Structured with offset: the index below the record count and the offset below the stride.
         0 if records == 0 || stride == 0 => 0,
         0 => last_record + reach.unwrap_or(u64::MAX).min(stride - 1 + 16),
-        // Structured: the index below the record count, the offset unchecked.
+        // Structured: the index below the record count, the offset unchecked - with no stride, the
+        // offset and the access's width within the record count in bytes, as raw (D915, assumed).
         1 if records == 0 => 0,
+        1 if stride == 0 => reach.map_or(records, |reach| reach.min(records)),
         1 => last_record + reach.ok_or(UNBOUNDED)?,
         // Raw: the offset and the access's width within the record count in bytes, the index
         // unchecked.
@@ -1069,8 +1071,10 @@ const PROBE_TAIL_BYTES: usize = 4096;
 ///
 /// A refusal naming what the host cannot follow: no program address, more waves than are run, or
 /// what a wave's run could not know. `address` is the program's, whose prefix the access's is.
+/// With `sample`, only the first wave of each of that many groups is run, however many the
+/// dispatch has: what a refusal reports of a dispatch too large to run whole.
 pub(crate) fn dispatch_computed_descriptors(
-    (computed, address): (&Computed, u64),
+    (computed, address, sample): (&Computed, u64, Option<usize>),
     (user_data, inputs, groups, width): (
         &[u32],
         orbistoun_translate::wavefront::ComputeInputs,
@@ -1082,7 +1086,7 @@ pub(crate) fn dispatch_computed_descriptors(
     use orbistoun_translate::evaluate::{LaneProgram, wave_probes};
     let runs =
         groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(inputs.waves(width));
-    if runs > MOST_DISPATCH_WAVES {
+    if runs > MOST_DISPATCH_WAVES && sample.is_none() {
         return Err("a dispatch of more waves than are run on the host (D900)".into());
     }
     let (encodings, operands) = tables()?;
@@ -1101,24 +1105,104 @@ pub(crate) fn dispatch_computed_descriptors(
     if soffset < 128 {
         registers.push(soffset);
     }
-    let program = LaneProgram::with_probes(decode, encodings, &[(computed.at, registers)]);
+    let program = LaneProgram::with_probes(decode, encodings, &[(computed.at, registers.clone())]);
     let mut word = |address: u64| {
         let bytes = memory.read(address, 4)?;
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     };
     let mut reached = ReachedDescriptors::default();
-    for entry in dispatch_waves(inputs, groups, width) {
+    let waves = usize::try_from(inputs.waves(width)).unwrap_or(1);
+    let entries = dispatch_waves(inputs, groups, width);
+    let entries: Vec<_> = match sample {
+        Some(groups) => entries.into_iter().step_by(waves).take(groups).collect(),
+        None => entries,
+    };
+    for entry in entries {
         let (probed, last) =
             wave_probes(&program, encodings, user_data, (width, &entry), &mut word)?;
         *reached.ends.entry(last).or_default() += 1;
         for (_, values) in probed {
+            let unknown: Vec<String> = registers
+                .iter()
+                .zip(&values)
+                .filter(|(_, value)| value.is_none())
+                .map(|(register, _)| format!("s{register}"))
+                .collect();
             let values: Option<Vec<u32>> = values.into_iter().collect();
-            let values = values.ok_or("a wave reaches the access with registers it cannot know")?;
+            let values = values.ok_or_else(|| {
+                format!(
+                    "a wave reaches the access with {} unknown, ending at {last:#x}",
+                    unknown.join(", ")
+                )
+            })?;
             let mut words = [0; 4];
             words[..count].copy_from_slice(&values[..count]);
             reached
                 .descriptors
                 .insert((words, values.get(count).copied().unwrap_or(0)));
+        }
+    }
+    Ok(reached)
+}
+
+/// The most groups whose scalar prefix [`dispatch_group_descriptors`] replays.
+const MOST_DISPATCH_GROUPS: u64 = 1 << 16;
+
+/// The descriptors, and scalar offsets, a dispatch's groups reach a computed access with, where its
+/// scalar prefix depends on nothing a wave's lanes hold (D914): replayed once a group, the group's
+/// ids in the registers after its `user_data`, one for each dimension `inputs` hands the program,
+/// as the hardware loads them. A group that branches past the access reaches nothing.
+///
+/// # Errors
+///
+/// A dispatch that hands its program no group id, one of more groups than are replayed, or why a
+/// group's replay could not know the descriptor.
+pub(crate) fn dispatch_group_descriptors(
+    computed: &Computed,
+    (user_data, inputs, groups): (
+        &[u32],
+        orbistoun_translate::wavefront::ComputeInputs,
+        [u32; 3],
+    ),
+    memory: &impl GuestMemory,
+) -> Result<ReachedDescriptors, Refusal> {
+    let first_id = computed.first_register + u32::try_from(user_data.len()).unwrap_or(u32::MAX);
+    let dimensions: Vec<usize> = (0..3).filter(|&d| inputs.workgroup_ids[d]).collect();
+    if dimensions.is_empty() {
+        return Err("a dispatch whose program is handed no group id (D914)".into());
+    }
+    if groups.iter().map(|&n| u64::from(n)).product::<u64>() > MOST_DISPATCH_GROUPS {
+        return Err("a dispatch of more groups than are replayed on the host (D914)".into());
+    }
+    let mut read = |address: u64| {
+        let bytes = memory.read(address, 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let mut reached = ReachedDescriptors::default();
+    for z in 0..groups[2] {
+        for y in 0..groups[1] {
+            for x in 0..groups[0] {
+                let id = [x, y, z];
+                let system: Vec<(u32, u32)> = (first_id..)
+                    .zip(&dimensions)
+                    .map(|(register, &d)| (register, id[d]))
+                    .collect();
+                let seeded = || {
+                    let named: Vec<String> = system
+                        .iter()
+                        .map(|(register, _)| format!("s{register}"))
+                        .collect();
+                    named.join(", ")
+                };
+                let found = evaluate_computed_now(computed, (user_data, &system), &mut read)
+                    .map_err(|why| format!("{why} (the group's ids in {})", seeded()))?;
+                let Some((words, soffset)) = found else {
+                    continue;
+                };
+                let soffset = soffset
+                    .ok_or("a group reaches the access at an offset the host cannot know (D914)")?;
+                reached.descriptors.insert((words, soffset));
+            }
         }
     }
     Ok(reached)
@@ -1799,6 +1883,20 @@ mod tests {
         );
     }
 
+    /// With no stride, `OOB_SELECT` 1 bounds a register offset by the record count in bytes, as the
+    /// raw mode does (D915, assumed): Grand Theft Auto V's 32-byte table of its own constant data.
+    #[test]
+    fn a_strideless_structured_read_reaches_its_records() {
+        assert_eq!(
+            descriptor_extent([0, 4, 32, STRUCTURED], vector(None, false)),
+            Ok(32)
+        );
+        assert_eq!(
+            descriptor_extent([0, 4, 32, STRUCTURED], vector(Some(8), false)),
+            Ok(8)
+        );
+    }
+
     /// An indexed fetch reaches the last record's start plus its own reach into a record.
     #[test]
     fn an_indexed_fetch_reaches_into_the_last_record() {
@@ -2207,6 +2305,82 @@ mod tests {
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
         assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// A dispatch's computed descriptor that depends only on its group's ids is found by replaying
+    /// the scalar prefix once a group, the ids in the registers after the user data (D914): Grand
+    /// Theft Auto V's 0x78 x 0x44-group dispatch indexes a table by `s16` so. Groups reaching one
+    /// descriptor are one; groups reaching two are both listed.
+    #[test]
+    fn a_group_s_descriptor_is_found_from_its_ids() {
+        use orbistoun_translate::draw_buffers::Computed;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let computed = Computed {
+            // s_lshl_b32 s6, s6, 4; s_add_u32 s4, s4, s6; s_load_dwordx4 s[0:3], s[4:5], 0x0;
+            // s_waitcnt lgkmcnt(0)
+            prefix: vec![
+                0x8f06_8406,
+                0x8004_0604,
+                0xf408_0002,
+                0xfa00_0000,
+                0xbf8c_c07f,
+            ],
+            at: 20,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Descriptor {
+                first: 0,
+                reads: vector(Some(16), true),
+            },
+            soffset: 128,
+            first_register: 4,
+            user_data: 2,
+            program_address: None,
+        };
+        let table = |second: u32| {
+            let mut bytes = Vec::new();
+            for word in [
+                0x2000_u32,
+                16 << 16,
+                4,
+                STRUCTURED,
+                second,
+                16 << 16,
+                4,
+                STRUCTURED,
+            ] {
+                bytes.extend(word.to_le_bytes());
+            }
+            At(0x1000, bytes)
+        };
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, false, false],
+            ..ComputeInputs::default()
+        };
+        let same = super::dispatch_group_descriptors(
+            &computed,
+            (&[0x1000, 0], inputs, [2, 1, 1]),
+            &table(0x2000),
+        )
+        .expect("found");
+        assert_eq!(
+            same.descriptors.into_iter().collect::<Vec<_>>(),
+            [([0x2000, 16 << 16, 4, STRUCTURED], 0)]
+        );
+        let two = super::dispatch_group_descriptors(
+            &computed,
+            (&[0x1000, 0], inputs, [2, 1, 1]),
+            &table(0x3000),
+        )
+        .expect("found");
+        assert_eq!(two.descriptors.len(), 2);
+        // With no group id in a register, nothing tells the groups apart.
+        assert!(
+            super::dispatch_group_descriptors(
+                &computed,
+                (&[0x1000, 0], ComputeInputs::default(), [2, 1, 1]),
+                &table(0x2000),
+            )
+            .is_err()
+        );
     }
 
     /// A computed descriptor the host finds, read at a scalar offset it cannot know - one the
