@@ -2102,7 +2102,10 @@ impl GuestCp<'_> {
                 }
                 None => (None, vec![0]),
             };
-            let buffers = self.read_buffers(&prepared.buffers, &prepared.unread)?;
+            // Named with its program, so the listing of the code that formed the range is found.
+            let buffers = self
+                .read_buffers(&prepared.buffers, &prepared.unread)
+                .map_err(|why| format!("{why}, in the program at {:#x}", prepared.program))?;
             Ok::<_, String>((window, buffers))
         })?;
         let (after, escaped, stored, buffers_after) = span(Span::DispatchExecute, || {
@@ -4427,7 +4430,25 @@ impl GuestCp<'_> {
                 .iter()
                 .all(|fill| allowed(fill.destination, fill.count))
         {
-            return Err("it wrote guest memory that is not writable".to_owned());
+            // Named by the first write refused, so the report says where the dispatch wrote.
+            let runs = stretches
+                .iter()
+                .zip(&whole)
+                .filter(|(_, whole)| !**whole)
+                .flat_map(|((_, runs), _)| writes.runs_in(runs.clone()))
+                .map(|(at, bytes)| (at, bytes.len() as u64));
+            let words = scattered
+                .iter()
+                .zip(&scattered_whole)
+                .filter(|(_, whole)| whole.is_none())
+                .flat_map(|(buffer, _)| buffer.words())
+                .filter(|&(_, _, held)| held != 0)
+                .map(|(at, _, held)| (at, held as u64));
+            let what = first_unwritable((runs, words, fills), allowed)
+                .unwrap_or_else(|| "a write".to_owned());
+            return Err(format!(
+                "it wrote guest memory that is not writable: {what}"
+            ));
         }
         for ((range, runs), whole) in stretches.into_iter().zip(whole) {
             if !self.write_stretch(range, (writes, runs), whole) {
@@ -6199,8 +6220,70 @@ mod stall_tests {
     }
 }
 
+/// The first of a dispatch's writes `allowed` refuses, described: a run of the bytes it changed, a
+/// word of a buffer its lanes wrote, or a fill, each by its address and length.
+fn first_unwritable(
+    (runs, words, fills): (
+        impl IntoIterator<Item = (u64, u64)>,
+        impl IntoIterator<Item = (u64, u64)>,
+        &[cp::Fill],
+    ),
+    allowed: impl Fn(u64, u64) -> bool,
+) -> Option<String> {
+    let refused = |&(at, bytes): &(u64, u64)| !allowed(at, bytes);
+    runs.into_iter()
+        .find(refused)
+        .map(|(at, bytes)| format!("a run of {bytes} byte(s) at {at:#x}"))
+        .or_else(|| {
+            words
+                .into_iter()
+                .find(refused)
+                .map(|(at, bytes)| format!("{bytes} byte(s) of a bound buffer at {at:#x}"))
+        })
+        .or_else(|| {
+            fills
+                .iter()
+                .find(|fill| !allowed(fill.destination, fill.count))
+                .map(|fill| {
+                    format!(
+                        "a fill of {} byte(s) at {:#x}",
+                        fill.count, fill.destination
+                    )
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A dispatch's refused write-back names the first write refused: a run, a buffer's word or a
+    /// fill, by its address and length - GTA V's dispatch at byte 0x12570 said only that it wrote
+    /// guest memory that is not writable.
+    #[test]
+    fn a_refused_write_back_names_the_write() {
+        let allowed = |at: u64, bytes: u64| at >= 0x1000 && at + bytes <= 0x2000;
+        let fill = super::cp::Fill {
+            destination: 0x3000,
+            pattern: 0,
+            count: 16,
+        };
+        assert_eq!(
+            super::first_unwritable(
+                ([(0x1000, 4), (0x1ffe, 4)], [(0x5000, 4)], &[fill]),
+                allowed
+            ),
+            Some("a run of 4 byte(s) at 0x1ffe".to_owned())
+        );
+        assert_eq!(
+            super::first_unwritable(([(0x1000, 4)], [(0x5000, 4)], &[fill]), allowed),
+            Some("4 byte(s) of a bound buffer at 0x5000".to_owned())
+        );
+        assert_eq!(
+            super::first_unwritable(([], [], &[fill]), allowed),
+            Some("a fill of 16 byte(s) at 0x3000".to_owned())
+        );
+        assert_eq!(super::first_unwritable(([], [], &[]), allowed), None);
+    }
     use super::{
         GUEST_ARG_REGISTERS, SUBMIT_OK, create_queue, last_submission_report, set_guest_regions,
         submit_command_buffer, submit_dcb,

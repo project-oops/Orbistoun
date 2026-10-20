@@ -6983,6 +6983,26 @@ fn an_exclusive_or_works_whole_and_on_a_selected_word() {
     );
 }
 
+/// `v_mov_b32` in its SDWA form takes its source's negate and absolute value as operations on the
+/// sign bit - GTA V's lighting negates a register in place, `v_mov_b32_sdwa v17, -v17` (words
+/// 0x7e2202f9 0x00160611): 1.0 moves as -1.0, and -1.0 made absolute as 1.0.
+#[test]
+fn an_sdwa_move_negates_and_takes_the_absolute_value() {
+    if !device_or_skip("an_sdwa_move_negates_and_takes_the_absolute_value") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0x3f80_0000));
+    program.extend(v_mov_literal(2, 0xbf80_0000));
+    // Negate (bit 20) of v1 into v1; absolute value (bit 21) of v2 into v3.
+    program.extend([head("v_mov_b32_e32") | (1 << 17) | SDWA_MARKER, 0x0016_0601]);
+    program.extend([head("v_mov_b32_e32") | (3 << 17) | SDWA_MARKER, 0x0026_0602]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 0xbf80_0000, "negated");
+    assert_eq!(vector(&registers, 3), 0x3f80_0000, "absolute");
+}
+
 /// `v_ashrrev_i32` in its SDWA form shifts its second source right by the first, keeping the sign -
 /// GTA V's lighting shader (`0x300000f9 0x86060600`) shifts a scalar register, bit 31 of the word
 /// marking the second source scalar: 0x8000_0010 >> 4 is 0xf800_0001.

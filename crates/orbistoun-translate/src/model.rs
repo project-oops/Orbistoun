@@ -8833,8 +8833,8 @@ fn sdwa_place<M: Model + ?Sized>(
 /// An `SDWA_INTEGER` instruction in its SDWA form (`aco_assembler.cpp:1183-1225` for the fields):
 /// each source's selected part, the operation over them, and the result placed into the
 /// destination's selected part. Clamp and output modifier - float modifiers - are refused, and so
-/// are negate and absolute value except on a select, where they are the sign bit of the word it
-/// picks, cleared and then flipped, as on any float source.
+/// are negate and absolute value except on a select or a move, where they are the sign bit of the
+/// word it carries, cleared and then flipped, as on any float source.
 fn sdwa_integer<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -8844,8 +8844,10 @@ fn sdwa_integer<M: Model + ?Sized>(
     // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
     const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
     const SOURCE_MODIFIERS: u32 = (0x3 << 20) | (0x3 << 28);
-    let select = name == "v_cndmask_b32_e32";
-    let refused = if select {
+    // A select or a move carries its sources' bits, so a negate or an absolute value is an
+    // operation on the sign bit of the word it carries.
+    let carries_bits = matches!(name, "v_cndmask_b32_e32" | "v_mov_b32_e32");
+    let refused = if carries_bits {
         FLOAT_MODIFIERS & !SOURCE_MODIFIERS
     } else {
         FLOAT_MODIFIERS
