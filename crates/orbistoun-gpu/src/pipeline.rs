@@ -6848,6 +6848,7 @@ fn bind_textures(
                         .clone();
                     let bound = bound.filter(|bound| shaped_for(bound, source));
                     named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
+                    let bound = bound.or_else(|| unreached_texture(source, at, memory));
                     // A texture the module samples and nothing binds draws the backend's
                     // placeholder, which is not the guest's picture: counted, so the draw is
                     // refused rather than drawn wrong.
@@ -6886,6 +6887,21 @@ fn note_unbound(described: &mut Option<String>, description: String) {
         }
         Some(_) => {}
     }
+}
+
+/// The null texture for a table slot whose descriptor names an image in no guest memory (D921): a
+/// sample through it would fault on hardware, where the title runs, so the program does not reach
+/// it in this draw - an uber-shader loads every slot it has and branches past those a draw's table
+/// fills with other words. A slot the module compares or reads as a volume stays unbound.
+fn unreached_texture(
+    source: &TextureSource,
+    at: u64,
+    memory: &impl GuestMemory,
+) -> Option<RenderCommand> {
+    let words = read_descriptor(at, memory)?;
+    let base = decode_image_descriptor(words).base;
+    let null = null_texture(source.slot, source.cube);
+    (memory.read(base, 1).is_none() && shaped_for(&null, source)).then_some(null)
 }
 
 /// The textures [`bind_textures`] bound, each by its descriptor, once.
@@ -10160,6 +10176,88 @@ mod tests {
         };
         assert_eq!(bind(0x6000), (0, Some(vec![0])), "every select SQ_SEL_0");
         assert_eq!(bind(0x6000 | 4), (1, None), "X reads the texel");
+    }
+
+    /// A table slot whose descriptor names an image in no guest memory binds the null texture
+    /// (D921): Grand Theft Auto V's lighting uber-shader loads eleven image slots from its table,
+    /// and one draw's table holds two samplers at offset 0x40 - an "image" at 0x9200. A slot whose
+    /// image is in guest memory and cannot be read stays unbound.
+    #[test]
+    fn a_table_slot_naming_no_memory_binds_the_null_texture() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let bind = |descriptor: [u32; 8]| {
+            let mut table = vec![0_u8; 0x100];
+            for (word, bytes) in descriptor.iter().zip(table[0x40..0x60].chunks_exact_mut(4)) {
+                bytes.copy_from_slice(&word.to_le_bytes());
+            }
+            let shader = ResourceId(3);
+            let mut words = [0u32; super::USER_DATA_WORDS];
+            words[0] = 0x1000;
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 3,
+                    table_offset: Some(0x40),
+                    table: TableBase::default(),
+                    sampler_offset: None,
+                    user_data: None,
+                    sampler_user_data: None,
+                    cube: false,
+                    volume: false,
+                    compare: false,
+                    saturated: [false; 2],
+                    level_user_data: None,
+                    layered: false,
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &Memory(table),
+                (&mut unbound, &mut None),
+            );
+            let texels = commands.iter().find_map(|command| match command {
+                RenderCommand::BindTexture { slot, texels, .. } => Some((*slot, texels.to_vec())),
+                _ => None,
+            });
+            (unbound, texels)
+        };
+        assert_eq!(
+            bind([
+                0x92, 0xff_f000, 0xaf0_0000, 0, 0x3000, 0xff_f000, 0x650_0000, 0
+            ]),
+            (0, Some((3, vec![0]))),
+            "two samplers: an image at 0x9200"
+        );
+        // A 2D image at 0x1000, in the table's own memory, of format 0, which reads as nothing.
+        assert_eq!(
+            bind([0x10, 0, 0, 0x9000_0fac, 0, 0, 0, 0]),
+            (1, None),
+            "an image in guest memory"
+        );
     }
 
     /// A slot nothing binds is counted and the first is described - the slot, where its
