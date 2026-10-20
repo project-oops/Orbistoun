@@ -11,6 +11,9 @@
 
 use crate::packet::{self, PacketKind, build::measured};
 
+mod indirect_draw;
+pub use indirect_draw::{DRAW_INDEX_INDIRECT_MULTI, DRAW_INDIRECT_MULTI};
+
 /// `PKT3_WAIT_REG_MEM` (`sid.h:90`). No measured builder emits it; the open-toolchain GL context
 /// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
@@ -327,9 +330,10 @@ fn streamout_update(
     Ok(())
 }
 
-/// The draw packets a submission's draws are carried out for together: `DRAW_INDEX_2` and
-/// `DRAW_INDEX_AUTO`, the two the translator turns into draws. An indirect draw reads its arguments
-/// from memory at execution time and is not among them.
+/// The draw packets a submission's draws are carried out for together: `DRAW_INDEX_2`,
+/// `DRAW_INDEX_AUTO` and `DRAW_INDEX_OFFSET_2`, the ones the translator turns into draws. An
+/// indirect draw reads its arguments from memory when the walk reaches it and is carried out on its
+/// own, as these packets (`indirect_draw`).
 pub(crate) const fn is_draw(opcode: u8) -> bool {
     matches!(
         opcode,
@@ -675,7 +679,8 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
             }),
             measured::EVENT_WRITE => event_write(&body, memory, &mut result),
             crate::streamout::STRMOUT_BUFFER_UPDATE => streamout_update(&body, memory, &mut result),
-            _ => Err(Stop::NeedsGpu),
+            // An indirect draw, or a packet that needs the GPU.
+            _ => indirect_draw::run(stream, offset, opcode, &body, memory, &mut result),
         };
         if let Err(stop) = step {
             result.stopped = match stop {
@@ -860,8 +865,11 @@ fn draw_segments<'a>(stream: &'a [u8], packets: &[packet::Packet]) -> Vec<DrawSe
             open = false;
         }
     }
+    // A dispatch, or an indirect draw - carried out on its own when the walk reaches it - is GPU
+    // work no segment holds.
     let dispatches = packets.iter().any(|p| {
-        matches!(p.kind, PacketKind::Command { opcode } if opcode == packet::build::DISPATCH_DIRECT)
+        matches!(p.kind, PacketKind::Command { opcode }
+            if opcode == packet::build::DISPATCH_DIRECT || indirect_draw::is_indirect_draw(opcode))
     });
     if let [only] = segments.as_mut_slice() {
         only.whole = !dispatches;

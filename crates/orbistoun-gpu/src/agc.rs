@@ -84,6 +84,7 @@ guest_module! {
         "sceAgcDcbDrawIndexOffset" => 6,
         "sceAgcDcbDrawIndexAuto" => 6,
         "sceAgcDcbDrawIndexIndirect" => 6,
+        "sceAgcDcbDrawIndexIndirectMulti" => 6,
         "sceAgcDcbDrawIndirect" => 6,
         "sceAgcDcbEventWrite" => 6,
         "sceAgcDcbPopMarker" => 6,
@@ -1408,19 +1409,53 @@ fn acb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcDcbDrawIndirect(dcb, ...)`. Header `0xc0032400`, 20 bytes.
+/// `sceAgcDcbDrawIndirect(dcb, offset, modifier)`: 20 bytes ([`packet::build::draw_indirect`]).
+/// Only the zero modifier is measured; any other is refused by name until it is
+/// (REQ-20261020T1315Z-di01), since the shader-register locations it writes come from it.
 fn dcb_draw_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(
-        args[0],
-        &packet::build::reservation(measured::DRAW_INDIRECT, 4),
-    )
+    if args[2] as u32 != 0 {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    dcb_append(args[0], &packet::build::draw_indirect(args[1] as u32))
 }
 
-/// `sceAgcDcbDrawIndexIndirect(dcb, ...)`. Header `0xc0032500`, 20 bytes.
+/// `sceAgcDcbDrawIndexIndirect(dcb, offset, modifier)`: 20 bytes
+/// ([`packet::build::draw_index_indirect`]), any modifier but zero refused as for
+/// [`dcb_draw_indirect`].
 fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[2] as u32 != 0 {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    dcb_append(args[0], &packet::build::draw_index_indirect(args[1] as u32))
+}
+
+/// `sceAgcDcbDrawIndexIndirectMulti(dcb, offset, count_from_memory, max_count, count_address,
+/// stride, modifier)`: 64 bytes ([`packet::build::draw_index_indirect_multi`]). The modifier is the
+/// first stack argument, as Grand Theft Auto V's wrapper at image+0x1e0040 pushes it; any but zero
+/// is refused as for [`dcb_draw_indirect`], and so is a call reaching here without it.
+fn dcb_draw_index_indirect_multi(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let refused = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    let spilled = orbistoun_thunk::stack_arguments();
+    if spilled == 0 {
+        return refused;
+    }
+    // SAFETY: the dispatch published `spilled` as the first stack argument's address on the
+    // calling thread's live stack.
+    let Some(modifier) = (unsafe { guest::read_u64(spilled) }) else {
+        return refused;
+    };
+    if modifier as u32 != 0 || args[2] > 1 {
+        return refused;
+    }
     dcb_append(
         args[0],
-        &packet::build::reservation(measured::DRAW_INDEX_INDIRECT, 4),
+        &packet::build::draw_index_indirect_multi(
+            args[1] as u32,
+            args[2] == 1,
+            args[3] as u32,
+            args[4],
+            args[5] as u32,
+        ),
     )
 }
 
@@ -1985,6 +2020,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
     ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
     ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
+    (
+        "sceAgcDcbDrawIndexIndirectMulti",
+        dcb_draw_index_indirect_multi,
+    ),
     (
         "sceAgcDcbSetShRegistersIndirect",
         dcb_set_sh_registers_indirect,

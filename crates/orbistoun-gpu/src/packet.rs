@@ -648,6 +648,82 @@ pub mod build {
         ]
     }
 
+    /// The location word a zero modifier writes into an indirect draw for each shader register it
+    /// names: the first vertex's, the first instance's and the draw index's alike
+    /// (`166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`, `dcb-draw-index-indirect-multi-getsize`,
+    /// `reports/report.txt`). As an offset from `SPI_SHADER_USER_DATA` space it names `0xBA00`,
+    /// which no register of this generation occupies.
+    pub const UNMODIFIED_LOCATION: u32 = 0x280;
+
+    /// The `DRAW_INDIRECT` `sceAgcDcbDrawIndirect(dcb, offset, 0)` writes: header `0xc0032400`, the
+    /// offset past the base [`set_base_indirect_args`] set, the first vertex's and first instance's
+    /// locations, and the initiator `2` (`DI_SRC_SEL_AUTO_INDEX`). Measured
+    /// (`166-agc/dcb-draw-indirect`, `reports/report.txt`): `0xc0032400 0 0x280 0x280 2`, and
+    /// `0x1000` for the offset on the second pass. Only the zero modifier is measured.
+    #[must_use]
+    pub fn draw_indirect(offset: u32) -> [u32; 5] {
+        [
+            command_header(measured::DRAW_INDIRECT, 4),
+            offset,
+            UNMODIFIED_LOCATION,
+            UNMODIFIED_LOCATION,
+            2,
+        ]
+    }
+
+    /// The `DRAW_INDEX_INDIRECT` `sceAgcDcbDrawIndexIndirect(dcb, offset, 0)` writes: as
+    /// [`draw_indirect`], with the initiator `0` (`DI_SRC_SEL_DMA`). Measured
+    /// (`166-agc/dcb-draw-index-indirect`): `0xc0032500 0 0x280 0x280 0`, and `0x1000` for the
+    /// offset on the second pass.
+    #[must_use]
+    pub fn draw_index_indirect(offset: u32) -> [u32; 5] {
+        [
+            command_header(measured::DRAW_INDEX_INDIRECT, 4),
+            offset,
+            UNMODIFIED_LOCATION,
+            UNMODIFIED_LOCATION,
+            0,
+        ]
+    }
+
+    /// The `DRAW_INDEX_INDIRECT_MULTI` `sceAgcDcbDrawIndexIndirectMulti(dcb, offset,
+    /// count_from_memory, max_count, count_address, stride, 0)` writes, 64 bytes: the marker
+    /// register (`0x342`, `SQ_THREAD_TRACE_USERDATA_2` in `gfx103.json`) set to
+    /// `0xc6000005`, the packet, and the marker set to `0xc6000000`. Measured with every argument
+    /// but the offset zero (`166-agc/dcb-draw-index-indirect-multi-getsize`, `reports/report.txt`):
+    /// `c0017904 342 c6000005 | c0083800 offset 280 280 280 0 0 0 0 0 | c0017904 342 c6000000`. The
+    /// arguments are in the order Grand Theft Auto V's wrapper at image+0x1e0040 passes them; the
+    /// count, its address, the stride and `COUNT_INDIRECT_ENABLE` (bit 30 of the draw-index word) go
+    /// where Mesa places them (`si_state_draw.cpp:1626-1636`), which is assumed until measured
+    /// (REQ-20261020T1315Z-di01).
+    #[must_use]
+    pub fn draw_index_indirect_multi(
+        offset: u32,
+        count_from_memory: bool,
+        max_count: u32,
+        count_address: u64,
+        stride: u32,
+    ) -> [u32; 16] {
+        [
+            MARKER_HEADER,
+            MARKER_REGISTER,
+            0xc600_0005,
+            command_header(crate::cp::DRAW_INDEX_INDIRECT_MULTI, 9),
+            offset,
+            UNMODIFIED_LOCATION,
+            UNMODIFIED_LOCATION,
+            UNMODIFIED_LOCATION | (u32::from(count_from_memory) << 30),
+            max_count,
+            count_address as u32,
+            (count_address >> 32) as u32,
+            stride,
+            0,
+            MARKER_HEADER,
+            MARKER_REGISTER,
+            0xc600_0000,
+        ]
+    }
+
     /// An `EVENT_WRITE` for `event_type`. Two dwords.
     ///
     /// Measured whole (`166-agc/dcb-event-write`): `sceAgcDcbEventWrite(dcb, 62, 0)` wrote
@@ -805,6 +881,44 @@ mod tests {
 
     fn register_write(base: u16, body_dwords: u32) -> u32 {
         ((body_dwords - 1) << 16) | u32::from(base)
+    }
+
+    /// The indirect-draw builders write the bytes obSCEne measured with a zero modifier
+    /// (`reports/report.txt` `166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`,
+    /// `dcb-draw-index-indirect-multi-getsize`), both passes: the offset `0` then `0x1000`.
+    #[test]
+    fn the_indirect_draw_builders_write_what_was_measured() {
+        use super::build::{draw_index_indirect, draw_index_indirect_multi, draw_indirect};
+        let le = |hex: &str| -> Vec<u32> {
+            (0..hex.len())
+                .step_by(8)
+                .map(|at| {
+                    u32::from_str_radix(&hex[at..at + 8], 16)
+                        .expect("hex")
+                        .swap_bytes()
+                })
+                .collect()
+        };
+        for (offset, written) in [(0, "00000000"), (0x1000, "00100000")] {
+            assert_eq!(
+                draw_indirect(offset).to_vec(),
+                le(&format!("002403c0{written}800200008002000002000000"))
+            );
+            assert_eq!(
+                draw_index_indirect(offset).to_vec(),
+                le(&format!("002503c0{written}800200008002000000000000"))
+            );
+            assert_eq!(
+                draw_index_indirect_multi(offset, false, 0, 0, 0).to_vec(),
+                le(&format!(
+                    concat!(
+                        "047901c042030000050000c6003808c0{}800200008002000080020000",
+                        "0000000000000000000000000000000000000000047901c042030000000000c6",
+                    ),
+                    written
+                ))
+            );
+        }
     }
 
     /// The indirect-dispatch builders write the bytes obSCEne measured (report-20261013-172400

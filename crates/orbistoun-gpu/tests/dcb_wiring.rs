@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        97,
+        98,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"
@@ -639,9 +639,7 @@ fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
 #[test]
 fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     for (name, extent, header) in [
-        ("sceAgcDcbDrawIndirect", 20usize, 0xc003_2400u32),
-        ("sceAgcDcbDrawIndexIndirect", 20, 0xc003_2500),
-        ("sceAgcDcbStallCommandBufferParser", 8, 0xc000_4200),
+        ("sceAgcDcbStallCommandBufferParser", 8usize, 0xc000_4200u32),
         ("sceAgcAcbAcquireMem", 32, 0xc006_5800),
     ] {
         let w = Writer::new(0x400);
@@ -662,6 +660,49 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
             "{name} leaves the body zero, not a guessed encoding of the argument"
         );
     }
+}
+
+/// `sceAgcDcbDrawIndirect(dcb, offset, 0)` and `sceAgcDcbDrawIndexIndirect` write the packets
+/// obSCEne measured (`166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`, `reports/report.txt`):
+/// the offset, the locations `0x280`, and the initiator. A modifier, which no measurement has set
+/// yet, is refused by name with nothing written; so is the multi form called without the stack
+/// argument its modifier is.
+#[test]
+fn the_indirect_draws_write_their_measured_bodies_and_refuse_a_modifier() {
+    for (name, initiator) in [
+        ("sceAgcDcbDrawIndirect", 2u32),
+        ("sceAgcDcbDrawIndexIndirect", 0),
+    ] {
+        let header = if initiator == 2 {
+            0xc003_2400u32
+        } else {
+            0xc003_2500
+        };
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        args[1] = 0x1000;
+        let at = w.cursor();
+        assert_eq!(call(name, args), at, "{name} returns the packet address");
+        let expected: Vec<u8> = [header, 0x1000, 0x280, 0x280, initiator]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        assert_eq!(w.bytes(), expected.as_slice(), "{name}");
+
+        args[2] = 0x2000_0000;
+        assert_eq!(call(name, args), UNIMPLEMENTED, "{name} with a modifier");
+        assert_eq!(w.bytes(), expected.as_slice(), "{name} wrote nothing more");
+    }
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    assert_eq!(
+        call("sceAgcDcbDrawIndexIndirectMulti", args),
+        UNIMPLEMENTED,
+        "no stack argument"
+    );
+    assert_eq!(w.written(), 0);
 }
 
 /// `sceAgcCbDispatch(cb, x, y, z, modifier, ..)` writes the dispatch hardware wrote for the same

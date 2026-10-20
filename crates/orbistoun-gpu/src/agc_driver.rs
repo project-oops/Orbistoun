@@ -8041,8 +8041,20 @@ mod tests {
         let fence_at = fence.as_ptr() as usize as u64;
         allow_writes_to(fence_at, 64);
         let words = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|w| w.to_le_bytes()).collect() };
-        // An indirect draw: its arguments are in memory at execution time, never carried out here.
-        let stopping = words(&[crate::packet::build::command_header(0x24, 4), 0, 0, 0, 0]);
+        // A multi indirect draw that hands its draw index over in vector registers (`use_vgprs`,
+        // bit 27 of its draw-index word): not modelled, so it needs the GPU.
+        let stopping = words(&[
+            crate::packet::build::command_header(0x2c, 9),
+            0,
+            0,
+            0,
+            1 << 27,
+            1,
+            0,
+            0,
+            16,
+            2,
+        ]);
         let release = words(&[
             crate::packet::build::command_header(crate::packet::build::measured::RELEASE_MEM, 7),
             0x0660_3514,
@@ -8069,7 +8081,7 @@ mod tests {
         assert!(
             matches!(
                 record.last.map(|l| l.stopped),
-                Some(crate::cp::Stopped::NeedsGpu { opcode: 0x24, .. })
+                Some(crate::cp::Stopped::NeedsGpu { opcode: 0x2c, .. })
             ),
             "the wall is the stopped submission, not the one behind it: {record:?}"
         );
