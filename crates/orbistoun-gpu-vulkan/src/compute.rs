@@ -719,6 +719,14 @@ pub(crate) fn occlusion_precise() -> bool {
     OCCLUSION_PRECISE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `depth_bounds`.
+static DEPTH_BOUNDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a pipeline may run a depth-bounds test: the device enabled `depth_bounds`.
+pub(crate) fn depth_bounds() -> bool {
+    DEPTH_BOUNDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the session's device was created with `depth_bias_clamp`.
 static DEPTH_BIAS_CLAMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -956,6 +964,8 @@ impl Session {
             .wide_lines(available.wide_lines == vk::TRUE)
             // `depth_bias_clamp` serves a guest polygon offset with a clamp.
             .depth_bias_clamp(available.depth_bias_clamp == vk::TRUE)
+            // `depth_bounds` serves a guest depth-bounds test (`DB_DEPTH_BOUNDS_MIN`/`_MAX`).
+            .depth_bounds(available.depth_bounds == vk::TRUE)
             // `occlusion_query_precise` serves the guest's z-pass counters (`ZPASS_DONE`), which
             // count samples exactly.
             .occlusion_query_precise(available.occlusion_query_precise == vk::TRUE)
@@ -1025,6 +1035,10 @@ impl Session {
         CUSTOM_BORDER_COLOUR.store(border_offered, std::sync::atomic::Ordering::Relaxed);
         DEPTH_BIAS_CLAMP.store(
             wanted_features.depth_bias_clamp == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        DEPTH_BOUNDS.store(
+            wanted_features.depth_bounds == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,
         );
         OCCLUSION_PRECISE.store(

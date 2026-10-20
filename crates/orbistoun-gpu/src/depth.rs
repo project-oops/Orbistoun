@@ -55,6 +55,11 @@ const DB_Z_WRITE_BASE_HI: u32 = 0xA01C;
 const DB_STENCIL_WRITE_BASE_HI: u32 = 0xA01D;
 /// `DB_STENCILREFMASK`, byte `164912` (`0x28430`).
 const DB_STENCILREFMASK: u32 = 0xA10C;
+/// `DB_DEPTH_BOUNDS_MIN`, byte `163872` (`0x28020`, `gfx10.json`): the depth-bounds test's lower
+/// bound, a float.
+const DB_DEPTH_BOUNDS_MIN: u32 = 0xA008;
+/// `DB_DEPTH_BOUNDS_MAX`, byte `163876` (`0x28024`): its upper bound.
+const DB_DEPTH_BOUNDS_MAX: u32 = 0xA009;
 /// `DB_STENCILREFMASK_BF`, byte `164916` (`0x28434`).
 const DB_STENCILREFMASK_BF: u32 = 0xA10D;
 /// `PA_SU_SC_MODE_CNTL`, byte `165908` (`0x28814`).
@@ -290,6 +295,9 @@ pub struct DepthStencilState {
     pub front: StencilRefMask,
     /// `DB_STENCILREFMASK_BF`: the back face's, used when `control.backface_enable`.
     pub back: StencilRefMask,
+    /// `DB_DEPTH_BOUNDS_MIN` and `_MAX`, each a float's bits: the depths a fragment's stored depth
+    /// must lie between, where `control.depth_bounds_test_enable` asks.
+    pub bounds: [u32; 2],
 }
 
 /// The depth and stencil state in force, read a register at a time through `latest`.
@@ -304,6 +312,7 @@ pub fn depth_stencil_from(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<
         ops: decode_stencil_control(at(DB_STENCIL_CONTROL)),
         front: decode_stencil_ref_mask(at(DB_STENCILREFMASK)),
         back: decode_stencil_ref_mask(at(DB_STENCILREFMASK_BF)),
+        bounds: [at(DB_DEPTH_BOUNDS_MIN), at(DB_DEPTH_BOUNDS_MAX)],
     })
 }
 
@@ -940,6 +949,17 @@ mod tests {
             move |register: u32| values.iter().find(|(r, _)| *r == register).map(|(_, v)| *v)
         };
         assert!(depth_stencil_from(written(&[(0xA10B, 0x30)])).is_none());
+        // The depth-bounds test's bounds, each a float: GTA V's lighting keeps fragments whose
+        // stored depth lies within a light's volume.
+        let bounded = depth_stencil_from(|register| match register {
+            0xA200 => Some(0x8),
+            0xA008 => Some(0.25_f32.to_bits()),
+            0xA009 => Some(0.75_f32.to_bits()),
+            _ => None,
+        })
+        .expect("depth control");
+        assert!(bounded.control.depth_bounds_test_enable);
+        assert_eq!(bounded.bounds, [0.25_f32.to_bits(), 0.75_f32.to_bits()]);
         let state = depth_stencil_from(written(&[(0xA200, 0x16), (0xA10C, 0x0100_ff05)]))
             .expect("DB_DEPTH_CONTROL is written");
         assert!(state.control.depth_test_enable && state.control.depth_write_enable);

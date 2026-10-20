@@ -801,7 +801,10 @@ fn face_state(
 /// no exact Vulkan form. `None` - no depth state set - runs no test and writes nothing.
 ///
 /// With `BACKFACE_ENABLE` clear the hardware gives back faces the front's stencil state
-/// (`DB_DEPTH_CONTROL`); the depth-bounds test is refused, its bounds registers not being decoded.
+/// (`DB_DEPTH_CONTROL`). A depth-bounds test keeps a fragment whose stored depth lies within
+/// `DB_DEPTH_BOUNDS_MIN` and `_MAX`, as Vulkan's does; its bounds are clamped to `[0, 1]`, where a
+/// depth target's depths lie and where Vulkan takes them, and it is refused on a device without
+/// `depthBounds`.
 ///
 /// # Errors
 ///
@@ -809,19 +812,29 @@ fn face_state(
 pub(crate) fn depth_stencil_state(
     state: Option<DepthStencilState>,
 ) -> Result<vk::PipelineDepthStencilStateCreateInfo<'static>, &'static str> {
+    depth_stencil_state_on(state, crate::compute::depth_bounds())
+}
+
+/// [`depth_stencil_state`] on a device that has `depthBounds` where `depth_bounds` says.
+fn depth_stencil_state_on(
+    state: Option<DepthStencilState>,
+    depth_bounds: bool,
+) -> Result<vk::PipelineDepthStencilStateCreateInfo<'static>, &'static str> {
     let off = vk::PipelineDepthStencilStateCreateInfo::default();
     let Some(DepthStencilState {
         control,
         ops,
         front,
         back,
+        bounds,
     }) = state
     else {
         return Ok(off);
     };
-    if control.depth_bounds_test_enable {
-        return Err("a depth-bounds test (its bounds are not decoded)");
+    if control.depth_bounds_test_enable && !depth_bounds {
+        return Err("a depth-bounds test on a device without depthBounds");
     }
+    let [min, max] = bounds.map(|bits| f32::from_bits(bits).clamp(0.0, 1.0));
     // A stencil test that is off leaves its operations unused, so they are not refused.
     let (front_state, back_state) = if control.stencil_test_enable {
         let front_state = face_state(
@@ -852,7 +865,10 @@ pub(crate) fn depth_stencil_state(
         .depth_compare_op(compare_op(control.depth_func))
         .stencil_test_enable(control.stencil_test_enable)
         .front(front_state)
-        .back(back_state))
+        .back(back_state)
+        .depth_bounds_test_enable(control.depth_bounds_test_enable)
+        .min_depth_bounds(min)
+        .max_depth_bounds(max))
 }
 
 /// Whether a draw with `state` can run on `depth`, or the name of what it asks for that cannot.
@@ -948,9 +964,37 @@ pub(crate) fn depth_bias(
 
 #[cfg(test)]
 mod tests {
-    use super::{DepthClear, depth_bias, depth_stencil_state, rasterisation, stencil_op};
+    use super::{
+        DepthClear, depth_bias, depth_stencil_state, depth_stencil_state_on, rasterisation,
+        stencil_op,
+    };
     use ash::vk;
     use orbistoun_gpu::StencilOp;
+
+    /// A depth-bounds test keeps the depths between its bounds, clamped to `[0, 1]`, on a device
+    /// with `depthBounds`, and is refused by name on one without.
+    #[test]
+    fn a_depth_bounds_test_takes_its_bounds() {
+        use orbistoun_gpu::depth::depth_stencil_from;
+        let state = depth_stencil_from(|register| match register {
+            0xA200 => Some(0x8),
+            0xA008 => Some(0.25_f32.to_bits()),
+            0xA009 => Some(2.0_f32.to_bits()),
+            _ => None,
+        });
+        assert_eq!(
+            depth_stencil_state_on(state, false).err(),
+            Some("a depth-bounds test on a device without depthBounds")
+        );
+        let made =
+            depth_stencil_state_on(state, true).expect("bounds on a device with depthBounds");
+        assert_eq!(made.depth_bounds_test_enable, vk::TRUE);
+        assert_eq!(
+            (made.min_depth_bounds, made.max_depth_bounds),
+            (0.25, 1.0),
+            "the upper bound clamped to one"
+        );
+    }
 
     /// The registers read back as RADV writes them: the offset is the constant factor and the
     /// scale sixteen times the slope; a face culled need not agree with the one drawn.
@@ -1093,8 +1137,8 @@ mod tests {
             Ok(vk::StencilOp::REPLACE.as_raw())
         );
         assert!(
-            depth_stencil_state(Some(state(&[(0xA200, 0x16 | 0x8)]))).is_err(),
-            "the depth-bounds test"
+            depth_stencil_state_on(Some(state(&[(0xA200, 0x16 | 0x8)])), false).is_err(),
+            "the depth-bounds test, on a device without depthBounds"
         );
     }
 

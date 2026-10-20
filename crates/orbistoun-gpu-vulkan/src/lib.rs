@@ -750,6 +750,21 @@ impl VulkanBackend {
         Ok(Some((read, hash, extent)))
     }
 
+    /// What depth target `target` holds where no draw has drawn into it but a clear was asked of
+    /// it: the cleared depth, or the cleared stencil where `stencil`, everywhere - one texel of it,
+    /// which reads the same wherever it is sampled (D935). `None` where neither was cleared.
+    fn cleared_texels(&self, target: ResourceId, stencil: bool) -> Option<DepthTexels> {
+        let clear = self.depth_clears.get(&target)?;
+        let word = if stencil {
+            u32::from(clear.stencil?)
+        } else {
+            clear.depth?.to_bits()
+        };
+        let texels: std::sync::Arc<[u32]> = std::sync::Arc::from([word]);
+        let hash = orbistoun_gpu::content_hash(&texels);
+        Some((texels, hash, (1, 1)))
+    }
+
     /// Replaces depth target `target`'s depths with `texels`, one float's bits a texel: what a
     /// dispatch that stores to it wrote (D894). Its read-back depths are then these. `false` for a
     /// target this backend never drew.
@@ -808,7 +823,8 @@ impl VulkanBackend {
                 self.stencil_texels(face_target)?
             } else {
                 self.depth_texels(face_target)?
-            };
+            }
+            .or_else(|| self.cleared_texels(face_target, stencil));
             let Some((texels, hash, face_extent)) = fetched else {
                 self.refused += 1;
                 return Err(BackendError::Unsupported {
@@ -2299,6 +2315,45 @@ mod tests {
                 command: "ClearColour"
             }
         );
+    }
+
+    /// A depth target cleared and never drawn into samples as its clear value, depth or stencil,
+    /// everywhere (D935): Grand Theft Auto V's lighting samples the shadow cubes of lights that
+    /// cast nothing. One neither drawn nor cleared is still refused.
+    #[test]
+    fn a_depth_target_only_cleared_samples_as_its_clear() {
+        let mut b = VulkanBackend::new();
+        let target = orbistoun_gpu::ResourceId(0x4000_0000_0000_1000);
+        b.execute(&RenderCommand::ClearDepthStencil {
+            target,
+            depth: Some(0.5),
+            stencil: Some(3),
+        })
+        .expect("a clear is queued");
+        let bind = |b: &mut VulkanBackend, stencil| {
+            b.execute(&RenderCommand::BindDepthTexture {
+                slot: 0,
+                target,
+                sampling: orbistoun_gpu::TextureSampling::default(),
+                compare: false,
+                cube: false,
+                layered: false,
+                stencil,
+            })
+            .map(|()| b.textures[0].as_ref().map(|t| (t.texels.to_vec(), t.width)))
+        };
+        assert_eq!(bind(&mut b, false), Ok(Some((vec![0.5_f32.to_bits()], 1))));
+        assert_eq!(bind(&mut b, true), Ok(Some((vec![3], 1))));
+        let never = RenderCommand::BindDepthTexture {
+            slot: 0,
+            target: orbistoun_gpu::ResourceId(0x4000_0000_0000_2000),
+            sampling: orbistoun_gpu::TextureSampling::default(),
+            compare: false,
+            cube: false,
+            layered: false,
+            stencil: false,
+        };
+        assert!(b.execute(&never).is_err(), "neither drawn nor cleared");
     }
 
     /// Refusals are counted.
