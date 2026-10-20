@@ -239,6 +239,20 @@ pub fn refusal(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<String> {
     })
 }
 
+/// Whether the draw is refused for [`refusal`]'s reason, counting it in `refused` - a draw count
+/// and the first draw's reason - when it is.
+pub fn refused_into(
+    refused: &mut (usize, Option<String>),
+    latest: impl FnMut(u32) -> Option<u32>,
+) -> bool {
+    let Some(why) = refusal(latest) else {
+        return false;
+    };
+    refused.0 += 1;
+    refused.1.get_or_insert(why);
+    true
+}
+
 /// `VGT_HS_OFFCHIP_PARAM` decoded (`gfx103.json`; Mesa `ac_gpu_info.c:1413-1415` writes one less
 /// than the work groups in `OFFCHIP_BUFFERING` on this generation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +366,8 @@ mod tests {
     use super::{
         Domain, HS_EN, OffchipParam, OutputTopology, Partitioning, PatchFactors, VGT_LS_HS_CONFIG,
         VGT_SHADER_STAGES_EN, VGT_TF_MEMORY_BASE, VGT_TF_MEMORY_BASE_HI, VGT_TF_PARAM,
-        VGT_TF_RING_SIZE, factor_ring, patch_factors, refusal, shape, tessellated, tessellator,
+        VGT_TF_RING_SIZE, factor_ring, patch_factors, refusal, refused_into, shape, tessellated,
+        tessellator,
     };
 
     /// radeonsi's stages for a tessellated NGG draw on GFX10: `LS_STAGE_ON`, `HS_EN`, `DYNAMIC_HS`
@@ -419,6 +434,19 @@ mod tests {
                 "runs yet (D928)"
             )
         );
+    }
+
+    #[test]
+    fn refused_draws_are_counted_with_the_first_reason() {
+        let mut refused = (0, None);
+        let plain = [(VGT_SHADER_STAGES_EN, 1 << 13)];
+        assert!(!refused_into(&mut refused, registers(&plain)));
+        let hull = [(VGT_SHADER_STAGES_EN, TESSELLATED_NGG)];
+        let domain = [(VGT_SHADER_STAGES_EN, 1 << 6)];
+        assert!(refused_into(&mut refused, registers(&hull)));
+        assert!(refused_into(&mut refused, registers(&domain)));
+        assert_eq!(refused.0, 2);
+        assert!(refused.1.unwrap().contains("no VGT_TF_PARAM"));
     }
 
     #[test]
