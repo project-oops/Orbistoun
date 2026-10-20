@@ -18,6 +18,7 @@ pub mod detiled;
 pub mod dispatch;
 pub mod display;
 pub mod draw_buffers;
+pub mod msaa;
 pub mod packet;
 pub mod perf;
 pub mod pipeline;
