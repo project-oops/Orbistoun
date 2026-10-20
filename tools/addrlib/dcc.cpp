@@ -1,4 +1,4 @@
-// A 64KB_R_X colour surface's DCC key equation, read off Mesa's addrlib under the console's
+// A 64KB colour surface's DCC key equation, read off Mesa's addrlib under the console's
 // configuration.
 //
 // # Why this exists
@@ -15,10 +15,13 @@
 // compress block of three surfaces, under a pipe XOR of zero and two others. It exits non-zero if
 // any block disagrees.
 //
-//   dcc <bytes per texel> <pipe aligned: 0 or 1>
+//   dcc <bytes per texel> <pipe aligned: 0 or 1> [slices]
+//
+// The layout is 64KB_R_X, or the one `DCC_SWIZZLE` names: 64KB_S_X, 64KB_Z_X or 64KB_R_X.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "addrinterface.h"
 
@@ -54,13 +57,34 @@ struct Dcc {
   UINT_16 bits[64];
 };
 
+// The swizzle mode `DCC_SWIZZLE` names, 64KB_R_X where it names none.
+AddrSwizzleMode swizzle_mode() {
+  const char *name = std::getenv("DCC_SWIZZLE");
+  if (name == nullptr || std::strcmp(name, "64KB_R_X") == 0) {
+    return ADDR_SW_64KB_R_X;
+  }
+  if (std::strcmp(name, "64KB_S_X") == 0) {
+    return ADDR_SW_64KB_S_X;
+  }
+  if (std::strcmp(name, "64KB_Z_X") == 0) {
+    return ADDR_SW_64KB_Z_X;
+  }
+  std::fprintf(stderr, "DCC_SWIZZLE is 64KB_S_X, 64KB_Z_X or 64KB_R_X\n");
+  std::exit(1);
+}
+
+const char *swizzle_name() {
+  const char *name = std::getenv("DCC_SWIZZLE");
+  return name == nullptr ? "64KB_R_X" : name;
+}
+
 Dcc dcc_info(ADDR_HANDLE handle, UINT_32 bytes, bool pipe_aligned, UINT_32 width, UINT_32 height,
              UINT_32 slices = 1) {
   ADDR2_COMPUTE_DCCINFO_INPUT in = {};
   in.size = sizeof(in);
   in.dccKeyFlags.pipeAligned = pipe_aligned;
   in.resourceType = ADDR_RSRC_TEX_2D;
-  in.swizzleMode = ADDR_SW_64KB_R_X;
+  in.swizzleMode = swizzle_mode();
   in.bpp = bytes * 8;
   in.unalignedWidth = width;
   in.unalignedHeight = height;
@@ -92,7 +116,7 @@ UINT_64 addrlib_address(ADDR_HANDLE handle, const Dcc &dcc, UINT_32 bytes, bool 
   in.slice = slice;
   in.dccKeyFlags.pipeAligned = pipe_aligned;
   in.resourceType = ADDR_RSRC_TEX_2D;
-  in.swizzleMode = ADDR_SW_64KB_R_X;
+  in.swizzleMode = swizzle_mode();
   in.bpp = bytes * 8;
   in.unalignedWidth = width;
   in.unalignedHeight = height;
@@ -182,9 +206,9 @@ int main(int argc, char **argv) {
   }
 
   const Dcc probe = dcc_info(created.hLib, bytes, pipe_aligned, 1920, 1080, slices);
-  std::printf("64KB_R_X at %u bytes a texel, %s: compress blocks %u x %u, meta blocks %u x %u "
+  std::printf("%s at %u bytes a texel, %s: compress blocks %u x %u, meta blocks %u x %u "
               "of %u bytes\n",
-              bytes, pipe_aligned ? "pipe aligned" : "unaligned", probe.info.compressBlkWidth,
+              swizzle_name(), bytes, pipe_aligned ? "pipe aligned" : "unaligned", probe.info.compressBlkWidth,
               probe.info.compressBlkHeight, probe.info.metaBlkWidth, probe.info.metaBlkHeight,
               probe.info.metaBlkSize);
   std::printf("equation: [");
