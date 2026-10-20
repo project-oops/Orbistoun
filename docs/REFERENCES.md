@@ -287,3 +287,32 @@ refusal.
 
 **Not taken.** The alpha field's effect: no row decoded an image without alpha and dumped it,
 so its use is recorded as unmeasured in the knowledge entry.
+
+## The D3D11 tessellator reference
+
+**Source.** The D3D11 functional specification's fixed-function tessellator reference,
+`CHWTessellator` ("Microsoft D3D11 Fixed Function Tessellator Reference", Microsoft, MIT). Mesa
+carries it at `src/gallium/auxiliary/tessellator/tessellator.cpp` and `tessellator.hpp`, read in
+oops-mesa's Mesa pin. Its header states that it is what hardware is expected to produce.
+
+**Taken.** The whole of `CHWTessellator`, ported to Rust in
+`crates/orbistoun-gpu/src/tessellation/tessellator.rs` (D928): the float-to-16.16 conversion,
+the factor clamping and rounding for each partitioning, point placement, ring stitching and the
+index rewrites, all in the reference's order. Each function cites its lines. The licence's
+notice is in `crates/orbistoun-gpu/LICENSE-D3D11-tessellator`. Not taken: `CHLSLTessellator`,
+which is hull-shader code a console title carries in its own program.
+
+**Checked.** Against the reference itself: `tessellator.cpp` compiled with clang 21 into a
+harness, run over a 2304-case sweep (every domain, partitioning and output, every boundary
+factor alone, and mixed factors). The port's points and indices equal its output bit for bit,
+and `a_sweep_matches_the_reference_bit_for_bit` pins the hash of that output. The other tests in
+`tessellator.rs` check the output against the definitions of the tessellation it makes:
+- a patch whose factors are all one is the patch itself;
+- an integer quad at factor *n* is the (*n*+1)-square grid, every factor from 1 to 64;
+- every triangle turns the same way, and together they cover the domain once, across mixed
+  factors in every partitioning;
+- fractional-odd edges are symmetric;
+- an isoline is its lines of segments.
+
+Whether the console's tessellator makes the same points in the same order is
+`REQ-20261020T1320Z-ts01` arm 5.
