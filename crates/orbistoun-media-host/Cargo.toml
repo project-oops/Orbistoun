@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "orbistoun-media-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Video decoding on the host's own media decoder - the codec behind the guest's players."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Media Foundation, the decoder Windows ships (D925). The version cpal already brings in.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }

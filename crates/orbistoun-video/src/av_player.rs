@@ -67,10 +67,10 @@ const DEALLOCATE_AT: u64 = 0x18;
 /// The allocate callback's second argument, as `InitEx` passed it (`InitEx-first-cb0|a1|0x20`).
 const ALLOCATE_SECOND: u64 = 0x20;
 
-/// The allocate callback's third argument. Not measured - the probe's callback logged it and the
-/// check did not row it (re-filed as REQ-20261014T1300Z-rf03 item 4) - so this is an assumption: a
-/// page, which reads as a valid size or a valid alignment, whichever the third argument is.
-const ALLOCATE_THIRD: u64 = 0x1000;
+/// The allocate callback's third argument, as `InitEx` passed it (`InitEx-first-cb0|a2|0x5c0`,
+/// and `InitEx-second-cb0` the same; `report-20261020-gt23-census.log` 4808, 4831): the size of
+/// the player's block, the second argument being its alignment.
+const ALLOCATE_THIRD: u64 = 0x5c0;
 
 /// An open player: the word its callbacks receive first and its deallocate callback.
 #[derive(Clone, Copy)]
