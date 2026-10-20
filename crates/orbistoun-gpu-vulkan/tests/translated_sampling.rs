@@ -561,6 +561,189 @@ fn a_depth_compare_sample_of_a_cube_translates_to_a_depth_cube() {
     assert!(dref, "it is sampled against the reference");
 }
 
+/// An image descriptor read out of a buffer, whose own descriptor the table holds, names that
+/// buffer's place in the table and the descriptor's place in the buffer (D934): Grand Theft Auto
+/// V's lighting loads `s_load_dwordx4 s[40:43], s[28:29], 0xf0`, then
+/// `s_buffer_load_dwordx8 s[8:15], s[40:43], 0x150`, and samples the shadow map there.
+#[test]
+fn a_descriptor_read_out_of_a_buffer_names_the_buffer_and_its_place() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut words = Vec::new();
+    for channel in 0u32..2 {
+        words.push(0xC800_0000u32 | (channel << 18) | (channel << 8));
+    }
+    words.extend([
+        // s_load_dwordx4 s[40:43], s[0:1], 0xf0 - the buffer's descriptor, from the table.
+        0xf408_0a00,
+        0xfa00_00f0,
+        // s_load_dwordx4 s[36:39], s[0:1], 0xb0 - the sampler, from the table.
+        0xf408_0900,
+        0xfa00_00b0,
+        // s_buffer_load_dwordx8 s[8:15], s[40:43], 0x150 - the image's, from the buffer.
+        0xf42c_0214,
+        0xfa00_0150,
+        // s_waitcnt
+        0xbf8c_c07f,
+    ]);
+    let sample = image_sample_words(39);
+    // The image from s[8:11] (unit 2), the sampler from s[36:39] (unit 9).
+    let from = (sample[1] & !(0x1F << 16) & !(0x1F << 21)) | (2 << 16) | (9 << 21);
+    words.extend([sample[0], from, 0xBF81_0000]);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("a texture read out of a buffer translates");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (
+                source.table_offset,
+                source.buffer_offset,
+                source.sampler_offset
+            ))
+            .collect::<Vec<_>>(),
+        [(Some(0xf0), Some(0x150), Some(0xb0))]
+    );
+}
+
+/// A load a branch skips still reaches the sample after the join, where no other path carries
+/// another load into those registers (D934): the path that skipped it left no descriptor there.
+/// Grand Theft Auto V's lighting reloads the same registers from another offset later, so only
+/// the load that reaches says which texture the sample reads.
+#[test]
+fn a_load_a_branch_skips_reaches_the_sample_after_the_join() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut words = Vec::new();
+    for channel in 0u32..2 {
+        words.push(0xC800_0000u32 | (channel << 18) | (channel << 8));
+    }
+    let sample = image_sample_words(39);
+    // The image from s[8:15] (unit 2), the sampler from s[16:19] (unit 4).
+    let from = (sample[1] & !(0x1F << 16) & !(0x1F << 21)) | (2 << 16) | (4 << 21);
+    words.extend([
+        // s_load_dwordx4 s[16:19], s[0:1], 0x40 - the sampler.
+        0xf408_0400,
+        0xfa00_0040,
+        // s_cbranch_scc0 over the next load's two dwords.
+        0xbf84_0002,
+        // s_load_dwordx8 s[8:15], s[0:1], 0x20.
+        0xf40c_0200,
+        0xfa00_0020,
+        // s_waitcnt, at the join.
+        0xbf8c_c07f,
+        sample[0],
+        from,
+        // s_load_dwordx8 s[8:15], s[0:1], 0x60: the same registers, another texture.
+        0xf40c_0200,
+        0xfa00_0060,
+        0xbf8c_c07f,
+        sample[0],
+        from,
+        0xBF81_0000,
+    ]);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("each sample's texture is the load that reached it");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| source.table_offset)
+            .collect::<Vec<_>>(),
+        [Some(0x20), Some(0x60)]
+    );
+}
+
+/// A sample on a path that never wrote its descriptor registers reads the user data they were
+/// seeded with, though another path loads into them (D934): Grand Theft Auto V's lighting
+/// branches past a block that reloads `s[8:15]` and samples its shadow cube from user data 8. Its
+/// sampler is the table load that reached it, though the other path loads another.
+#[test]
+fn a_sample_no_path_wrote_the_registers_of_reads_the_user_data() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut words = Vec::new();
+    for channel in 0u32..2 {
+        words.push(0xC800_0000u32 | (channel << 18) | (channel << 8));
+    }
+    let sample = image_sample_words(39);
+    // The image from s[8:15] (unit 2), the sampler from s[16:19] (unit 4).
+    let from = (sample[1] & !(0x1F << 16) & !(0x1F << 21)) | (2 << 16) | (4 << 21);
+    words.extend([
+        // s_load_dwordx4 s[16:19], s[0:1], 0x40 - the sampler.
+        0xf408_0400,
+        0xfa00_0040,
+        // s_cbranch_scc0 to the sample, past the loads and the jump.
+        0xbf84_0005,
+        // s_load_dwordx8 s[8:15], s[0:1], 0x20, and another sampler from 0x50, on the other path
+        // only,
+        0xf40c_0200,
+        0xfa00_0020,
+        0xf408_0400,
+        0xfa00_0050,
+        // which then jumps past the sample: s_branch to the end.
+        0xbf82_0003,
+        // s_waitcnt, then the sample, reached only from the branch.
+        0xbf8c_c07f,
+        sample[0],
+        from,
+        0xBF81_0000,
+    ]);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            first_register: 0,
+            count: 32,
+            ..UserData::default()
+        },
+    )
+    .expect("the sample translated");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (source.user_data, source.table_offset, source.sampler_offset))
+            .collect::<Vec<_>>(),
+        [(Some(8), None, Some(0x40))]
+    );
+}
+
 /// The dimensionality code for a cube, fourth in the same order.
 const CUBE: u32 = 3;
 
@@ -1050,6 +1233,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 volume: false,
                 compare: false,
                 level_user_data: None,
+                buffer_offset: None,
                 layered: false,
             },
             TextureSource {
@@ -1064,6 +1248,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 volume: false,
                 compare: false,
                 level_user_data: None,
+                buffer_offset: None,
                 layered: false,
             },
         ]
@@ -1664,6 +1849,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             volume: false,
             compare: false,
             level_user_data: None,
+            buffer_offset: None,
             layered: false,
         }]
     );

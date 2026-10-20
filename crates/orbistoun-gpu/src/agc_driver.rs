@@ -1770,8 +1770,11 @@ fn buffer_writes_into<'a>(
         // stored (D809), as its write mask or the device's list of them says.
         // Taken a run at a time, never collected (see `BufferAfter::stored_words`).
         type Runs<'a> = Box<dyn Iterator<Item = (usize, &'a [u32])> + 'a>;
+        // A buffer no wave reaches was bound with nothing, and has nothing to write (D900).
+        if bytes == 0 {
+            continue;
+        }
         let (runs, whole): (Runs<'_>, bool) = match before {
-            // A buffer no wave reaches was bound with nothing, and has nothing to write (D900).
             BufferBefore::Words(words) if words.is_empty() => continue,
             BufferBefore::Words(words) => {
                 if after.words.len() != words.len() {
@@ -1864,6 +1867,8 @@ fn uniform_buffers(
     ranges
         .iter()
         .zip(before.iter().zip(after))
+        // A buffer no wave reaches binds nothing, and a fill of it fills nothing (D900).
+        .filter(|((_, count), _)| *count > 0)
         .filter_map(|(&(destination, count), (before, after))| {
             let held: &[u32] = match before {
                 // Not read: a fill only where it stored every word, from its mask or its list.
@@ -6794,6 +6799,24 @@ mod tests {
             Ok((super::GuestWrites::default(), vec![fill]))
         );
         assert_eq!(super::uniform_buffers(&ranges, (&before, &after)), [fill]);
+    }
+
+    /// A buffer no wave reaches binds an empty range at 0 (D900), and a run that stored every word
+    /// of it stored none: no fill. Grand Theft Auto V's dispatch at byte 0x12570 was refused for
+    /// "a fill of 0 byte(s) at 0x0".
+    #[test]
+    fn an_empty_buffer_is_no_fill() {
+        let ranges = [(0, 0)];
+        let before = [BufferBefore::Unread(0)];
+        let after = [BufferAfter {
+            whole: Some(0),
+            ..BufferAfter::default()
+        }];
+        assert_eq!(
+            super::buffer_writes(&ranges, &before, &after),
+            Ok((super::GuestWrites::default(), Vec::new()))
+        );
+        assert_eq!(super::uniform_buffers(&ranges, (&before, &after)), []);
     }
 
     /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held

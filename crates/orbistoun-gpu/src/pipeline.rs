@@ -4008,7 +4008,9 @@ fn dispatch_descriptor_words(
             TableWord::Constant(value) => Ok(value),
         };
         let table = u64::from(half(source.table.low)?) | u64::from(half(source.table.high)?) << 32;
-        let at = table + u64::from(source.table_offset.unwrap_or(0));
+        let at = descriptor_at(source, table, memory).ok_or_else(|| {
+            "the buffer an image descriptor is read out of is not readable".to_owned()
+        })?;
         let bytes = memory
             .read(at, 32)
             .ok_or_else(|| format!("an image descriptor at {at:#x} is not readable"))?;
@@ -6834,7 +6836,11 @@ fn bind_textures(
                     // The table where the program formed its address: user-data words or
                     // constants.
                     let table = table_address(source.table, user);
-                    let at = table + u64::from(source.table_offset.unwrap_or(0));
+                    let Some(at) = descriptor_at(source, table, memory) else {
+                        *unbound += 1;
+                        note_unbound(first_unbound, unreadable_buffer(source));
+                        continue;
+                    };
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
                     let sampler_at = source
@@ -6843,17 +6849,14 @@ fn bind_textures(
                     // Named once a submission, as it is first read: not again for each draw.
                     let fresh =
                         !read.contains_key(&(at, source.slot, sampler_at, source.saturated));
-                    let plane = stencil.and_then(|plane| {
-                        stencil_texture(source, read_descriptor(at, memory)?, plane)
-                    });
-                    let bound = plane.or_else(|| {
-                        read.entry((at, source.slot, sampler_at, source.saturated))
-                            .or_insert_with(|| {
-                                table_texture(source, (at, sampler_at), memory, texels)
-                            })
-                            .clone()
-                    });
-                    let bound = bound.filter(|bound| shaped_for(bound, source));
+                    let bound = table_bound(
+                        source,
+                        (at, sampler_at),
+                        stencil,
+                        (memory, texels),
+                        &mut read,
+                    )
+                    .filter(|bound| shaped_for(bound, source));
                     named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
                     let bound = bound.or_else(|| unreached_texture(source, at, memory));
                     // A texture the module samples and nothing binds draws the backend's
@@ -6909,6 +6912,51 @@ fn unreached_texture(
     let base = decode_image_descriptor(words).base;
     let null = null_texture(source.slot, source.cube);
     (memory.read(base, 1).is_none() && shaped_for(&null, source)).then_some(null)
+}
+
+/// What a table slot binds, its descriptor at `at` and its sampler at `sampler_at`: the stencil
+/// plane where the descriptor names it (D927), or the texture read there - once a submission, kept
+/// in `read`.
+fn table_bound(
+    source: &TextureSource,
+    (at, sampler_at): (u64, Option<u64>),
+    stencil: Option<StencilPlane>,
+    (memory, texels): (&impl GuestMemory, &mut TexelCache),
+    read: &mut TexturesRead,
+) -> Option<RenderCommand> {
+    let plane =
+        stencil.and_then(|plane| stencil_texture(source, read_descriptor(at, memory)?, plane));
+    plane.or_else(|| {
+        read.entry((at, source.slot, sampler_at, source.saturated))
+            .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
+            .clone()
+    })
+}
+
+/// Why a slot whose descriptor is read out of a buffer binds nothing: the buffer's own
+/// descriptor, in the table, is not readable (D934).
+fn unreadable_buffer(source: &TextureSource) -> String {
+    format!(
+        "slot {}, through the buffer at table + {:#x}: its descriptor is not readable",
+        source.slot,
+        source.table_offset.unwrap_or(0)
+    )
+}
+
+/// Where `source`'s image descriptor lies, its table at `table`: at its offset in the table, or -
+/// read out of a buffer (D934) - at its offset in the buffer whose descriptor the table holds
+/// there. [`None`] where that buffer descriptor is not readable.
+fn descriptor_at(source: &TextureSource, table: u64, memory: &impl GuestMemory) -> Option<u64> {
+    let at = table + u64::from(source.table_offset.unwrap_or(0));
+    let Some(within) = source.buffer_offset else {
+        return Some(at);
+    };
+    let bytes = memory.read(at, 16)?;
+    let mut words = [0_u32; 4];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Some(crate::registers::decode_buffer_descriptor(words).base + u64::from(within))
 }
 
 /// A submission's stencil plane: where its tests read and write the stencil, and the depth target
@@ -10128,6 +10176,7 @@ mod tests {
                 compare: false,
                 saturated: [false; 2],
                 level_user_data: None,
+                buffer_offset: None,
                 layered: false,
             }],
         )]);
@@ -10212,6 +10261,7 @@ mod tests {
                     compare: false,
                     saturated: [false; 2],
                     level_user_data: None,
+                    buffer_offset: None,
                     layered: false,
                 }],
             )]);
@@ -10246,6 +10296,52 @@ mod tests {
         };
         assert_eq!(bind(0x6000), (0, Some(vec![0])), "every select SQ_SEL_0");
         assert_eq!(bind(0x6000 | 4), (1, None), "X reads the texel");
+    }
+
+    /// A descriptor read out of a buffer lies at the buffer's base, from the descriptor the table
+    /// holds at the source's offset, plus its offset in the buffer (D934); one read from the table
+    /// lies at the table's offset. Grand Theft Auto V's shadow maps are 0x150 into a constant
+    /// buffer whose descriptor is at table + 0xf0.
+    #[test]
+    fn a_descriptor_read_out_of_a_buffer_lies_in_the_buffer() {
+        use super::{TextureSource, descriptor_at};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut table = vec![0_u8; 0x100];
+        // A buffer at 0x7400_0012_3400: base low, then base high in the second word's low half
+        // beside a stride of 16.
+        for (word, bytes) in [0x0012_3400_u32, 0x0010_7400, 0x40, 0x5204]
+            .iter()
+            .zip(table[0xf0..0x100].chunks_exact_mut(4))
+        {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+        let memory = Memory(table);
+        let through = TextureSource {
+            table_offset: Some(0xf0),
+            buffer_offset: Some(0x150),
+            ..TextureSource::default()
+        };
+        assert_eq!(
+            descriptor_at(&through, 0x1000, &memory),
+            Some(0x7400_0012_3550)
+        );
+        let flat = TextureSource {
+            table_offset: Some(0x40),
+            ..TextureSource::default()
+        };
+        assert_eq!(descriptor_at(&flat, 0x1000, &memory), Some(0x1040));
+        let unreadable = TextureSource {
+            table_offset: Some(0x200),
+            buffer_offset: Some(0),
+            ..TextureSource::default()
+        };
+        assert_eq!(descriptor_at(&unreadable, 0x1000, &memory), None);
     }
 
     /// An `8_UINT` descriptor at the base the submission's stencil tests read binds that depth
@@ -10371,6 +10467,7 @@ mod tests {
                     compare: false,
                     saturated: [false; 2],
                     level_user_data: None,
+                    buffer_offset: None,
                     layered: false,
                 }],
             )]);
@@ -10447,6 +10544,7 @@ mod tests {
                 compare: false,
                 saturated: [false; 2],
                 level_user_data: None,
+                buffer_offset: None,
                 layered: false,
             }],
         )]);
@@ -10533,6 +10631,7 @@ mod tests {
                     compare: false,
                     saturated,
                     level_user_data: None,
+                    buffer_offset: None,
                     layered: false,
                 }],
             )]);
@@ -10847,6 +10946,7 @@ mod tests {
             compare: true,
             saturated: [false; 2],
             level_user_data: None,
+            buffer_offset: None,
             layered: false,
         };
         let bound = user_data_texture(&source, 8, &user, &Memory, &mut super::TexelCache::new());
@@ -10947,6 +11047,7 @@ mod tests {
                 compare: true,
                 saturated: [false; 2],
                 level_user_data: None,
+                buffer_offset: None,
                 layered: false,
             }],
         )]);
@@ -11032,6 +11133,7 @@ mod tests {
             compare: true,
             saturated: [false; 2],
             level_user_data: None,
+            buffer_offset: None,
             layered: false,
         };
         let bound = user_data_texture(
@@ -11975,6 +12077,7 @@ mod tests {
             volume: false,
             compare: false,
             level_user_data: None,
+            buffer_offset: None,
             layered: false,
         };
         assert!(super::shaped_for(command, &source(true)));
@@ -12516,6 +12619,7 @@ mod tests {
                     compare: false,
                     saturated: [true; 2],
                     level_user_data: None,
+                    buffer_offset: None,
                     layered: false,
                 }],
             )]);
@@ -13232,6 +13336,7 @@ mod tests {
             compare: false,
             saturated: [false; 2],
             level_user_data: None,
+            buffer_offset: None,
             layered: false,
         };
         let cube = TextureSource { cube: true, ..flat };
