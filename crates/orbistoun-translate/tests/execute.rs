@@ -334,6 +334,21 @@ fn a_bit_mask_into_m0_lands_in_m0() {
     assert_eq!(scalar(&registers, 5), 3 << 14, "got {registers:?}");
 }
 
+/// `s_bfm_b32` writing `vcc_lo` lands in the condition mask's low half: GTA V's lighting pixel
+/// shaders form a mask there with `s_bfm_b32 vcc_lo, 8, 23`, `0xff << 23`.
+#[test]
+fn a_bit_mask_into_vcc_lo_lands_in_the_mask() {
+    if !device_or_skip("a_bit_mask_into_vcc_lo_lands_in_the_mask") {
+        return;
+    }
+    let registers = run(&[
+        sop2("s_bfm_b32", VCC_CODE, 128 + 8, 128 + 23),
+        s_mov_code(5, VCC_CODE),
+        s_endpgm(),
+    ]);
+    assert_eq!(scalar(&registers, 5), 0x7f80_0000, "got {registers:?}");
+}
+
 /// `s_waitcnt` translates and changes no register.
 #[test]
 fn a_wait_instruction_translates_and_changes_nothing() {
@@ -1815,6 +1830,41 @@ fn an_sdwa_compare_writes_the_pair_its_word_names() {
         ];
         let (registers, _) = run_memory(Fidelity::Wavefront, &program);
         assert_eq!(vector(&registers, 2), expected, "s6 code {s6}");
+    }
+}
+
+/// Every integer compare in its SDWA form, signed and unsigned: Grand Theft Auto V's compute
+/// program at 0x400003e1c300 does `v_cmp_gt_u32_sdwa s[0:1], s3, v7` (words 0x7d880ef9
+/// 0x06068003). `s10` against each lane's index in `v0`, into `s[4:5]`; -1 is the largest unsigned
+/// value and the smallest signed one.
+#[test]
+fn every_sdwa_integer_compare_orders_as_its_name_says() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("every_sdwa_integer_compare_orders_as_its_name_says") {
+        return;
+    }
+    let minus_one = 193;
+    for (name, s10, expected) in [
+        ("v_cmp_gt_u32_e32", 128 + 5, 0x1f),
+        ("v_cmp_gt_u32_e32", minus_one, u32::MAX),
+        ("v_cmp_gt_i32_e32", 128 + 5, 0x1f),
+        ("v_cmp_gt_i32_e32", minus_one, 0),
+        ("v_cmp_ge_i32_e32", 128 + 5, 0x3f),
+        ("v_cmp_lt_i32_e32", 128 + 5, 0xffff_ffc0),
+        ("v_cmp_lt_i32_e32", minus_one, u32::MAX),
+        ("v_cmp_le_i32_e32", 128 + 5, 0xffff_ffe0),
+    ] {
+        let mut program = lane_index_into(0).to_vec();
+        program.push(sop1("s_mov_b32", 10, s10));
+        // src0 `s10` (bit 23 scalar), whole selects, the answer into `s[4:5]` (bit 15).
+        program.extend([head(name) | SDWA_MARKER, 0x0686_840a]);
+        program.push(s_endpgm());
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        assert_eq!(
+            scalar(&registers, 4),
+            expected,
+            "{name} with s10 code {s10}"
+        );
     }
 }
 
