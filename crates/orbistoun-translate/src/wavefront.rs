@@ -5092,6 +5092,10 @@ impl Model for Wavefront<'_> {
         Some(read)
     }
 
+    fn has_derivatives(&self) -> bool {
+        self.stage == Stage::Fragment
+    }
+
     fn atomic_local(&mut self, opcode: u16, word_index: Id, value: Id, lane: u32) -> Option<Id> {
         // Waves of one workgroup share the words (D892), and lanes of one wave each have an
         // invocation where the wave is wider than the host's subgroup (D760): either way another
@@ -5418,7 +5422,7 @@ impl Model for Wavefront<'_> {
     fn storage_image(
         &mut self,
         descriptor: u32,
-        (shape, level): (model::ImageShape, Option<u32>),
+        (shape, level, at): (model::ImageShape, Option<u32>, u32),
     ) -> Result<model::Stored, &'static str> {
         let volume = shape.volume();
         // The fragment stage only: the harness binds its storage image with fragment stage flags,
@@ -5481,7 +5485,10 @@ impl Model for Wavefront<'_> {
                 dimension: shape.dimension,
                 ..model::ImageShape::default()
             };
-            let mut source = self.new_texture_source(descriptor, (None, shape))?;
+            // The load that filled the descriptor registers for this store, where it is known:
+            // a program that reloads them names another image there (D690).
+            let reaching = self.descriptor_loads.2.get(&at).copied();
+            let mut source = self.new_texture_source(descriptor, (reaching, shape))?;
             source.slot = u32::try_from(slot).unwrap_or(u32::MAX);
             source.level_user_data = level;
             self.images.stored_sources[slot] = Some(source);
@@ -5551,8 +5558,8 @@ impl Model for Wavefront<'_> {
         // The fragment stage only: the harness binds its sampled image with fragment stage flags,
         // and the `vec4` type a sample answers with is declared by the colour output, which only a
         // fragment module has.
-        // A compute module fetches: with no derivatives, a sample's level is not defined there.
-        if self.stage == Stage::Mesh || (self.stage == Stage::Compute && sampler.is_some()) {
+        // A compute module samples only at a named level, which the model checks (D904).
+        if self.stage == Stage::Mesh {
             return Err(concat!(
                 "only a pixel shader samples a texture here, and a compute dispatch fetches one - ",
                 "a primitive shader's image and a compute sample are not bound"

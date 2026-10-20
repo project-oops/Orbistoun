@@ -64,6 +64,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample_l",
     "image_sample_d",
     "image_sample_lz",
+    "image_gather4_lz",
     "image_sample_lz_o",
     "image_sample_c_lz",
     "image_sample_c",
@@ -232,6 +233,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_nge_f32_e32",
     "v_cmp_nlg_f32_e32",
     "v_cmp_nle_f32_e32",
+    "v_cmp_class_f32_e32",
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_lt_i32_e32",
@@ -409,6 +411,10 @@ fn discards(operand: &Operand) -> bool {
 /// destination at or above it is not a register. A wide load such as `s_load_dwordx8` at s100 would
 /// otherwise write into the condition mask.
 pub const SCALAR_REGISTERS: u32 = 106;
+/// `vcc_lo`'s operand code, the first past the scalar registers.
+const VCC_LOW_CODE: u32 = 106;
+/// `vcc_hi`'s operand code.
+const VCC_HIGH_CODE: u32 = 107;
 
 /// Scalar registers an image descriptor occupies.
 ///
@@ -1010,7 +1016,7 @@ pub trait Model {
     fn storage_image(
         &mut self,
         _descriptor: u32,
-        (_shape, _level): (ImageShape, Option<u32>),
+        (_shape, _level, _at): (ImageShape, Option<u32>, u32),
     ) -> Result<Stored, &'static str> {
         Err(concat!(
             "this model has no storage image to write - one is bound by a graphics pipeline, ",
@@ -1218,6 +1224,13 @@ pub trait Model {
     fn merge_local(&mut self, word_index: Id, (keep, set): (Id, Id), lane: u32) -> bool {
         let _ = (word_index, keep, set, lane);
         false
+    }
+
+    /// Whether a sample here has derivatives to choose its level from: a pixel shader's quads. A
+    /// compute dispatch has none, so only a sample naming its level or gradients is translated
+    /// there (D904).
+    fn has_derivatives(&self) -> bool {
+        true
     }
 
     /// Applies the SPIR-V atomic `opcode` (`OpAtomicUMin`, `OpAtomicUMax`, `OpAtomicIAdd`) to one
@@ -3301,7 +3314,7 @@ fn memory_instruction<M: Model + ?Sized>(
         // A texture sample or fetch; the descriptor rules are D690's.
         "image_sample_lz" | "image_sample_lz_o" | "image_sample_c_lz" | "image_sample_c"
         | "image_sample" | "image_sample_l" | "image_sample_d" | "image_load"
-        | "image_load_mip" => image_sample(model, instruction, name),
+        | "image_load_mip" | "image_gather4_lz" => image_sample(model, instruction, name),
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
         "image_store" | "image_store_mip" => image_store(model, instruction, name),
@@ -3960,6 +3973,51 @@ fn carry_arithmetic<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
+    carry_arithmetic_of_parts(model, instruction, name, [(SDWA_DWORD, false); 2])
+}
+
+/// Where a carry goes: the lane mask it names, and whether only its high half - a wave of 32's
+/// whole carry, in `vcc_hi` - or `None` for `null`, which drops the carry as the guest asked.
+fn carry_destination<M: Model + ?Sized>(
+    model: &M,
+    instruction: &Instruction,
+    destination: &Operand,
+) -> Result<Option<(&'static str, bool)>, TranslateError> {
+    match destination {
+        _ if discards(destination) => Ok(None),
+        Operand::Named(name) => lane_mask_name(name)
+            .map(|mask| (mask, false))
+            .or_else(|| {
+                lane_mask_high_name(name)
+                    .filter(|_| model.lanes() <= 32)
+                    .map(|mask| (mask, true))
+            })
+            .map(Some)
+            .ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a carry destination this translator does not know",
+            }),
+        // An ordinary register pair as the carry destination is legal but needs a general
+        // per-register write the lane-mask methods do not offer, so it is refused rather than
+        // dropped.
+        _ => Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "carry arithmetic into an ordinary register pair is not ",
+                "translated yet; only the condition mask is"
+            ),
+        }),
+    }
+}
+
+/// [`carry_arithmetic`] on the part of each source `selects` names, as an SDWA form's word does
+/// ([`sdwa_select`]): the whole register, or a byte or word zero- or sign-extended.
+fn carry_arithmetic_of_parts<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    selects: [(u32, bool); 2],
+) -> Result<(), TranslateError> {
     // No absolute-value flags in this sub-encoding; a negate is meaningless on integer arithmetic
     // and is refused.
     let modifiers = Modifiers::read(instruction, true)?;
@@ -3984,27 +4042,7 @@ fn carry_arithmetic<M: Model + ?Sized>(
             detail: "carry arithmetic needs a vector destination and a scalar one",
         });
     };
-    // `null` means the carry is not wanted and is dropped, as the guest asked; an ordinary register
-    // pair is a place this translator cannot write, handled below.
-    let mask_name = match scalar_destination {
-        _ if discards(scalar_destination) => None,
-        Operand::Named(name) => Some(lane_mask_name(name).ok_or(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a carry destination this translator does not know",
-        })?),
-        // An ordinary register pair as the carry destination is legal but needs a general
-        // per-register write the lane-mask methods do not offer, so it is refused rather than
-        // dropped.
-        _ => {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: concat!(
-                    "carry arithmetic into an ordinary register pair is not ",
-                    "translated yet; only the condition mask is"
-                ),
-            });
-        }
-    };
+    let mask_name = carry_destination(model, instruction, scalar_destination)?;
 
     let carry_in = if is_add_with_carry_in(name) {
         Some(operands.get(4).ok_or(TranslateError::Unsupported {
@@ -4036,7 +4074,9 @@ fn carry_arithmetic<M: Model + ?Sized>(
     // is part of the answer.
     for lane in 0..model.modelled_lanes() {
         let left = model.read_source(instruction, first, lane)?;
+        let left = sdwa_select(model, instruction, left, selects[0])?;
         let right = model.read_source(instruction, second, lane)?;
+        let right = sdwa_select(model, instruction, right, selects[1])?;
 
         let (value, carried) = match name {
             // Unsigned add carried exactly when the wrapped sum is below an operand, which is exact
@@ -4073,8 +4113,10 @@ fn carry_arithmetic<M: Model + ?Sized>(
 
     // The carry, where the instruction asked for one. It falls out of the same arithmetic as the
     // sum, so only the write is conditional.
-    if let Some(mask_name) = mask_name {
-        model.write_lane_mask(mask_name, mask.0, mask.1)?;
+    match mask_name {
+        Some((mask_name, true)) => write_mask_high(model, mask_name, mask.0)?,
+        Some((mask_name, false)) => model.write_lane_mask(mask_name, mask.0, mask.1)?,
+        None => {}
     }
     model.count();
     Ok(())
@@ -5261,7 +5303,7 @@ fn compare<M: Model + ?Sized>(
         } else {
             (left, right)
         };
-        let condition = model.compare(opcode, left, right);
+        let condition = lane_compare(model, opcode, left, right);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     let halves = running_bits(model, halves)?;
@@ -5325,7 +5367,7 @@ fn compare_into_exec<M: Model + ?Sized>(
                 _ => value,
             };
         }
-        let condition = model.compare(opcode, sides[0], sides[1]);
+        let condition = lane_compare(model, opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     let low = model.binary(op::BITWISE_AND, halves.0, running_low);
@@ -5379,9 +5421,68 @@ fn compare_op(name: &str) -> Option<(u16, bool)> {
         ("u32", "le") => op::ULESS_THAN_EQUAL,
         ("u32", "gt") => op::UGREATER_THAN,
         ("u32", "ge") => op::UGREATER_THAN_EQUAL,
+        // A class test reads its value's bits and its mask's word as they are.
+        ("f32", "class") => return Some((CLASS_TEST, false)),
         _ => return None,
     };
     Some((opcode, kind == "f32"))
+}
+
+/// The pseudo-opcode [`compare_op`] gives `v_cmp_class_f32`, which no one SPIR-V comparison is:
+/// [`lane_compare`] answers it from the value's class (D911).
+const CLASS_TEST: u16 = u16::MAX;
+
+/// One lane's answer to a vector compare: `opcode` on its two sides, or for [`CLASS_TEST`] whether
+/// the first side's class is one the second side's mask names.
+fn lane_compare<M: Model + ?Sized>(model: &mut M, opcode: u16, left: Id, right: Id) -> Id {
+    if opcode == CLASS_TEST {
+        float_class_in(model, left, right)
+    } else {
+        model.compare(opcode, left, right)
+    }
+}
+
+/// Whether the float whose bits are `bits` is of a class `mask` names (AMD's published RDNA
+/// instruction set, `V_CMP_CLASS_F32`): bit 0 a signalling NaN, 1 a quiet one, 2 to 5 negative
+/// infinity, normal, denormal and zero, 6 to 9 positive zero, denormal, normal and infinity. The
+/// class's index is found from the bits, and the mask's bit there read.
+fn float_class_in<M: Model + ?Sized>(model: &mut M, bits: Id, mask: Id) -> Id {
+    let constant = |model: &mut M, value: u32| model.constant(value);
+    let magnitude_mask = constant(model, 0x7FFF_FFFF);
+    let magnitude = model.binary(op::BITWISE_AND, bits, magnitude_mask);
+    let infinity = constant(model, 0x7F80_0000);
+    let smallest_normal = constant(model, 0x0080_0000);
+    let zero = constant(model, 0);
+    // Positive zero, denormal, normal and infinity are 6 to 9; their negatives 5 down to 2.
+    let (six, seven, eight, nine, eleven) = (
+        constant(model, 6),
+        constant(model, 7),
+        constant(model, 8),
+        constant(model, 9),
+        constant(model, 11),
+    );
+    let is_infinity = model.compare(op::IEQUAL, magnitude, infinity);
+    let is_normal = model.compare(op::UGREATER_THAN_EQUAL, magnitude, smallest_normal);
+    let is_denormal = model.compare(op::INOT_EQUAL, magnitude, zero);
+    let finite = model.select(is_denormal, seven, six);
+    let finite = model.select(is_normal, eight, finite);
+    let positive = model.select(is_infinity, nine, finite);
+    let negated = model.binary(op::ISUB, eleven, positive);
+    let sign_bit = constant(model, 0x8000_0000);
+    let sign = model.binary(op::BITWISE_AND, bits, sign_bit);
+    let is_negative = model.compare(op::INOT_EQUAL, sign, zero);
+    let ordered = model.select(is_negative, negated, positive);
+    // A NaN is 0, signalling, or 1, quiet: the mantissa's top bit.
+    let is_nan = model.compare(op::UGREATER_THAN, magnitude, infinity);
+    let quiet_bit = constant(model, 0x0040_0000);
+    let quiet = model.binary(op::BITWISE_AND, bits, quiet_bit);
+    let is_quiet = model.compare(op::INOT_EQUAL, quiet, zero);
+    let one = constant(model, 1);
+    let nan = model.select(is_quiet, one, zero);
+    let class = model.select(is_nan, nan, ordered);
+    let named = model.binary(op::SHIFT_RIGHT_LOGICAL, mask, class);
+    let named = model.binary(op::BITWISE_AND, named, one);
+    model.compare(op::INOT_EQUAL, named, zero)
 }
 
 /// Translates a sixty-four-bit scalar logical operation.
@@ -7632,6 +7733,8 @@ pub const SDWA_CARRY: &[&str] = &["v_add_co_ci_u32_e32"];
 
 /// The short-form compares translated in their SDWA form over whole registers.
 pub const SDWA_COMPARE: &[&str] = &[
+    // A class test, its float source negated or made absolute as the word says (D911).
+    "v_cmp_class_f32_e32",
     // Integer compares, which take no negate or absolute value.
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
@@ -7704,8 +7807,11 @@ fn sdwa_compare<M: Model + ?Sized>(
     }
     let compare = into_exec.map(|rest| format!("v_cmp_{rest}"));
     let (opcode, floats) = op_for_compare(instruction, compare.as_deref().unwrap_or(name))?;
-    // Negate and absolute value are float modifiers; on an integer compare they are refused.
-    if !floats && word & (0b11 << 20 | 0b11 << 28) != 0 {
+    // Negate and absolute value are float modifiers; on an integer compare they are refused. A
+    // class test's first source is a float, its second a mask.
+    if (!floats && opcode != CLASS_TEST || opcode == CLASS_TEST && word & 0b11 << 28 != 0)
+        && word & (0b11 << 20 | 0b11 << 28) != 0
+    {
         return Err(refuse(
             "an SDWA integer compare negates or takes the absolute value of a source",
         ));
@@ -7740,21 +7846,30 @@ fn sdwa_compare<M: Model + ?Sized>(
             let value = apply_modifiers(model, value, modifiers, index);
             *side = if floats { model.as_float(value) } else { value };
         }
-        let condition = model.compare(opcode, sides[0], sides[1]);
+        let condition = lane_compare(model, opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     let halves = running_bits(model, halves)?;
     if bit(15) {
+        // The register the word names: a scalar, a pair in a wave of 64; or the condition mask,
+        // whole or a wave of 32's half of it.
         let register = word >> 8 & 0x7f;
         let words = if model.lanes() > 32 { 2 } else { 1 };
-        if register + words > SCALAR_REGISTERS {
-            return Err(refuse(
-                "an SDWA compare's destination is not a scalar register pair this translates",
-            ));
-        }
-        model.write_scalar(register, halves.0);
-        if words == 2 {
-            model.write_scalar(register + 1, halves.1);
+        match (register, words) {
+            (VCC_LOW_CODE, 2) => model.write_lane_mask(VCC_LOW_HALF, halves.0, halves.1)?,
+            (VCC_LOW_CODE, _) => write_mask_low(model, VCC_LOW_HALF, halves.0)?,
+            (VCC_HIGH_CODE, 1) => write_mask_high(model, VCC_LOW_HALF, halves.0)?,
+            _ if register + words <= SCALAR_REGISTERS => {
+                model.write_scalar(register, halves.0);
+                if words == 2 {
+                    model.write_scalar(register + 1, halves.1);
+                }
+            }
+            _ => {
+                return Err(refuse(
+                    "an SDWA compare's destination is not a scalar register or the condition mask",
+                ));
+            }
         }
     } else if into_exec.is_some() {
         let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
@@ -7768,10 +7883,10 @@ fn sdwa_compare<M: Model + ?Sized>(
     Ok(())
 }
 
-/// An `SDWA_CARRY` instruction in its SDWA form: over whole registers, with none of the word's
-/// float modifiers, it is its short form reading the first source the word names, and the second
-/// as a scalar register where bit 31 says (RDNA ISA, SDWA). A select of part of a register, a sign
-/// extension, a destination part, or a float modifier is refused.
+/// An `SDWA_CARRY` instruction in its SDWA form: with none of the word's float modifiers, it is its
+/// short form reading the first source the word names, and the second as a scalar register where
+/// bit 31 says (RDNA ISA, SDWA), each the part of its register the word selects. A destination
+/// part or a float modifier is refused.
 fn sdwa_carry<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7781,15 +7896,10 @@ fn sdwa_carry<M: Model + ?Sized>(
     // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
     const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
     let fields = SdwaFields::read(word);
-    let whole = fields
-        .select
-        .iter()
-        .all(|&select| select == (SDWA_DWORD, false))
-        && fields.dst_sel == SDWA_DWORD;
-    if !whole || word & FLOAT_MODIFIERS != 0 {
+    if fields.dst_sel != SDWA_DWORD || word & FLOAT_MODIFIERS != 0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "SDWA carry arithmetic over part of a register or with a float modifier",
+            detail: "SDWA carry arithmetic into part of a register or with a float modifier",
         });
     }
     // The short form's sources follow its two destinations: the marker, then the register field.
@@ -7803,7 +7913,7 @@ fn sdwa_carry<M: Model + ?Sized>(
     plain.operands[2] = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
     plain.operands[3] = sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?;
     plain.second_word = None;
-    carry_arithmetic(model, &plain, name)
+    carry_arithmetic_of_parts(model, &plain, name, fields.select)
 }
 
 /// A compare's answer with every lane that does not run zeroed, as the hardware writes it (AMD's
@@ -10080,7 +10190,7 @@ fn compare_long<M: Model + ?Sized>(
     name: &str,
 ) -> Result<(), TranslateError> {
     let (opcode, floats) = op_for_compare(instruction, name)?;
-    let modifiers = if floats {
+    let modifiers = if floats || opcode == CLASS_TEST {
         Modifiers::read(instruction, false)?
     } else {
         no_integer_modifiers(instruction, 2)?;
@@ -10099,7 +10209,7 @@ fn compare_long<M: Model + ?Sized>(
             let value = apply_modifiers(model, value, modifiers, source);
             *side = if floats { model.as_float(value) } else { value };
         }
-        let condition = model.compare(opcode, sides[0], sides[1]);
+        let condition = lane_compare(model, opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     match destination {
@@ -10796,7 +10906,17 @@ fn image_sample<M: Model + ?Sized>(
     } = image_access(instruction, name)?;
     let (offset, gradients) = (ahead == Ahead::Offsets, ahead == Ahead::Gradients);
     let (cube, compare, a16) = (shape.cube(), shape.compare, halves.address);
+    let gather = gather_component(name, (mask, shape), (offset, halves.data, destination))
+        .map_err(refuse)?;
+    let mask = if gather.is_some() { 0b1111 } else { mask };
 
+    let named_level =
+        name.ends_with("_lz") || name.ends_with("_lz_o") || levelled || gather.is_some();
+    if !fetches && !named_level && !gradients && !model.has_derivatives() {
+        return Err(refuse(
+            "a sample whose level derivatives choose, which a compute dispatch has none of (D904)",
+        ));
+    }
     let texture = model
         .sampled_image(descriptor, sampler, (instruction.offset, shape))
         .map_err(refuse)?;
@@ -10812,7 +10932,6 @@ fn image_sample<M: Model + ?Sized>(
     // Which sampling instruction this is: `lz` is level zero named, `_l` takes the level from a
     // register, and the plain form lets the implementation choose from derivatives, a different
     // SPIR-V instruction with different operands.
-    let named_level = name.ends_with("_lz") || name.ends_with("_lz_o") || levelled;
 
     let zero = model.constant(0);
     let constant_level = model.as_float(zero);
@@ -10852,29 +10971,14 @@ fn image_sample<M: Model + ?Sized>(
         // program on an unchecked aliasing assumption.
         let bound = builder.id();
         builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
-        let coordinate = if offset {
-            let offsets = address_element(model, instruction, (&addresses, a16), 0, lane)?;
-            offset_coordinate(model, &texture, bound, (coordinate, offsets))
-        } else {
-            coordinate
-        };
-        let texel = if gradients {
-            gradient_sample(
-                model,
-                instruction,
-                (&addresses, &texture),
-                (bound, coordinate),
-                lane,
-            )?
-        } else {
-            sample_or_fetch(
-                model,
-                &texture,
-                (bound, coordinate),
-                (fetches, named_level),
-                level,
-            )
-        };
+        let texel = lane_texel(
+            model,
+            instruction,
+            (&addresses, a16, &texture),
+            (bound, coordinate, level),
+            (ahead, fetches, named_level, gather),
+            lane,
+        )?;
 
         let texel = layer_in_bounds(
             model,
@@ -10895,6 +10999,65 @@ fn image_sample<M: Model + ?Sized>(
 
     model.count();
     Ok(())
+}
+
+/// One lane's texel from the bound image at `coordinate`: moved by the address's texel offsets where
+/// the form has them, then a gradient sample, or a fetch, gather or sample ([`sample_or_fetch`]).
+fn lane_texel<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, a16, texture): (&[u32; MAX_ADDRESS_REGISTERS], bool, &Texture),
+    (bound, coordinate, level): (Id, Id, Id),
+    (ahead, fetches, named_level, gather): (Ahead, bool, bool, Option<u32>),
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    let coordinate = if ahead == Ahead::Offsets {
+        let offsets = address_element(model, instruction, (addresses, a16), 0, lane)?;
+        offset_coordinate(model, texture, bound, (coordinate, offsets))
+    } else {
+        coordinate
+    };
+    if ahead == Ahead::Gradients {
+        return gradient_sample(
+            model,
+            instruction,
+            (addresses, texture),
+            (bound, coordinate),
+            lane,
+        );
+    }
+    Ok(sample_or_fetch(
+        model,
+        texture,
+        (bound, coordinate),
+        (fetches, named_level, gather),
+        level,
+    ))
+}
+
+/// The component a gather returns of four texels - the one its mask's one bit names - where `name`
+/// is one; all four registers are written (D913). Of a flat image only: more than one mask bit, other
+/// shapes, offsets, sixteen-bit data or a destination past the register file are refused.
+fn gather_component(
+    name: &str,
+    (mask, shape): (u32, ImageShape),
+    (offset, d16, destination): (bool, bool, u32),
+) -> Result<Option<u32>, &'static str> {
+    if !name.starts_with("image_gather4") {
+        return Ok(None);
+    }
+    if mask.count_ones() != 1
+        || shape.dimension != Dimension::Flat
+        || offset
+        || d16
+        || destination + IMAGE_COMPONENTS > VECTOR_REGISTERS
+    {
+        return Err(concat!(
+            "a gather of more than one component, of other than a flat image, with offsets or ",
+            "sixteen-bit data, or past the register file is not translated"
+        ));
+    }
+    Ok(Some(mask.trailing_zeros()))
 }
 
 /// `texel` as a fetch from `texture` answers it: as it is, or - fetched from a 2D array at the layer
@@ -11203,17 +11366,30 @@ fn gradient_sample<M: Model + ?Sized>(
 }
 
 /// The texel a sample or a fetch answers, from the bound image at `coordinate`: a fetch at an
-/// integer level, a sample at a named level, or one whose level the implementation chooses.
+/// integer level, a gather of one component, a sample at a named level, or one whose level the
+/// implementation chooses.
 fn sample_or_fetch<M: Model + ?Sized>(
     model: &mut M,
     texture: &Texture,
     (bound, coordinate): (Id, Id),
-    (fetches, named_level): (bool, bool),
+    (fetches, named_level, gather): (bool, bool, Option<u32>),
     level: Id,
 ) -> Id {
+    let component = gather.map(|component| model.constant(component));
     let builder = model.builder();
     let texel = builder.id();
-    if fetches {
+    if let Some(component) = component {
+        builder.function(
+            op::IMAGE_GATHER,
+            &[
+                texture.result.0,
+                texel.0,
+                bound.0,
+                coordinate.0,
+                component.0,
+            ],
+        );
+    } else if fetches {
         // A fetch takes an image, so the bound pair is unwrapped first. Vulkan requires a level
         // for a non-multisampled image: zero for `image_load`, and the guest's own for
         // `image_load_mip`, counted from the bound image's first level as the descriptor
@@ -11406,7 +11582,7 @@ fn image_store<M: Model + ?Sized>(
         None
     };
     let stored = model
-        .storage_image(descriptor, (shape, level))
+        .storage_image(descriptor, (shape, level, instruction.offset))
         .map_err(refuse)?;
     if stored.integer && d16 {
         return Err(refuse(

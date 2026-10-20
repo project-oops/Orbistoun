@@ -783,11 +783,22 @@ fn bound_buffer_store(name: &str) -> bool {
 
 /// Whether an instruction reaches an image a dispatch binds whole and writes back exactly, as it
 /// does its buffers (D746): such an access needs no window and keeps no buffer from being traced.
-/// A size query asks the image a load would read, and reads no memory at all.
+/// A size query asks the image a load would read, and reads no memory at all; a sample at a named
+/// level or by gradients reads the image a fetch would, through its sampler (D904), and so does a
+/// gather (D913).
 pub(crate) fn bound_image_access(name: &str) -> bool {
     matches!(
         name,
-        "image_load" | "image_load_mip" | "image_store" | "image_store_mip" | "image_get_resinfo"
+        "image_load"
+            | "image_load_mip"
+            | "image_store"
+            | "image_store_mip"
+            | "image_get_resinfo"
+            | "image_sample_lz"
+            | "image_sample_lz_o"
+            | "image_sample_l"
+            | "image_sample_d"
+            | "image_gather4_lz"
     )
 }
 

@@ -1857,6 +1857,34 @@ fn an_sdwa_carry_add_adds_the_sources_its_word_names() {
     }
 }
 
+/// The carry-in add in its SDWA form adds the part of a register its word selects: Grand Theft Auto
+/// V's compute program does `v_add_co_ci_u32_sdwa v2, vcc, 0, sext(v28.word0), vcc` (words
+/// 0x500438f9 0x0c860680), the high word of a 64-bit add. With `v4` 0x18000 its low word
+/// sign-extends to 0xffff8000, and lanes 0 to 3 carry one in.
+#[test]
+fn an_sdwa_carry_add_adds_the_part_its_word_selects() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_carry_add_adds_the_part_its_word_selects") {
+        return;
+    }
+    let add = head("v_add_co_ci_u32_e32") | 2 << 17 | 28 << 9 | SDWA_MARKER;
+    assert_eq!(add, 0x5004_38f9, "Grand Theft Auto V's first word");
+    let add = head("v_add_co_ci_u32_e32") | 2 << 17 | 4 << 9 | SDWA_MARKER;
+    let mut program = lane_index_into(0).to_vec();
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.push(v_mov_inline(3, 4));
+    program.push(v_cmp_f32("v_cmp_lt_u32_e32", vgpr_code(0), 3));
+    program.extend(v_mov_literal(4, 0x0001_8000));
+    program.extend([add, 0x0c86_0680]);
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane < 4 { 0xffff_8001 } else { 0xffff_8000 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+}
+
 /// A `cmpx` in its SDWA form narrows the execution mask by its answer, its word's absolute value on
 /// the second source: PPSA21564's pixel shader does `v_cmpx_lt_f32_sdwa v1, |v0|` (words
 /// 0x7c2200f9 0x26060001). 0.5 < |-1.0| keeps every lane writing; 2.0 < |-1.0| stops them all.
@@ -1902,6 +1930,139 @@ fn every_sdwa_float_compare_into_exec_narrows_the_lanes() {
         let (registers, _) = run_memory(Fidelity::Wavefront, &program);
         assert_eq!(vector(&registers, 2), expected, "{first} >= -(1.0)");
     }
+}
+
+/// A wave of 32's carry is one word, which the condition mask's high half holds as well as any
+/// register: Grand Theft Auto V's compute program does `v_add_co_u32 v43, vcc_hi, v27, v2` (words
+/// 0xd70f6b2b 0x0002051b). All ones plus one carries in every running lane.
+#[test]
+fn a_wave32_carry_lands_in_the_condition_mask_s_high_half() {
+    if !device_or_skip("a_wave32_carry_lands_in_the_condition_mask_s_high_half") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    assert_eq!(
+        head("v_add_co_u32") | 0x2b | 0x6b << 8,
+        0xd70f_6b2b,
+        "Grand Theft Auto V's first word"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, u32::MAX));
+    program.extend(v_mov_literal(1, 1));
+    program.push(sop1("s_mov_b32", 107, 128));
+    program.extend([head("v_add_co_u32") | 2 | 107 << 8, 256 | 257 << 9]);
+    program.push(sop1("s_mov_b32", 1, 107));
+    program.push(sop1("s_mov_b32", 2, 126));
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_ne!(scalar(&registers, 2), 0, "lanes run");
+    assert_eq!(
+        scalar(&registers, 1),
+        scalar(&registers, 2),
+        "every lane carried"
+    );
+}
+
+/// `v_cmp_class_f32` answers whether the first source's class is one the second's mask names (AMD's
+/// published RDNA instruction set, VOPC): bit 0 a signalling NaN, 1 a quiet one, 2 to 5 negative
+/// infinity, normal, denormal and zero, 6 to 9 positive zero, denormal, normal and infinity.
+#[test]
+fn a_class_compare_answers_by_the_value_s_class() {
+    if !device_or_skip("a_class_compare_answers_by_the_value_s_class") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    for (value, class, holds) in [
+        (1.0f32.to_bits(), 8, true),
+        (1.0f32.to_bits(), 3, false),
+        ((-1.0f32).to_bits(), 3, true),
+        (0x7f80_0000, 9, true),
+        (0xff80_0000, 2, true),
+        (0x7fc0_0000, 1, true),
+        (0x7fc0_0000, 0, false),
+        (0x7f80_0001, 0, true),
+        (0x8000_0000, 5, true),
+        (0, 6, true),
+        (0, 5, false),
+        (1, 7, true),
+        (0x8000_0001, 4, true),
+    ] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, value));
+        program.extend(v_mov_literal(1, 1 << class));
+        program.push(v_cmp_f32("v_cmp_class_f32_e32", vgpr_code(0), 1));
+        program.push(sop1("s_mov_b32", 1, 106));
+        program.push(sop1("s_mov_b32", 2, 126));
+        program.push(s_endpgm());
+        let registers = run_at_width(Width::Wave32, &program);
+        let expected = if holds { scalar(&registers, 2) } else { 0 };
+        assert_ne!(scalar(&registers, 2), 0, "lanes run");
+        assert_eq!(
+            scalar(&registers, 1),
+            expected,
+            "{value:#x} in class {class}"
+        );
+    }
+}
+
+/// A class compare in its SDWA form tests the modified source: Grand Theft Auto V's fragment shader
+/// does `v_cmp_class_f32_sdwa s[0:1], -|v0|, 56` (words 0x7d1170f9 0x86368000) - negative normal,
+/// denormal or zero, so whether `v0` is finite.
+#[test]
+fn an_sdwa_class_compare_tests_the_modified_source() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_class_compare_tests_the_modified_source") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let compare = head("v_cmp_class_f32_e32") | 184 << 9 | SDWA_MARKER;
+    assert_eq!(compare, 0x7d11_70f9, "Grand Theft Auto V's first word");
+    for (value, finite) in [
+        (2.0f32.to_bits(), true),
+        ((-3.0f32).to_bits(), true),
+        (0, true),
+        (0x7f80_0000, false),
+        (0x7fc0_0000, false),
+    ] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, value));
+        program.extend([compare, 0x8636_8000]);
+        program.push(sop1("s_mov_b32", 2, 126));
+        program.push(s_endpgm());
+        let registers = run_at_width(Width::Wave32, &program);
+        let expected = if finite { scalar(&registers, 2) } else { 0 };
+        assert_eq!(scalar(&registers, 0), expected, "{value:#x}");
+    }
+}
+
+/// A wave32 SDWA compare writes its answer to the one register its word names, a half of the
+/// condition mask included: Grand Theft Auto V's waterfall program does
+/// `v_cmp_le_u32_sdwa vcc_hi, s9, v0` (words 0x7d8600f9 0x0686eb09). 3 <= 5 in every lane leaves
+/// `vcc_hi` the running lanes.
+#[test]
+fn a_wave32_sdwa_compare_writes_the_condition_mask_half_its_word_names() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("a_wave32_sdwa_compare_writes_the_condition_mask_half_its_word_names") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let compare = head("v_cmp_le_u32_e32") | SDWA_MARKER;
+    assert_eq!(compare, 0x7d86_00f9, "Grand Theft Auto V's first word");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 5));
+    program.extend(v_mov_literal(1, 3));
+    // v1 <= v0, into vcc_hi (sd, code 107), whole registers.
+    program.extend([compare, 1 | 1 << 15 | 107 << 8 | 6 << 16 | 6 << 24]);
+    program.push(sop1("s_mov_b32", 1, 107));
+    program.push(sop1("s_mov_b32", 2, 126));
+    program.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_ne!(scalar(&registers, 2), 0, "lanes run");
+    assert_eq!(
+        scalar(&registers, 1),
+        scalar(&registers, 2),
+        "vcc_hi holds every running lane"
+    );
 }
 
 /// A float comparison compares floats, not their bits.

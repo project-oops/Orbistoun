@@ -190,6 +190,9 @@ pub mod op {
     /// What a guest's `image_load` is. Carries a literal operand mask like the explicit sampling
     /// form; Vulkan requires the level for a non-multisampled image, so it always carries one.
     pub const IMAGE_FETCH: u16 = 95;
+    /// One component of the four texels a sample at a position would filter (D913): a guest's
+    /// `image_gather4`. Result type, result, sampled image, coordinate, component.
+    pub const IMAGE_GATHER: u16 = 96;
     /// The image inside a sampled image, so it can be fetched from rather than sampled.
     ///
     /// A descriptor binds image and sampler together and a fetch takes the image alone, so reading
@@ -2697,6 +2700,15 @@ static SHAPES: &[ShapeEntry] = &[
         Some(1),
         &[0, 2, 3],
         Some(5),
+        RestStride::Every,
+    ),
+    // Result type, result, the sampled image, the coordinate and the component; no trailing image
+    // operands are emitted for it.
+    (
+        op::IMAGE_GATHER,
+        Some(1),
+        &[0, 2, 3, 4],
+        None,
         RestStride::Every,
     ),
     // Result type, result, and the sampled image the image is taken out of.
