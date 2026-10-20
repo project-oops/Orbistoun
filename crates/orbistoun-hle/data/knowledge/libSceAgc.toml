@@ -335,7 +335,7 @@ edge_cases = [
     "MEASURED: sceAgcDcbDrawIndexIndirectGetSize answered 20 bytes (5 dwords); the builder advanced the writer by 20 and wrote 20. All three agree.",
     'THREE-WAY DISAGREEMENT, now settled by measurement. prosper emits 4 dwords for this builder and its audit records the published PM4 DRAW_INDEX_INDIRECT packet as 6, marking its own row LOW confidence and "fewer - safe direction". Neither figure is 5. The library itself reserves 5, so the published packet size is not what this entry point emits and prosper 4 is under it. Emitting fewer than the library is safe for a guest that asks GetSize and wrong for one that inlines the size, so orbistoun encodes 5 - the measured number - rather than either borrowed one.',
     "MEASURED body for (dcb, offset, 0) (166-agc/dcb-draw-index-indirect, reports/report.txt, both passes): offset, 0x280, 0x280, 0 - Mesa's DRAW_INDEX_INDIRECT data_offset, base_vtx_loc, start_inst_loc and draw_initiator (DI_SRC_SEL_DMA).",
-    "The modifier is the third argument (Grand Theft Auto V's wrapper at image+0x1e0080 tests edx & 0xe0000000); any but zero is unmeasured and refused with nothing written (REQ-20261020T1315Z-di01).",
+    "The modifier is the third argument (Grand Theft Auto V's wrapper at image+0x1e0080 tests edx & 0xe0000000). MEASURED one bit at a time over 0x20000000, 0x40000000 and 0x80000000 (report-20261020-di01-census.log, di01-draw-indirect, REQ-20261020T1315Z-di01; row 6266 for bit 1): bit 0 makes base_vtx_loc 0x8c (SPI_SHADER_USER_DATA_GS_0), bit 1 start_indx_loc 0x8c with start_indx_enable (bit 28 of the third word), bit 2 start_inst_loc 0x8c, bit 8 sets initiator bit 5 (0x20); no other bit alone changed a byte, and only the low half is read. With every bit set the locations were 0xab, so further bits choose the register: a modifier naming a register with any bit outside 0xe000011f is refused with nothing written.",
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log."
@@ -348,7 +348,7 @@ edge_cases = [
     'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize): sceAgcDcbDrawIndexIndirectMultiGetSize answered a reservation of 64 bytes (16 dwords); the builder then advanced the writer by exactly 64 bytes and wrote exactly 64 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
     "MEASURED: the builder ran and advanced 64 bytes, matching the 64-byte reservation its GetSize answered.",
     "MEASURED body with every argument but the offset zero (166-agc/dcb-draw-index-indirect-multi-getsize, reports/report.txt): SET_UCONFIG_REG 0x342 = 0xc6000005, then DRAW_INDEX_INDIRECT_MULTI (0xc0083800) offset, 0x280, 0x280, 0x280, 0, 0, 0, 0, 0, then 0x342 = 0xc6000000 - Mesa's data_offset, base_vtx_loc, start_inst_loc, draw_index_loc, count, count_addr, stride, draw_initiator.",
-    "ARGUMENTS (dcb, offset, count_from_memory, max_count, count_address, stride, modifier), the modifier on the stack, as Grand Theft Auto V's wrapper at image+0x1e0040 passes them (count_from_memory = count_address != 0). The count, its address, the stride and COUNT_INDIRECT_ENABLE go where Mesa places them (si_state_draw.cpp:1626-1636), ASSUMED; any modifier but zero is refused with nothing written (REQ-20261020T1315Z-di01).",
+    "ARGUMENTS (dcb, offset, count_from_memory, max_count, count_address, stride, modifier), the modifier on the stack, as Grand Theft Auto V's wrapper at image+0x1e0040 passes them (count_from_memory = count_address != 0). MEASURED on every arm (report-20261020-di01-census.log, di01-draw-indirect-multi, REQ-20261020T1315Z-di01): Mesa's field order (si_state_draw.cpp:1626-1636), the count at word 8, its address at 9-10, the stride at 11, COUNT_INDIRECT_ENABLE (bit 30 of the draw-index word) for a count from memory. The modifier as for sceAgcDcbDrawIndexIndirect, and bit 3 makes draw_index_loc 0x8c with draw_index_enable (bit 31), bit 4 sets use_vgprs (bit 27).",
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize."
@@ -750,11 +750,30 @@ purpose = "Writes an indirect draw (arguments fetched from a buffer) into a draw
 edge_cases = [
     "MEASURED: 20 bytes, header 0xc0032400 - type 3, opcode 0x24 (DRAW_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-draw-indirect, sweep 20260915-203058).",
     "MEASURED body for (dcb, offset, 0) (166-agc/dcb-draw-indirect, reports/report.txt, both passes): offset, 0x280, 0x280, 2 - Mesa's DRAW_INDIRECT data_offset, start_vtx_loc, start_inst_loc and draw_initiator (DI_SRC_SEL_AUTO_INDEX). The offset is the second argument (0 then 0x1000).",
-    "The modifier is the third argument: Grand Theft Auto V's inline wrapper at image+0x1dfff0 calls the builder only when edx & 0xe0000000 is non-zero. No modifier has been measured, so any but zero is refused with nothing written (REQ-20261020T1315Z-di01).",
+    "The modifier is the third argument: Grand Theft Auto V's inline wrapper at image+0x1dfff0 calls the builder only when edx & 0xe0000000 is non-zero. MEASURED one bit at a time (report-20261020-di01-census.log, di01-draw-indirect, REQ-20261020T1315Z-di01): bit 0 makes start_vtx_loc 0x8c (SPI_SHADER_USER_DATA_GS_0), bit 2 start_inst_loc 0x8c, bit 8 sets initiator bit 5 (0x22); no other bit alone changed a byte. With every bit set the locations were 0xab, so further bits choose the register: a modifier naming a register with any bit outside 0xe000011f is refused with nothing written.",
 ]
 known_by = "measured"
 cites = "obSCEne 166-agc/dcb-draw-indirect, sweep 20260915-203058 (header 0xc0032400, extent 20)."
 found_on = "2026-09-15"
+
+[[function]]
+name = "sceAgcDcbDrawIndirectMulti"
+purpose = "Writes several auto-indexed draws whose arguments, and optionally whose count, are read from memory."
+edge_cases = [
+    "Bound by this name on the console (report-20261020-di01-census.log, bound 0x1); Grand Theft Auto V and Earthion import it as 0x60feac12826f4991.",
+    "MEASURED (report-20261020-di01-census.log, di01-draw-indirect-multi): 64 bytes, as sceAgcDcbDrawIndexIndirectMulti with the marker 0xc6000008, DRAW_INDIRECT_MULTI (0xc0082c00) and the initiator 2. Arguments and modifier bits as for sceAgcDcbDrawIndexIndirectMulti; bit 1 changes nothing, an auto-indexed draw having no first index.",
+]
+known_by = "measured"
+cites = "obSCEne report-20261020-di01-census.log, di01-draw-indirect-multi (REQ-20261020T1315Z-di01)."
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceAgcDcbDrawIndirectMultiGetSize"
+purpose = "Answers the bytes sceAgcDcbDrawIndirectMulti writes."
+edge_cases = ["MEASURED: 0x40 for every argument the census passed (report-20261020-di01-census.log, di01-draw-indirect-multi). Grand Theft Auto V and Earthion import it as 0xcfcb4f79b30a8aa5."]
+known_by = "measured"
+cites = "obSCEne report-20261020-di01-census.log, di01-draw-indirect-multi (REQ-20261020T1315Z-di01)."
+found_on = "2026-10-20"
 
 [[function]]
 name = "sceAgcDcbSetShRegistersIndirect"

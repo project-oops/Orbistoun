@@ -307,8 +307,8 @@ mod tests {
     use crate::packet::{
         self, PacketKind,
         build::{
-            command_header, draw_index_indirect, draw_indirect, measured, set_base_indirect_args,
-            set_index_base, set_index_count, set_index_size,
+            command_header, measured, set_base_indirect_args, set_index_base, set_index_count,
+            set_index_size,
         },
     };
     use crate::registers::{DrawCall, DrawKind, draw_calls};
@@ -344,6 +344,19 @@ mod tests {
 
     thread_local! {
         static SUBMITTED: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The single forms as a builder writes them with a modifier that names no register.
+    fn draw_indirect(offset: u32) -> [u32; 5] {
+        packet::build::draw_indirect(offset, unnamed())
+    }
+
+    fn draw_index_indirect(offset: u32) -> [u32; 5] {
+        packet::build::draw_index_indirect(offset, unnamed())
+    }
+
+    fn unnamed() -> packet::build::IndirectModifier {
+        packet::build::IndirectModifier::new(0x2000_0000).expect("measured")
     }
 
     impl CpMemory for Recording {

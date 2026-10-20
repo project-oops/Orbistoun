@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        98,
+        100,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"
@@ -662,13 +662,14 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     }
 }
 
-/// `sceAgcDcbDrawIndirect(dcb, offset, 0)` and `sceAgcDcbDrawIndexIndirect` write the packets
-/// obSCEne measured (`166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`, `reports/report.txt`):
-/// the offset, the locations `0x280`, and the initiator. A modifier, which no measurement has set
-/// yet, is refused by name with nothing written; so is the multi form called without the stack
-/// argument its modifier is.
+/// `sceAgcDcbDrawIndirect(dcb, offset, modifier)` and `sceAgcDcbDrawIndexIndirect` write the
+/// packets obSCEne measured (`report-20261020-di01-census.log`, `di01-draw-indirect`): the offset,
+/// the first vertex's location `0x8c` where modifier bit 0 names it and `0x280` where nothing
+/// does, and the initiator. A modifier naming a register with a bit whose effect is unmeasured is
+/// refused by name with nothing written; so is a multi form called without the stack argument its
+/// modifier is.
 #[test]
-fn the_indirect_draws_write_their_measured_bodies_and_refuse_a_modifier() {
+fn the_indirect_draws_write_their_measured_bodies_and_refuse_an_unmeasured_modifier() {
     for (name, initiator) in [
         ("sceAgcDcbDrawIndirect", 2u32),
         ("sceAgcDcbDrawIndexIndirect", 0),
@@ -690,19 +691,33 @@ fn the_indirect_draws_write_their_measured_bodies_and_refuse_a_modifier() {
             .collect();
         assert_eq!(w.bytes(), expected.as_slice(), "{name}");
 
-        args[2] = 0x2000_0000;
-        assert_eq!(call(name, args), UNIMPLEMENTED, "{name} with a modifier");
-        assert_eq!(w.bytes(), expected.as_slice(), "{name} wrote nothing more");
+        args[2] = 0x2000_0001;
+        let at = w.cursor();
+        assert_eq!(call(name, args), at, "{name} with a measured modifier");
+        let named: Vec<u8> = [header, 0x1000, 0x8c, 0x280, initiator]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        assert_eq!(&w.bytes()[20..], named.as_slice(), "{name}");
+
+        args[2] = 0xffff_ffff;
+        assert_eq!(
+            call(name, args),
+            UNIMPLEMENTED,
+            "{name} with the 0xab field"
+        );
+        assert_eq!(w.written(), 40, "{name} wrote nothing more");
     }
-    let w = Writer::new(0x400);
-    let mut args = [0u64; GUEST_ARG_REGISTERS];
-    args[0] = w.handle();
-    assert_eq!(
-        call("sceAgcDcbDrawIndexIndirectMulti", args),
-        UNIMPLEMENTED,
-        "no stack argument"
-    );
-    assert_eq!(w.written(), 0);
+    for name in [
+        "sceAgcDcbDrawIndexIndirectMulti",
+        "sceAgcDcbDrawIndirectMulti",
+    ] {
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        assert_eq!(call(name, args), UNIMPLEMENTED, "{name}: no stack argument");
+        assert_eq!(w.written(), 0);
+    }
 }
 
 /// `sceAgcCbDispatch(cb, x, y, z, modifier, ..)` writes the dispatch hardware wrote for the same

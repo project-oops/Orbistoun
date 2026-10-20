@@ -648,76 +648,164 @@ pub mod build {
         ]
     }
 
-    /// The location word a zero modifier writes into an indirect draw for each shader register it
-    /// names: the first vertex's, the first instance's and the draw index's alike
-    /// (`166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`, `dcb-draw-index-indirect-multi-getsize`,
-    /// `reports/report.txt`). As an offset from `SPI_SHADER_USER_DATA` space it names `0xBA00`,
-    /// which no register of this generation occupies.
-    pub const UNMODIFIED_LOCATION: u32 = 0x280;
+    /// The location word an indirect draw holds for a shader register its modifier does not name
+    /// (`166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`, `reports/report.txt`;
+    /// `report-20261020-di01-census.log`). As an offset from `SPI_SHADER_USER_DATA` space it names
+    /// `0xBA00`, which no register of this generation occupies.
+    pub const UNNAMED_LOCATION: u32 = 0x280;
 
-    /// The `DRAW_INDIRECT` `sceAgcDcbDrawIndirect(dcb, offset, 0)` writes: header `0xc0032400`, the
-    /// offset past the base [`set_base_indirect_args`] set, the first vertex's and first instance's
-    /// locations, and the initiator `2` (`DI_SRC_SEL_AUTO_INDEX`). Measured
-    /// (`166-agc/dcb-draw-indirect`, `reports/report.txt`): `0xc0032400 0 0x280 0x280 2`, and
-    /// `0x1000` for the offset on the second pass. Only the zero modifier is measured.
+    /// The location a modifier's enable bit names: `0x8c`, `SPI_SHADER_USER_DATA_GS_0`
+    /// (`gfx10.json` `0xb230`), the first user-data register of the stage this generation's vertex
+    /// programs run as (`report-20261020-di01-census.log`, each enable bit alone).
+    pub const GS_USER_DATA_LOCATION: u32 = 0x8c;
+
+    /// What an indirect draw's modifier asks for, as obSCEne measured every bit of it one at a time
+    /// over the three high bits a real modifier carries (`report-20261020-di01-census.log`,
+    /// `di01-draw-indirect` and `di01-draw-indirect-multi`, REQ-20261020T1315Z-di01): bit 0 names
+    /// the first vertex's register, bit 1 the first index's (and sets `start_indx_enable`), bit 2
+    /// the first instance's, bit 3 the draw index's (and sets `draw_index_enable`), bit 4 sets
+    /// `use_vgprs`, and bit 8 sets the initiator's bit 5. No other bit alone changed a byte.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct IndirectModifier(u32);
+
+    impl IndirectModifier {
+        /// The bits whose effect is measured.
+        const MEASURED: u32 = 0xe000_011f;
+        /// The bits that name a register.
+        const NAMES: u32 = 0xf;
+
+        /// The modifier's low half, all the builders read (the census's `0xdeadbeef_20000000`
+        /// wrote what `0x20000000` did). `None` when it names a register and carries a bit besides
+        /// the measured ones: with every bit set the locations were `0xab`, so other bits choose
+        /// the register, and which is unmeasured.
+        #[must_use]
+        pub const fn new(modifier: u64) -> Option<Self> {
+            let modifier = modifier as u32;
+            if modifier & Self::NAMES != 0 && modifier & !Self::MEASURED != 0 {
+                return None;
+            }
+            Some(Self(modifier))
+        }
+
+        const fn names(self, bit: u32) -> bool {
+            self.0 & bit != 0
+        }
+
+        const fn location(self, bit: u32) -> u32 {
+            if self.names(bit) {
+                GS_USER_DATA_LOCATION
+            } else {
+                UNNAMED_LOCATION
+            }
+        }
+
+        /// The first vertex's location word, with an indexed draw's first-index location in its
+        /// high half.
+        const fn vertex_word(self, indexed: bool) -> u32 {
+            let index = if indexed && self.names(2) {
+                GS_USER_DATA_LOCATION << 16
+            } else {
+                0
+            };
+            self.location(1) | index
+        }
+
+        /// `start_indx_enable`, bit 28, where an indexed draw names the first index's register.
+        const fn start_index_enable(self, indexed: bool) -> u32 {
+            if indexed && self.names(2) { 1 << 28 } else { 0 }
+        }
+
+        /// The initiator for a draw whose own is `source`: the modifier's bit 8 as its bit 5.
+        const fn initiator(self, source: u32) -> u32 {
+            source | (self.0 >> 3 & 0x20)
+        }
+    }
+
+    /// The `DRAW_INDIRECT` `sceAgcDcbDrawIndirect(dcb, offset, modifier)` writes: header
+    /// `0xc0032400`, the offset past the base [`set_base_indirect_args`] set, the first vertex's
+    /// and first instance's locations, and the initiator `2` (`DI_SRC_SEL_AUTO_INDEX`), in Mesa's
+    /// field order. Measured (`166-agc/dcb-draw-indirect`, `reports/report.txt`;
+    /// `report-20261020-di01-census.log`): `0xc0032400 0x40 0x280 0x280 2` for every modifier that
+    /// names no register.
     #[must_use]
-    pub fn draw_indirect(offset: u32) -> [u32; 5] {
+    pub fn draw_indirect(offset: u32, modifier: IndirectModifier) -> [u32; 5] {
         [
             command_header(measured::DRAW_INDIRECT, 4),
             offset,
-            UNMODIFIED_LOCATION,
-            UNMODIFIED_LOCATION,
-            2,
+            modifier.vertex_word(false),
+            modifier.location(4),
+            modifier.initiator(2),
         ]
     }
 
-    /// The `DRAW_INDEX_INDIRECT` `sceAgcDcbDrawIndexIndirect(dcb, offset, 0)` writes: as
-    /// [`draw_indirect`], with the initiator `0` (`DI_SRC_SEL_DMA`). Measured
-    /// (`166-agc/dcb-draw-index-indirect`): `0xc0032500 0 0x280 0x280 0`, and `0x1000` for the
-    /// offset on the second pass.
+    /// The `DRAW_INDEX_INDIRECT` `sceAgcDcbDrawIndexIndirect(dcb, offset, modifier)` writes: as
+    /// [`draw_indirect`], the first index's location in the high half of the first vertex's word
+    /// with `start_indx_enable` beside the first instance's, and the initiator `0`
+    /// (`DI_SRC_SEL_DMA`). Measured as [`draw_indirect`] (`166-agc/dcb-draw-index-indirect`).
     #[must_use]
-    pub fn draw_index_indirect(offset: u32) -> [u32; 5] {
+    pub fn draw_index_indirect(offset: u32, modifier: IndirectModifier) -> [u32; 5] {
         [
             command_header(measured::DRAW_INDEX_INDIRECT, 4),
             offset,
-            UNMODIFIED_LOCATION,
-            UNMODIFIED_LOCATION,
-            0,
+            modifier.vertex_word(true),
+            modifier.location(4) | modifier.start_index_enable(true),
+            modifier.initiator(0),
         ]
     }
 
-    /// The `DRAW_INDEX_INDIRECT_MULTI` `sceAgcDcbDrawIndexIndirectMulti(dcb, offset,
-    /// count_from_memory, max_count, count_address, stride, 0)` writes, 64 bytes: the marker
-    /// register (`0x342`, `SQ_THREAD_TRACE_USERDATA_2` in `gfx103.json`) set to
-    /// `0xc6000005`, the packet, and the marker set to `0xc6000000`. Measured with every argument
-    /// but the offset zero (`166-agc/dcb-draw-index-indirect-multi-getsize`, `reports/report.txt`):
-    /// `c0017904 342 c6000005 | c0083800 offset 280 280 280 0 0 0 0 0 | c0017904 342 c6000000`. The
-    /// arguments are in the order Grand Theft Auto V's wrapper at image+0x1e0040 passes them; the
-    /// count, its address, the stride and `COUNT_INDIRECT_ENABLE` (bit 30 of the draw-index word) go
-    /// where Mesa places them (`si_state_draw.cpp:1626-1636`), which is assumed until measured
-    /// (REQ-20261020T1315Z-di01).
+    /// A multi indirect draw's arguments, in the order Grand Theft Auto V's wrappers at
+    /// image+0x1e0000 and +0x1e0040 pass them after the command buffer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MultiDraw {
+        /// Bytes past the base [`set_base_indirect_args`] set.
+        pub offset: u32,
+        /// Whether the count is read from `count_address` (`COUNT_INDIRECT_ENABLE`).
+        pub count_from_memory: bool,
+        /// The most draws, or the count when it is not read from memory.
+        pub max_count: u32,
+        /// Where the count is read from.
+        pub count_address: u64,
+        /// Bytes between argument records.
+        pub stride: u32,
+    }
+
+    /// The 64 bytes `sceAgcDcbDrawIndexIndirectMulti(dcb, offset, count_from_memory, max_count,
+    /// count_address, stride, modifier)` (`indexed`) or `sceAgcDcbDrawIndirectMulti` writes: the
+    /// marker register (`0x342`, `SQ_THREAD_TRACE_USERDATA_2` in `gfx103.json`) set to `0xc6000005`
+    /// or `0xc6000008`, the packet in Mesa's field order (`si_state_draw.cpp:1626-1636`), and the
+    /// marker set to `0xc6000000`. Measured on every arm of `di01-draw-indirect-multi`
+    /// (`report-20261020-di01-census.log`): the count at word 8, its address at 9-10, the stride at
+    /// 11, and `COUNT_INDIRECT_ENABLE` (bit 30 of the draw-index word) for a count from memory.
     #[must_use]
-    pub fn draw_index_indirect_multi(
-        offset: u32,
-        count_from_memory: bool,
-        max_count: u32,
-        count_address: u64,
-        stride: u32,
+    pub fn draw_indirect_multi(
+        indexed: bool,
+        draw: MultiDraw,
+        modifier: IndirectModifier,
     ) -> [u32; 16] {
+        let (begin, opcode, source) = if indexed {
+            (0xc600_0005, crate::cp::DRAW_INDEX_INDIRECT_MULTI, 0)
+        } else {
+            (0xc600_0008, crate::cp::DRAW_INDIRECT_MULTI, 2)
+        };
+        let draw_index = modifier.location(8)
+            | if modifier.names(8) { 1 << 31 } else { 0 }
+            | u32::from(draw.count_from_memory) << 30
+            | modifier.start_index_enable(indexed)
+            | if modifier.names(0x10) { 1 << 27 } else { 0 };
         [
             MARKER_HEADER,
             MARKER_REGISTER,
-            0xc600_0005,
-            command_header(crate::cp::DRAW_INDEX_INDIRECT_MULTI, 9),
-            offset,
-            UNMODIFIED_LOCATION,
-            UNMODIFIED_LOCATION,
-            UNMODIFIED_LOCATION | (u32::from(count_from_memory) << 30),
-            max_count,
-            count_address as u32,
-            (count_address >> 32) as u32,
-            stride,
-            0,
+            begin,
+            command_header(opcode, 9),
+            draw.offset,
+            modifier.vertex_word(indexed),
+            modifier.location(4),
+            draw_index,
+            draw.max_count,
+            draw.count_address as u32,
+            (draw.count_address >> 32) as u32,
+            draw.stride,
+            modifier.initiator(source),
             MARKER_HEADER,
             MARKER_REGISTER,
             0xc600_0000,
@@ -883,40 +971,172 @@ mod tests {
         ((body_dwords - 1) << 16) | u32::from(base)
     }
 
-    /// The indirect-draw builders write the bytes obSCEne measured with a zero modifier
-    /// (`reports/report.txt` `166-agc/dcb-draw-indirect`, `dcb-draw-index-indirect`,
-    /// `dcb-draw-index-indirect-multi-getsize`), both passes: the offset `0` then `0x1000`.
+    /// The little-endian words of a hex dump as obSCEne's `OBS|bytes` rows print them.
+    fn le(hex: &str) -> Vec<u32> {
+        (0..hex.len())
+            .step_by(8)
+            .map(|at| {
+                u32::from_str_radix(&hex[at..at + 8], 16)
+                    .expect("hex")
+                    .swap_bytes()
+            })
+            .collect()
+    }
+
+    /// The single indirect-draw builders write the bytes the console wrote for each modifier
+    /// (`report-20261020-di01-census.log` `di01-draw-indirect`, offset `0x40`, e.g. row 6266), and
+    /// with a zero modifier at offset `0x1000` (`reports/report.txt`, `166-agc/dcb-draw-indirect`
+    /// pass 1). A modifier that names a register and carries an unmeasured bit is refused.
     #[test]
     fn the_indirect_draw_builders_write_what_was_measured() {
-        use super::build::{draw_index_indirect, draw_index_indirect_multi, draw_indirect};
-        let le = |hex: &str| -> Vec<u32> {
-            (0..hex.len())
-                .step_by(8)
-                .map(|at| {
-                    u32::from_str_radix(&hex[at..at + 8], 16)
-                        .expect("hex")
-                        .swap_bytes()
-                })
-                .collect()
+        use super::build::{IndirectModifier, draw_index_indirect, draw_indirect};
+        let modifier = |m| IndirectModifier::new(m).expect("measured");
+        for (m, plain, indexed) in [
+            (
+                0x2000_0000,
+                "002403c0400000008002000080020000 02000000",
+                "002503c0400000008002000080020000 00000000",
+            ),
+            (
+                0x2000_0001,
+                "002403c0400000008c00000080020000 02000000",
+                "002503c0400000008c00000080020000 00000000",
+            ),
+            (
+                0x2000_0002,
+                "002403c0400000008002000080020000 02000000",
+                "002503c04000000080028c0080020010 00000000",
+            ),
+            (
+                0x4000_0004,
+                "002403c040000000800200008c000000 02000000",
+                "002503c040000000800200008c000000 00000000",
+            ),
+            (
+                0x8000_0100,
+                "002403c0400000008002000080020000 22000000",
+                "002503c0400000008002000080020000 20000000",
+            ),
+            (
+                0xdead_beef_2000_0000,
+                "002403c0400000008002000080020000 02000000",
+                "002503c0400000008002000080020000 00000000",
+            ),
+        ] {
+            assert_eq!(
+                draw_indirect(0x40, modifier(m)).to_vec(),
+                le(&plain.replace(' ', "")),
+                "{m:#x}"
+            );
+            assert_eq!(
+                draw_index_indirect(0x40, modifier(m)).to_vec(),
+                le(&indexed.replace(' ', "")),
+                "{m:#x}"
+            );
+        }
+        assert_eq!(
+            draw_indirect(0x1000, modifier(0)).to_vec(),
+            le("002403c000100000800200008002000002000000")
+        );
+        assert_eq!(IndirectModifier::new(0xffff_ffff), None, "the 0xab field");
+        assert!(
+            IndirectModifier::new(0x2000_0040).is_some(),
+            "names nothing"
+        );
+    }
+
+    /// The multi builders write the console's 64 bytes (`report-20261020-di01-census.log`
+    /// `di01-draw-indirect-multi`): arms a and b, and arm b under the modifiers that changed it.
+    #[test]
+    fn the_multi_indirect_draw_builders_write_what_was_measured() {
+        use super::build::{IndirectModifier, MultiDraw, draw_indirect_multi};
+        let arm = |count_from_memory, count_address| MultiDraw {
+            offset: 0x40,
+            count_from_memory,
+            max_count: 4,
+            count_address,
+            stride: 20,
         };
-        for (offset, written) in [(0, "00000000"), (0x1000, "00100000")] {
+        let b = arm(true, 0x1_2345_6780);
+        let modifier = |m| IndirectModifier::new(m).expect("measured");
+        for (indexed, draw, m, hex) in [
+            (
+                true,
+                arm(false, 0),
+                0x2000_0000,
+                [
+                    "047901c042030000050000c6003808c040000000800200008002000080020000",
+                    "0400000000000000000000001400000000000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                true,
+                b,
+                0x2000_0000,
+                [
+                    "047901c042030000050000c6003808c040000000800200008002000080020040",
+                    "0400000080674523010000001400000000000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                true,
+                b,
+                0x2000_0002,
+                [
+                    "047901c042030000050000c6003808c04000000080028c008002000080020050",
+                    "0400000080674523010000001400000000000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                true,
+                b,
+                0x2000_0008,
+                [
+                    "047901c042030000050000c6003808c04000000080020000800200008c0000c0",
+                    "0400000080674523010000001400000000000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                true,
+                b,
+                0x2000_0010,
+                [
+                    "047901c042030000050000c6003808c040000000800200008002000080020048",
+                    "0400000080674523010000001400000000000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                false,
+                b,
+                0x4000_0001,
+                [
+                    "047901c042030000080000c6002c08c0400000008c0000008002000080020040",
+                    "0400000080674523010000001400000002000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                false,
+                b,
+                0x4000_0002,
+                [
+                    "047901c042030000080000c6002c08c040000000800200008002000080020040",
+                    "0400000080674523010000001400000002000000047901c042030000000000c6",
+                ],
+            ),
+            (
+                false,
+                b,
+                0x4000_0100,
+                [
+                    "047901c042030000080000c6002c08c040000000800200008002000080020040",
+                    "0400000080674523010000001400000022000000047901c042030000000000c6",
+                ],
+            ),
+        ] {
             assert_eq!(
-                draw_indirect(offset).to_vec(),
-                le(&format!("002403c0{written}800200008002000002000000"))
-            );
-            assert_eq!(
-                draw_index_indirect(offset).to_vec(),
-                le(&format!("002503c0{written}800200008002000000000000"))
-            );
-            assert_eq!(
-                draw_index_indirect_multi(offset, false, 0, 0, 0).to_vec(),
-                le(&format!(
-                    concat!(
-                        "047901c042030000050000c6003808c0{}800200008002000080020000",
-                        "0000000000000000000000000000000000000000047901c042030000000000c6",
-                    ),
-                    written
-                ))
+                draw_indirect_multi(indexed, draw, modifier(m)).to_vec(),
+                le(&hex.concat()),
+                "{indexed} {m:#x}"
             );
         }
     }

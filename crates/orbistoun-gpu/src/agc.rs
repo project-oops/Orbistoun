@@ -86,6 +86,10 @@ guest_module! {
         "sceAgcDcbDrawIndexIndirect" => 6,
         "sceAgcDcbDrawIndexIndirectMulti" => 6,
         "sceAgcDcbDrawIndirect" => 6,
+        // Bound by these names on the console (`report-20261020-di01-census.log`); Grand Theft Auto
+        // V and Earthion import them as `0x60feac12826f4991` and `0xcfcb4f79b30a8aa5`.
+        "sceAgcDcbDrawIndirectMulti" => 6,
+        "sceAgcDcbDrawIndirectMultiGetSize" => 6,
         "sceAgcDcbEventWrite" => 6,
         "sceAgcDcbPopMarker" => 6,
         "sceAgcDcbPushMarker" => 6,
@@ -1410,53 +1414,77 @@ fn acb_dispatch_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// `sceAgcDcbDrawIndirect(dcb, offset, modifier)`: 20 bytes ([`packet::build::draw_indirect`]).
-/// Only the zero modifier is measured; any other is refused by name until it is
-/// (REQ-20261020T1315Z-di01), since the shader-register locations it writes come from it.
+/// A modifier whose register choice is unmeasured ([`packet::build::IndirectModifier::new`]) is
+/// refused by name with nothing written.
 fn dcb_draw_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[2] as u32 != 0 {
-        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    match packet::build::IndirectModifier::new(args[2]) {
+        Some(modifier) => dcb_append(
+            args[0],
+            &packet::build::draw_indirect(args[1] as u32, modifier),
+        ),
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
-    dcb_append(args[0], &packet::build::draw_indirect(args[1] as u32))
 }
 
 /// `sceAgcDcbDrawIndexIndirect(dcb, offset, modifier)`: 20 bytes
-/// ([`packet::build::draw_index_indirect`]), any modifier but zero refused as for
-/// [`dcb_draw_indirect`].
+/// ([`packet::build::draw_index_indirect`]), refused as [`dcb_draw_indirect`] is.
 fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[2] as u32 != 0 {
-        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    match packet::build::IndirectModifier::new(args[2]) {
+        Some(modifier) => dcb_append(
+            args[0],
+            &packet::build::draw_index_indirect(args[1] as u32, modifier),
+        ),
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
-    dcb_append(args[0], &packet::build::draw_index_indirect(args[1] as u32))
 }
 
-/// `sceAgcDcbDrawIndexIndirectMulti(dcb, offset, count_from_memory, max_count, count_address,
-/// stride, modifier)`: 64 bytes ([`packet::build::draw_index_indirect_multi`]). The modifier is the
-/// first stack argument, as Grand Theft Auto V's wrapper at image+0x1e0040 pushes it; any but zero
-/// is refused as for [`dcb_draw_indirect`], and so is a call reaching here without it.
-fn dcb_draw_index_indirect_multi(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// `sceAgcDcbDraw{Index,}IndirectMulti(dcb, offset, count_from_memory, max_count, count_address,
+/// stride, modifier)`: 64 bytes ([`packet::build::draw_indirect_multi`]). The modifier is the first
+/// stack argument, as Grand Theft Auto V's wrappers at image+0x1e0000 and +0x1e0040 push it; a call
+/// reaching here without it, or with a modifier refused as [`dcb_draw_indirect`] refuses one, is
+/// refused.
+fn draw_indirect_multi(indexed: bool, args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let refused = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     let spilled = orbistoun_thunk::stack_arguments();
-    if spilled == 0 {
+    if spilled == 0 || args[2] > 1 {
         return refused;
     }
     // SAFETY: the dispatch published `spilled` as the first stack argument's address on the
     // calling thread's live stack.
-    let Some(modifier) = (unsafe { guest::read_u64(spilled) }) else {
+    let Some(modifier) =
+        (unsafe { guest::read_u64(spilled) }).and_then(packet::build::IndirectModifier::new)
+    else {
         return refused;
     };
-    if modifier as u32 != 0 || args[2] > 1 {
-        return refused;
-    }
+    let draw = packet::build::MultiDraw {
+        offset: args[1] as u32,
+        count_from_memory: args[2] == 1,
+        max_count: args[3] as u32,
+        count_address: args[4],
+        stride: args[5] as u32,
+    };
     dcb_append(
         args[0],
-        &packet::build::draw_index_indirect_multi(
-            args[1] as u32,
-            args[2] == 1,
-            args[3] as u32,
-            args[4],
-            args[5] as u32,
-        ),
+        &packet::build::draw_indirect_multi(indexed, draw, modifier),
     )
+}
+
+/// `sceAgcDcbDrawIndexIndirectMulti`: [`draw_indirect_multi`], indexed.
+fn dcb_draw_index_indirect_multi(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    draw_indirect_multi(true, args)
+}
+
+/// `sceAgcDcbDrawIndirectMulti`: [`draw_indirect_multi`], auto-indexed. The name is bound on the
+/// console by its link (`report-20261020-di01-census.log`, `bound 0x1`); Grand Theft Auto V imports
+/// it as `0x60feac12826f4991`.
+fn dcb_draw_indirect_multi(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    draw_indirect_multi(false, args)
+}
+
+/// `sceAgcDcbDrawIndirectMultiGetSize`: `0x40` bytes for every argument the census passed
+/// (`report-20261020-di01-census.log`, `di01-draw-indirect-multi`), what the builder writes.
+fn dcb_draw_indirect_multi_get_size(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0x40
 }
 
 /// `sceAgcDcbSetShRegistersIndirect(dcb, table, count)`. Header `0xc0036300`, 20 bytes, the body
@@ -2023,6 +2051,11 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     (
         "sceAgcDcbDrawIndexIndirectMulti",
         dcb_draw_index_indirect_multi,
+    ),
+    ("sceAgcDcbDrawIndirectMulti", dcb_draw_indirect_multi),
+    (
+        "sceAgcDcbDrawIndirectMultiGetSize",
+        dcb_draw_indirect_multi_get_size,
     ),
     (
         "sceAgcDcbSetShRegistersIndirect",
