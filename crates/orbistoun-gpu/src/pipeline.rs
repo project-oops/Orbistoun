@@ -7017,7 +7017,9 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     match bound {
         // A depth target is sampled flat, compared or not (D816, D817), or as a cube of six drawn
         // slices (D918).
-        RenderCommand::BindDepthTexture { cube, .. } => *cube == source.cube && !source.volume,
+        RenderCommand::BindDepthTexture { cube, layered, .. } => {
+            *cube == source.cube && *layered == source.layered && !source.volume
+        }
         // A flat image's or a cube's texels, or a linear depth texture's depths compared.
         RenderCommand::BindTexture {
             faces, encoding, ..
@@ -7517,16 +7519,19 @@ fn depth_texture_from(
     // whose view starts at the first layer reads that layer: the target drawn at slice zero (D920,
     // assumed).
     let kind = words[3] >> 28;
-    let cube = source.cube
-        && kind == IMAGE_TYPE_CUBE
+    let whole_cube = kind == IMAGE_TYPE_CUBE
         && words[4] & (DEPTH_FIELD | BASE_ARRAY_FIELD) == ONE_CUBE_LAST_LAYER;
+    let cube = source.cube && whole_cube;
+    // A load from a cube names its face as a layer: an image instruction reads a cube as a 2D
+    // array (Mesa `ac_shader_util.c:589-591`), so the six slices bind as one (D922).
+    let layered = source.layered && !source.cube && whole_cube;
     let first_layer = !source.cube
         && !source.layered
         && matches!(kind, IMAGE_TYPE_CUBE | IMAGE_TYPE_2D_ARRAY)
         && words[4] & BASE_ARRAY_FIELD == 0;
     if !depth_tiled
         || !DEPTH_IMAGE_FORMATS.contains(&descriptor.format)
-        || !(kind == IMAGE_TYPE_2D || cube || first_layer)
+        || !(kind == IMAGE_TYPE_2D || cube || layered || first_layer)
     {
         return None;
     }
@@ -7544,6 +7549,7 @@ fn depth_texture_from(
         sampling,
         compare,
         cube,
+        layered,
     })
 }
 
@@ -10441,6 +10447,7 @@ mod tests {
                 sampling: crate::registers::TextureSampling::CLAMPED_POINT,
                 compare: false,
                 cube: true,
+                layered: false,
             })
         );
         // A flat sample of the same cube reads its first face: the target drawn at slice zero
@@ -10454,6 +10461,24 @@ mod tests {
                 sampling: crate::registers::TextureSampling::CLAMPED_POINT,
                 compare: false,
                 cube: false,
+                layered: false,
+            })
+        );
+        // A load of it by face reads the six slices as an array's layers (D922): Grand Theft Auto
+        // V's lighting loads one face with `image_load ... dim:2D_ARRAY`.
+        let layered = TextureSource {
+            layered: true,
+            ..TextureSource::default()
+        };
+        assert_eq!(
+            super::depth_texture_from(cube, &layered, None),
+            Some(RenderCommand::BindDepthTexture {
+                slot: 0,
+                target: crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8),
+                sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+                compare: false,
+                cube: false,
+                layered: true,
             })
         );
         cube[4] = 11;

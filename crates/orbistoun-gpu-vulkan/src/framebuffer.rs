@@ -2434,7 +2434,7 @@ fn kept_key(words: &TextureWords<'_>, sampling: orbistoun_gpu::TextureSampling) 
         words.width,
         words.height,
         words.encoding,
-        (words.faces, words.slices, words.levels),
+        (words.faces, words.slices, words.layered, words.levels),
         sampling,
     )
         .hash(&mut hasher);
@@ -2661,6 +2661,9 @@ pub(crate) struct TextureWords<'a> {
     /// A volume's slices, one after another, each `width` x `height`: sampled as one
     /// three-dimensional image (D823). `None` for a flat image or a cube.
     pub(crate) slices: Option<u32>,
+    /// Whether the faces are an array's layers, seen through an array view rather than a cube's
+    /// (D922).
+    pub(crate) layered: bool,
     /// The mip levels the words hold, finest first, each its own extent (D833).
     pub(crate) levels: u32,
     /// A hash of the words, taken once at the bind, by which a resident draw's texture is kept
@@ -2703,6 +2706,7 @@ impl<'a> TextureWords<'a> {
             encoding: orbistoun_gpu::TextureEncoding::Rgba8,
             faces: 1,
             slices: None,
+            layered: false,
             levels: 1,
             hash: None,
         }
@@ -2969,7 +2973,8 @@ fn create_texture(
     // A cube is six layers of one image, made cube-compatible so a cube view can see them.
     let faces = texture.faces.max(1);
     let depth = texture.slices.unwrap_or(1);
-    let (flags, view_type, image_type) = texture_kind(faces, texture.slices.is_some());
+    let (flags, view_type, image_type) =
+        texture_kind(faces, texture.slices.is_some(), texture.layered);
     let info = vk::ImageCreateInfo::default()
         .flags(flags)
         .image_type(image_type)
@@ -3100,12 +3105,20 @@ fn staging_buffer(
 
 /// How a texture of `faces` layers is made and seen: a cube is six layers of one image made
 /// cube-compatible so a cube view can see them (D811), a volume one three-dimensional image of its
-/// slices (D823), and anything else one flat image.
+/// slices (D823), layers loaded by index one image seen as an array (D922), and anything else one
+/// flat image.
 fn texture_kind(
     faces: u32,
     volume: bool,
+    layered: bool,
 ) -> (vk::ImageCreateFlags, vk::ImageViewType, vk::ImageType) {
-    if faces == CUBE_FACES {
+    if layered {
+        (
+            vk::ImageCreateFlags::empty(),
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            vk::ImageType::TYPE_2D,
+        )
+    } else if faces == CUBE_FACES {
         (
             vk::ImageCreateFlags::CUBE_COMPATIBLE,
             vk::ImageViewType::CUBE,
@@ -7201,6 +7214,7 @@ pub fn draw_with_bc3_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Bc3,
                 faces: 1,
                 slices: None,
+                layered: false,
                 levels: 1,
                 hash: None,
             }),
@@ -7236,6 +7250,7 @@ pub fn draw_with_cube_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Rgba8,
                 faces: CUBE_FACES,
                 slices: None,
+                layered: false,
                 levels: 1,
                 hash: None,
             }),
@@ -7271,6 +7286,7 @@ pub fn draw_with_volume_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Rgba8,
                 faces: 1,
                 slices: Some(depth),
+                layered: false,
                 levels: 1,
                 hash: None,
             }),
@@ -7343,6 +7359,21 @@ pub fn draw_with_windows(
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
 
+    /// Six faces are seen through a cube view, unless they are loaded by index: then an array
+    /// view, over the same flat image (D922).
+    #[test]
+    fn six_faces_loaded_by_index_are_an_array() {
+        use ash::vk;
+        // `ash` gives these types no `Debug`, so each is compared and the answer asserted.
+        let (flags, view, image) = super::texture_kind(super::CUBE_FACES, false, true);
+        assert!(view == vk::ImageViewType::TYPE_2D_ARRAY, "an array view");
+        assert!(flags == vk::ImageCreateFlags::empty() && image == vk::ImageType::TYPE_2D);
+        let cube = super::texture_kind(super::CUBE_FACES, false, false).1;
+        assert!(cube == vk::ImageViewType::CUBE, "a cube view");
+        let flat = super::texture_kind(1, false, false).1;
+        assert!(flat == vk::ImageViewType::TYPE_2D, "a flat view");
+    }
+
     /// A flat image of one word a texel stages its guest's whole mip chain in its own format (D833):
     /// packed floats and `2_10_10_10` as eight-bit texels do. Grand Theft Auto V binds a chained
     /// `10_11_11_FLOAT` texture.
@@ -7366,6 +7397,7 @@ mod tests {
                 encoding,
                 faces: 1,
                 slices: None,
+                layered: false,
                 levels: 3,
                 hash: None,
             };

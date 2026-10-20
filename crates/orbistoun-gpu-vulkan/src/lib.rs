@@ -177,6 +177,8 @@ struct BoundTexture {
     faces: u32,
     /// A volume's slices, or `None` for a flat image or a cube (D823).
     slices: Option<u32>,
+    /// Whether its faces are an array's layers (D922).
+    layered: bool,
     /// Its mip levels, finest first (D833).
     levels: u32,
 }
@@ -208,6 +210,7 @@ impl BoundTexture {
             encoding: self.encoding,
             faces: self.faces,
             slices: self.slices,
+            layered: self.layered,
             levels: self.levels,
             hash: Some(self.hash),
         }
@@ -619,6 +622,7 @@ impl VulkanBackend {
             sampling,
             faces,
             slices: None,
+            layered: false,
             levels,
         });
         let Some(texture) = usize::try_from(slot)
@@ -672,6 +676,7 @@ impl VulkanBackend {
             sampling,
             faces: 1,
             slices: Some(depth),
+            layered: false,
             levels: 1,
         });
         let Some(texture) = usize::try_from(slot)
@@ -750,12 +755,18 @@ impl VulkanBackend {
             sampling,
             compare,
             cube,
+            layered,
         } = command
         else {
             return Ok(());
         };
-        // A cube's faces are the six slices drawn as their own targets, one after another (D918).
-        let faces = if cube { framebuffer::CUBE_FACES } else { 1 };
+        // A cube's faces are the six slices drawn as their own targets, one after another (D918),
+        // and so are a cube's layers loaded by face (D922).
+        let faces = if cube || layered {
+            framebuffer::CUBE_FACES
+        } else {
+            1
+        };
         let mut read = Vec::new();
         let mut hashes = 0_u64;
         let mut extent = None;
@@ -805,6 +816,7 @@ impl VulkanBackend {
             sampling,
             faces,
             slices: None,
+            layered,
             levels: 1,
         });
         Ok(())

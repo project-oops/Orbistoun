@@ -280,6 +280,9 @@ pub enum RenderCommand {
         /// Whether it is a cube: its six faces the targets drawn at slices zero to five of
         /// `target`'s surface ([`crate::depth::depth_target_slice_of`], D909, D918).
         cube: bool,
+        /// Whether the same six slices are read as the layers of an array, where the module loads
+        /// a face by its index (D922).
+        layered: bool,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).
