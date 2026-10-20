@@ -5426,12 +5426,12 @@ fn a_buffer_access_past_the_record_count_reads_zero_and_drops_its_write() {
     assert_eq!(memory[4], 0, "and the write that went with it never landed");
 }
 
-/// With no stride, `OOB_SELECT` 1 checks the offset against the record count in bytes as the raw
-/// mode does (D915, assumed): Grand Theft Auto V's compute program reads a 32-byte table of its own
-/// constant data through `0x10005004`. Byte sixteen of eight reads zero and drops its write.
+/// With no stride, `OOB_SELECT` 1 checks the index alone, which is always record zero, so nothing
+/// bounds the offset (D917, measured: obSCEne gt22 read data at bytes 32, 40 and 256 of a 32-byte
+/// descriptor and landed a store at byte 40). Byte sixteen of eight is written and read back.
 #[test]
-fn a_strideless_structured_access_past_its_records_reads_zero() {
-    if !device_or_skip("a_strideless_structured_access_past_its_records_reads_zero") {
+fn a_strideless_structured_access_past_its_records_is_not_bounded() {
+    if !device_or_skip("a_strideless_structured_access_past_its_records_is_not_bounded") {
         return;
     }
     let mut program = [
@@ -5446,12 +5446,12 @@ fn a_strideless_structured_access_past_its_records_reads_zero() {
     program.extend(mubuf("buffer_load_dword", 3, 0, 4, INLINE_0, OFFEN));
     program.push(s_endpgm());
     let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(memory[4], BITS_2, "the store past the records landed");
     assert_eq!(
         vector(&registers, 3),
-        0,
-        "a read past the records returns zero"
+        BITS_2,
+        "and the read past them read it"
     );
-    assert_eq!(memory[4], 0, "and the write that went with it never landed");
 }
 
 /// The last buffer access inside the record count is not suppressed.

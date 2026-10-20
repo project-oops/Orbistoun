@@ -277,6 +277,9 @@ pub enum RenderCommand {
         sampling: crate::registers::TextureSampling,
         /// Whether the draws compare a reference against it, or read its depth.
         compare: bool,
+        /// Whether it is a cube: its six faces the targets drawn at slices zero to five of
+        /// `target`'s surface ([`crate::depth::depth_target_slice_of`], D909, D918).
+        cube: bool,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).

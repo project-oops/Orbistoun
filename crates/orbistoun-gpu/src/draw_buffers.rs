@@ -83,8 +83,9 @@ pub fn descriptor_extent_to(
         // Structured with offset: the index below the record count and the offset below the stride.
         0 if records == 0 || stride == 0 => 0,
         0 => last_record + reach.unwrap_or(u64::MAX).min(stride - 1 + 16),
-        // Structured: the index below the record count, the offset unchecked - with no stride, the
-        // offset and the access's width within the record count in bytes, as raw (D915, assumed).
+        // Structured: the index below the record count, the offset unchecked. With no stride nothing
+        // is bounded on hardware (D917, measured), and the host binds the record count in bytes: the
+        // table the descriptor names, which the program is taken to read within (assumed).
         1 if records == 0 => 0,
         1 if stride == 0 => reach.map_or(records, |reach| reach.min(records)),
         1 => last_record + reach.ok_or(UNBOUNDED)?,
@@ -1883,8 +1884,9 @@ mod tests {
         );
     }
 
-    /// With no stride, `OOB_SELECT` 1 bounds a register offset by the record count in bytes, as the
-    /// raw mode does (D915, assumed): Grand Theft Auto V's 32-byte table of its own constant data.
+    /// With no stride, `OOB_SELECT` 1 bounds nothing on hardware, and the host binds the record count
+    /// in bytes as the table the program reads (D917): Grand Theft Auto V's 32-byte table of its own
+    /// constant data.
     #[test]
     fn a_strideless_structured_read_reaches_its_records() {
         assert_eq!(

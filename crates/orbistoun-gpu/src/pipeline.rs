@@ -6821,9 +6821,10 @@ fn bind_textures(
                         named.note(bound.as_ref(), || user_words(user, first));
                         if bound.is_none() {
                             *unbound += 1;
-                            first_unbound.get_or_insert_with(|| {
-                                unbound_in_user_data(source, (first, user), memory, texels)
-                            });
+                            note_unbound(
+                                first_unbound,
+                                unbound_in_user_data(source, (first, user), memory, texels),
+                            );
                         }
                         out.extend(bound);
                         continue;
@@ -6851,9 +6852,10 @@ fn bind_textures(
                     // refused rather than drawn wrong.
                     if bound.is_none() {
                         *unbound += 1;
-                        first_unbound.get_or_insert_with(|| {
-                            unbound_in_table(source, (at, sampler_at), memory, texels)
-                        });
+                        note_unbound(
+                            first_unbound,
+                            unbound_in_table(source, (at, sampler_at), memory, texels),
+                        );
                     }
                     out.extend(bound);
                 }
@@ -6864,6 +6866,25 @@ fn bind_textures(
     }
     *commands = out;
     named.0
+}
+
+/// The most unbound slots a refusal describes.
+const UNBOUND_DESCRIBED: usize = 8;
+
+/// Adds an unbound slot's description to those a refusal lists, each distinct one once, up to
+/// [`UNBOUND_DESCRIBED`]: a draw's every unbound texture is solved at once, not one a run.
+fn note_unbound(described: &mut Option<String>, description: String) {
+    match described {
+        None => *described = Some(description),
+        Some(listed)
+            if !listed.contains(&description)
+                && listed.matches("; slot ").count() + 1 < UNBOUND_DESCRIBED =>
+        {
+            listed.push_str("; ");
+            listed.push_str(&description);
+        }
+        Some(_) => {}
+    }
 }
 
 /// The textures [`bind_textures`] bound, each by its descriptor, once.
@@ -6977,8 +6998,9 @@ fn table_texture(
 /// would not be the image its module declares.
 fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     match bound {
-        // A depth target is sampled flat, compared or not (D816, D817).
-        RenderCommand::BindDepthTexture { .. } => !source.cube && !source.volume,
+        // A depth target is sampled flat, compared or not (D816, D817), or as a cube of six drawn
+        // slices (D918).
+        RenderCommand::BindDepthTexture { cube, .. } => *cube == source.cube && !source.volume,
         // A flat image's or a cube's texels, or a linear depth texture's depths compared.
         RenderCommand::BindTexture {
             faces, encoding, ..
@@ -7447,9 +7469,13 @@ fn depth_texture_from(
     let (slot, saturated, compare) = (source.slot, source.saturated, source.compare);
     let descriptor = decode_image_descriptor(words);
     let depth_tiled = is_depth_swizzle(descriptor.tiling);
+    // A cube's six faces are the surface's first six slices, each drawn as its own target (D909,
+    // D918); its view names them all and starts at the first.
+    let cube = words[3] >> 28 == IMAGE_TYPE_CUBE
+        && words[4] & (DEPTH_FIELD | BASE_ARRAY_FIELD) == ONE_CUBE_LAST_LAYER;
     if !depth_tiled
         || !DEPTH_IMAGE_FORMATS.contains(&descriptor.format)
-        || words[3] >> 28 != IMAGE_TYPE_2D
+        || !(words[3] >> 28 == IMAGE_TYPE_2D || cube)
     {
         return None;
     }
@@ -7458,7 +7484,7 @@ fn depth_texture_from(
         None if !compare => crate::registers::TextureSampling::CLAMPED_POINT,
         None => return None,
     };
-    if sampling.saturated() != saturated || source.cube {
+    if sampling.saturated() != saturated || source.cube != cube {
         return None;
     }
     Some(RenderCommand::BindDepthTexture {
@@ -7466,6 +7492,7 @@ fn depth_texture_from(
         target: crate::depth::depth_target_id_at(descriptor.base),
         sampling,
         compare,
+        cube,
     })
 }
 
@@ -10193,6 +10220,44 @@ mod tests {
         );
     }
 
+    /// A cube of a depth format in a depth swizzle - its six faces drawn as six slices of one surface
+    /// (D909) - samples those six held targets as its faces (D918): Grand Theft Auto V's point-light
+    /// shadows, 16_UNORM cubes in `64KB_Z_X`. A cube view of other than six faces is not one.
+    #[test]
+    fn a_depth_cube_samples_its_six_drawn_slices() {
+        use super::{RenderCommand, TextureSource};
+        let mut cube: [u32; 8] = [
+            0x00d6_e500,
+            0xc070_0074,
+            0x003f_c03f,
+            0xb180_0204,
+            5,
+            0x0070_0000,
+            0,
+            0,
+        ];
+        let source = TextureSource {
+            cube: true,
+            ..TextureSource::default()
+        };
+        assert_eq!(
+            super::depth_texture_from(cube, &source, None),
+            Some(RenderCommand::BindDepthTexture {
+                slot: 0,
+                target: crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8),
+                sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+                compare: false,
+                cube: true,
+            })
+        );
+        cube[4] = 11;
+        assert_eq!(
+            super::depth_texture_from(cube, &source, None),
+            None,
+            "two cubes"
+        );
+    }
+
     /// A dispatch that fetches a depth target names it, to be read from the host's depths rather
     /// than from guest memory, which no draw writes it to (D894): Grand Theft Auto V's scene compute
     /// program reads its `32_FLOAT` depth in `64KB_Z_X` so. The same image in `16_UNORM`, which the
@@ -10325,6 +10390,7 @@ mod tests {
                     target,
                     sampling,
                     compare,
+                    ..
                 } => Some((*slot, *target, sampling.depth_compare, *compare)),
                 _ => None,
             });

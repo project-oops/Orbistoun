@@ -745,15 +745,39 @@ impl VulkanBackend {
             target,
             sampling,
             compare,
+            cube,
         } = command
         else {
             return Ok(());
         };
-        let Some((texels, hash, (width, height))) = self.depth_texels(target)? else {
-            self.refused += 1;
-            return Err(BackendError::Unsupported {
-                command: "BindDepthTexture of a depth target this backend never drew",
-            });
+        // A cube's faces are the six slices drawn as their own targets, one after another (D918).
+        let faces = if cube { framebuffer::CUBE_FACES } else { 1 };
+        let mut read = Vec::new();
+        let mut hashes = 0_u64;
+        let mut extent = None;
+        for face in 0..faces {
+            let face_target = orbistoun_gpu::depth::depth_target_slice_of(target, face);
+            let Some((texels, hash, face_extent)) = self.depth_texels(face_target)? else {
+                self.refused += 1;
+                return Err(BackendError::Unsupported {
+                    command: "BindDepthTexture of a depth target this backend never drew",
+                });
+            };
+            if extent.is_some_and(|extent| extent != face_extent) {
+                self.refused += 1;
+                return Err(BackendError::Unsupported {
+                    command: "BindDepthTexture of a cube whose faces were drawn at other extents",
+                });
+            }
+            extent = Some(face_extent);
+            hashes = hashes.rotate_left(13) ^ hash;
+            read.push(texels);
+        }
+        let ((width, height), hash) = (extent.unwrap_or((1, 1)), hashes);
+        let texels: std::sync::Arc<[u32]> = if let [only] = read.as_slice() {
+            std::sync::Arc::clone(only)
+        } else {
+            read.iter().flat_map(|face| face.iter().copied()).collect()
         };
         let Some(texture) = usize::try_from(slot)
             .ok()
@@ -775,7 +799,7 @@ impl VulkanBackend {
             },
             hash,
             sampling,
-            faces: 1,
+            faces,
             slices: None,
             levels: 1,
         });

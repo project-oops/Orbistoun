@@ -568,7 +568,7 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
             report
                 .first_unbound_texture
                 .as_ref()
-                .map_or_else(String::new, |first| format!(" - the first: {first}"))
+                .map_or_else(String::new, |first| format!(" - {first}"))
         ));
     }
     if report.unshaded_draws > 0 {
@@ -1771,6 +1771,8 @@ fn buffer_writes_into<'a>(
         // Taken a run at a time, never collected (see `BufferAfter::stored_words`).
         type Runs<'a> = Box<dyn Iterator<Item = (usize, &'a [u32])> + 'a>;
         let (runs, whole): (Runs<'_>, bool) = match before {
+            // A buffer no wave reaches was bound with nothing, and has nothing to write (D900).
+            BufferBefore::Words(words) if words.is_empty() => continue,
             BufferBefore::Words(words) => {
                 if after.words.len() != words.len() {
                     return Err("the device answered a buffer of another size".to_owned());

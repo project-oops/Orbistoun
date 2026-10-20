@@ -1,6 +1,6 @@
 # D915 - A strideless structured buffer bounds its offset as raw
 
-**Status:** decided
+**Status:** superseded by D917 (hardware bounds nothing; obSCEne gt22)
 **Date:** 2026-10-20
 
 A buffer descriptor with `OOB_SELECT` 1 (structured: index checked, offset not) and a stride of

@@ -156,6 +156,13 @@ pub const fn depth_target_id(target: &DepthTarget) -> ResourceId {
     depth_target_slice_id(target.base, target.slice)
 }
 
+/// The id of slice `slice` of the surface whose slice zero is `first`
+/// ([`depth_target_id_at`]): a depth cube's faces (D918).
+#[must_use]
+pub const fn depth_target_slice_of(first: ResourceId, slice: u32) -> ResourceId {
+    ResourceId(first.0 | (slice as u64 & 0x1FFF) << 40)
+}
+
 /// [`depth_target_id`] of slice `slice` of the depth surface at `base`: what a texture descriptor
 /// viewing that one layer of the same address samples (D909).
 #[must_use]

@@ -6814,12 +6814,10 @@ fn buffer_out_of_bounds<M: Model + ?Sized>(
     let mut out = reach_past;
     let is_two = model.compare(op::IEQUAL, mode, two);
     out = select_bool(model, is_two, no_records, out);
-    // Mode one checks the index alone; with no stride, the offset as mode three does (D915,
-    // assumed: GCN's stride-zero rule).
+    // Mode one checks the index alone, with no stride as well, where every access is record zero
+    // and nothing is bounded (D917, measured: obSCEne gt22).
     let is_one = model.compare(op::IEQUAL, mode, one);
-    let no_stride = model.compare(op::IEQUAL, resource.stride, zero);
-    let index_or_raw = select_bool(model, no_stride, reach_past, index_past);
-    out = select_bool(model, is_one, index_or_raw, out);
+    out = select_bool(model, is_one, index_past, out);
     let is_zero = model.compare(op::IEQUAL, mode, zero);
     out = select_bool(model, is_zero, structured, out);
 
