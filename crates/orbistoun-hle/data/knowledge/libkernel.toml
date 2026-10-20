@@ -2779,6 +2779,76 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-10-17"
 
 [[function]]
+name = "sceKernelMemoryPoolExpand"
+arity = 5
+purpose = "(search_start, search_end, len, align, phys_out): sets direct memory aside for the memory pool and writes where it starts."
+returns = "status"
+edge_cases = [
+    "4 MiB at 64 KiB alignment answers 0 and writes a 64 KiB-aligned physical address (0x2a20000 on the console).",
+    "Length 0 answers 0, alignment 0 answers 0, and a null phys_out answers 0. Length 0x1000 and alignment 0x3000 answer EINVAL (0x80020016).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-7389, report-20261014-batch1.log, 020-memory/memory-pool-prt-aperture rows expand*"
+partial = "Lengths are taken as whole 64 KiB granules and an alignment below a granule refuses by name, until REQ-20261020T1310Z-km01 1a measures both. A null phys_out still sets the memory aside; whether the console's does is km01 1a's budget rows."
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelMemoryPoolReserve"
+arity = 5
+purpose = "(addr, len, align, flags, addr_out): reserves address space for the pool to commit into, with no access until a granule is committed."
+returns = "status"
+edge_cases = [
+    "Answers 0 and writes the base. A MAP_FIXED (0x10) reserve over a held pool reservation answers 0. Length 0 answers EINVAL.",
+    "A null addr_out faults on the console (the probe guard's -SIGSEGV, 0xfffffff5). A handler cannot fault the guest, so orbistoun answers EFAULT (0x8002000e).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-7389, report-20261014-batch1.log, 020-memory/memory-pool-prt-aperture rows reserve*"
+partial = "A held hint moves up to the first free range and MAP_FIXED replaces the pool reservation it lands on, which is FreeBSD's mmap rule. Flags other than MAP_FIXED, an alignment that is not a power of two, and a fixed address over memory that is not a pool reservation refuse by name (km01 1b)."
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelMemoryPoolCommit"
+arity = 5
+purpose = "(addr, len, type, prot, flags): backs 64 KiB granules of a pool reservation at prot, charged to what Expand set aside."
+returns = "status"
+edge_cases = [
+    "One granule at prot 0x33 answers 0, and a byte written there reads back.",
+    "sceKernelQueryMemoryProtection afterwards answers the whole reservation's bounds with prot 0x33.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-7389, report-20261014-batch1.log, 020-memory/memory-pool-prt-aperture rows commit* query-prot"
+partial = "Several arms refuse by name until km01 1c measures them: a commit of no bytes, outside every reservation, over a granule already committed, or with flags. A range off the granule grid is taken as EINVAL, mirroring decommit, and more than the pool has free as ENOMEM. A granule reads zero when committed. The memory type is not read."
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelMemoryPoolDecommit"
+arity = 3
+purpose = "(addr, len, flags): returns granules of a pool reservation to the pool, leaving the range reserved without access."
+returns = "status"
+edge_cases = [
+    "One granule answers 0, and a read there then faults (SIGSEGV).",
+    "Less than a granule (0x1000) answers EINVAL. Decommitting the same granule twice answers 0.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-7389, report-20261014-batch1.log, 020-memory/memory-pool-prt-aperture rows decommit*"
+partial = "An unaligned address is taken as EINVAL. A range outside every reservation, and any flags, refuse by name (km01 1d)."
+found_on = "2026-10-20"
+
+[[function]]
+name = "sceKernelGetPrtAperture"
+arity = 3
+purpose = "(slot, base_out, len_out): the base and length of one PRT aperture slot."
+returns = "status"
+edge_cases = [
+    "Slots 0, 1 and 2 answer 0 and read base 1, length 0, before and after any Set. Slot 3 answers EINVAL with nothing written.",
+    "Null outs fault on the console. orbistoun answers EFAULT (0x8002000e).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-7389, report-20261014-batch1.log, 020-memory/memory-pool-prt-aperture rows get-prt-*"
+partial = "Every probed sceKernelSetPrtAperture was refused, so Set is not implemented and every slot reads unset. km01 2 asks for Set's accepted window."
+found_on = "2026-10-20"
+
+[[function]]
 name = "sceKernelDeleteEqueue"
 arity = 1
 purpose = "(equeue): deletes an event queue and every event registered against it."

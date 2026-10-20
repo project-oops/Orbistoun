@@ -16,6 +16,8 @@ pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
 mod placement;
+pub mod pool;
+pub mod prt;
 mod quarantine;
 pub mod sync;
 pub mod thread;
@@ -122,6 +124,13 @@ guest_module! {
         // The entry array, how many entries, and where to write how many were mapped. Display
         // bring-up maps its scanout surface through it.
         "sceKernelBatchMap" => 3,
+        // The pool's four calls and the aperture read, in the shapes obSCEne's
+        // `020-memory/memory-pool-prt-aperture` calls them (REQ-20261012T1822Z-7389).
+        "sceKernelMemoryPoolExpand" => 5,
+        "sceKernelMemoryPoolReserve" => 5,
+        "sceKernelMemoryPoolCommit" => 5,
+        "sceKernelMemoryPoolDecommit" => 3,
+        "sceKernelGetPrtAperture" => 3,
         // A size-prefixed out-structure. It refuses on retail hardware with `0x8002_0006`, because the
         // resource-registration subsystem it depends on is stubbed there.
         "sceKernelMapperGetParam" => 1,
@@ -7102,6 +7111,11 @@ const TABLE: &[(&str, GuestFn)] = &[
     ),
     ("sceKernelMapNamedDirectMemory", map_named_direct_memory),
     ("sceKernelBatchMap", batch_map),
+    ("sceKernelMemoryPoolExpand", pool::expand),
+    ("sceKernelMemoryPoolReserve", pool::reserve),
+    ("sceKernelMemoryPoolCommit", pool::commit),
+    ("sceKernelMemoryPoolDecommit", pool::decommit),
+    ("sceKernelGetPrtAperture", prt::get),
     ("sceKernelMapperGetParam", mapper_get_param),
     ("scePthreadCreate", pthread_create),
     ("scePthreadJoin", pthread_join),
