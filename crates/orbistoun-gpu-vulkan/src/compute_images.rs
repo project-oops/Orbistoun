@@ -39,6 +39,9 @@ pub enum DispatchFormat {
     Rgb10A2,
     /// Four sixteen-bit floats, the guest's `16_16_16_16_FLOAT`: two words a texel.
     Rgba16Float,
+    /// Four normalised sixteen-bit channels, the guest's `16_16_16_16_UNORM`: two words a texel,
+    /// red lowest (D923).
+    Rgba16Unorm,
     /// Three packed unsigned floats, the guest's `10_11_11_FLOAT`: eleven bits of red from the low
     /// end, eleven of green, ten of blue, a word a texel (D908).
     Float11_11_10,
@@ -59,6 +62,7 @@ impl DispatchFormat {
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
             Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Rgba16Unorm => vk::Format::R16G16B16A16_UNORM,
             Self::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         }
     }
@@ -74,7 +78,7 @@ impl DispatchFormat {
             | Self::R32Float => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::R16Uint | Self::R16Unorm => 2,
-            Self::Rgba16Float | Self::Rg32Uint => 8,
+            Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
         }
     }

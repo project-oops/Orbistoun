@@ -1701,6 +1701,53 @@ fn a_dispatch_fetches_from_two_images() {
     });
 }
 
+/// A `16_16_16_16_UNORM` image, two words a texel, is fetched and stored as the four normalised
+/// channels it holds (D923): a copy moves every texel exactly, as each sixteen-bit value is a float
+/// that converts back to itself. PPSA21564's compute program at submission 7 reads a 256 x 64 one.
+#[test]
+fn a_dispatch_copies_a_sixteen_bit_normalised_image() {
+    both_models(|| {
+        if !device_or_skip("16_16_16_16_UNORM image copy") {
+            return;
+        }
+        // Every channel a different value across the whole range, both extremes among them.
+        let source: Vec<u32> = (0..SIDE * SIDE * 2)
+            .map(|i| {
+                let low = (i * 7919) & 0xFFFF;
+                let high = 0xFFFF - ((i * 104_729) & 0xFFFF);
+                low | high << 16
+            })
+            .collect();
+        let destination = vec![0_u32; source.len()];
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::Rgba16Unorm,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+            layers: None,
+            sampling: None,
+            cube: false,
+        };
+        let done = dispatch_guest(
+            &translated(&COPY),
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                fetched: Some(image(&source)),
+                more_fetched: &[],
+                stored: &[image(&destination)],
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        assert_eq!(
+            done.stored.first().map(Vec::as_slice),
+            Some(source.as_slice())
+        );
+    });
+}
+
 /// A `16_16_16_16_FLOAT` image, two words a texel, is fetched and stored as the four halves it
 /// holds: a copy between two moves every texel exactly, each channel a value a half holds.
 /// PPSA21564's compute program at `0x50053c700` reads a 1024 x 1024 one.

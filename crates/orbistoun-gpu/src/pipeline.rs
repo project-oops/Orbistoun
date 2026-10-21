@@ -3154,6 +3154,9 @@ pub enum TexelFormat {
     Rgb10A2,
     /// Four sixteen-bit floats, a texel two words: the guest's `16_16_16_16_FLOAT`.
     Rgba16Float,
+    /// Four normalised sixteen-bit channels, a texel two words, red lowest: the guest's
+    /// `16_16_16_16_UNORM` (D923), the bits Vulkan's `R16G16B16A16_UNORM` holds.
+    Rgba16Unorm,
 }
 
 impl TexelFormat {
@@ -3170,7 +3173,7 @@ impl TexelFormat {
             | Self::Rgba8Uint => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::R16Uint | Self::R16Unorm => 2,
-            Self::Rgba16Float | Self::Rg32Uint => 8,
+            Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
         }
     }
@@ -4282,7 +4285,9 @@ fn channel_order(format: TexelFormat, word3: u32) -> Option<[u8; 4]> {
 fn reorders_packed_channels(format: TexelFormat, word3: u32) -> bool {
     let selects = destination_selects(word3);
     match format {
-        TexelFormat::Rgb10A2 | TexelFormat::Rgba16Float => selects != IDENTITY_SELECTS,
+        TexelFormat::Rgb10A2 | TexelFormat::Rgba16Float | TexelFormat::Rgba16Unorm => {
+            selects != IDENTITY_SELECTS
+        }
         TexelFormat::Float11_11_10 => {
             selects[..3] != IDENTITY_SELECTS[..3] || !matches!(selects[3], 1 | 7)
         }
@@ -4349,6 +4354,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
         FORMAT_2_10_10_10_UNORM => Ok(TexelFormat::Rgb10A2),
         FORMAT_16_16_16_16_FLOAT => Ok(TexelFormat::Rgba16Float),
+        FORMAT_16_16_16_16_UNORM => Ok(TexelFormat::Rgba16Unorm),
         FORMAT_10_11_11_FLOAT => Ok(TexelFormat::Float11_11_10),
         // A sixteen-byte texel is placed linearly, or in `64KB_D_X`; its other layouts are not
         // modelled.
@@ -4443,6 +4449,39 @@ mod dispatch_format_tests {
             (format.bytes(), format.words(), format.is_integer()),
             (8, 2, true)
         );
+    }
+
+    /// A `16_16_16_16_UNORM` image (format 65) is two words a texel of normalised value, read
+    /// whatever its tiling places, its channels where they lie (D923): Arcade Paradise's compute
+    /// program at submission 7 fetches a 256 x 64 one in `64KB_R_X`. Moving its channels is not
+    /// read.
+    #[test]
+    fn a_sixteen_bit_normalised_four_channel_image_is_two_words() {
+        let words = |selects: u32| {
+            [
+                0,
+                65 << 20 | (255 & 3) << 30,
+                255 >> 2 | 63 << 14,
+                selects | 27 << 20 | 9 << 28,
+                0,
+                0,
+                0,
+                0,
+            ]
+        };
+        let identity = words(4 | 5 << 3 | 6 << 6 | 7 << 9);
+        let descriptor = crate::registers::decode_image_descriptor(identity);
+        let format = super::dispatch_format(&descriptor, identity).expect("read");
+        assert_eq!(format, super::TexelFormat::Rgba16Unorm);
+        assert_eq!(
+            (format.bytes(), format.words(), format.is_integer()),
+            (8, 2, false)
+        );
+        assert!(!super::reorders_packed_channels(format, identity[3]));
+        assert!(super::reorders_packed_channels(
+            format,
+            words(5 | 4 << 3 | 6 << 6 | 7 << 9)[3]
+        ));
     }
 
     /// A `16_UNORM` image (format 7) read through one channel is half a word of normalised value
@@ -7682,6 +7721,9 @@ fn read_descriptor(at: u64, memory: &impl GuestMemory) -> Option<[u32; 8]> {
 const FORMAT_32_FLOAT: u32 = 22;
 /// `16_16_16_16_FLOAT`, four sixteen-bit floats (`gfx10-rsrc.json`, enum `GFX10_FORMAT` 71).
 const FORMAT_16_16_16_16_FLOAT: u32 = 71;
+/// `16_16_16_16_UNORM`, four normalised sixteen-bit channels (`gfx10-rsrc.json:70`, enum
+/// `GFX10_FORMAT` 65).
+const FORMAT_16_16_16_16_UNORM: u32 = 65;
 
 /// What a compare source samples when its descriptor is a linear `32_FLOAT` image of one level in
 /// guest memory rather than a depth target: its depths, read as they lie, compared through the
@@ -8554,6 +8596,11 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
         TexelFormat::Rgba16Float => crate::backend::TextureEncoding::Rgba16Float,
+        // The guest's bits as they are, in its own format (D923).
+        TexelFormat::Rgba16Unorm => crate::backend::TextureEncoding::Guest {
+            code: FORMAT_16_16_16_16_UNORM as u16,
+            selects: [4, 5, 6, 7],
+        },
         TexelFormat::Rgba8
         | TexelFormat::R8
         | TexelFormat::R8Uint
@@ -8890,6 +8937,7 @@ fn swizzle_texels_by_channel(
                 | TexelFormat::Rgba8Uint
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::Rgba16Float
+                | TexelFormat::Rgba16Unorm
                 | TexelFormat::R32Uint
                 | TexelFormat::R16Uint
                 | TexelFormat::R16Unorm
