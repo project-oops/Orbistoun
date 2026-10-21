@@ -568,6 +568,16 @@ pub enum TextureEncoding {
         /// Red, green, blue and alpha's source.
         lanes: [ByteLane; 4],
     },
+    /// A guest image format as [`crate::formats`] reads it (D923): the guest's texels, or its
+    /// blocks, tightly packed row after row and layer after layer as they are in the guest's
+    /// format, the last word padded. The host samples them in the format holding the same bits
+    /// where it can, and otherwise widens them on the CPU ([`crate::formats::decode`]).
+    Guest {
+        /// The descriptor's `FORMAT`, a `GFX10_FORMAT` code.
+        code: u16,
+        /// The descriptor's `DST_SEL_X` .. `DST_SEL_W`, as `SQ_SEL_XYZW01` numbers them.
+        selects: [u8; 4],
+    },
 }
 
 /// Where a channel of an [`TextureEncoding::R8`] texel comes from.

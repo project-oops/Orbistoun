@@ -15,6 +15,7 @@ pub mod compute_images;
 mod depth;
 mod draw_buffers;
 pub mod framebuffer;
+pub mod guest_formats;
 mod half;
 pub mod pipeline_cache;
 pub use compute::{
@@ -182,6 +183,9 @@ struct BoundTexture {
     /// Its mip levels, finest first (D833).
     levels: u32,
 }
+
+/// What a texture in a guest image format `orbistoun_gpu::formats` refuses is refused as (D923).
+const GUEST_UNSAMPLED: &str = "BindTexture of a guest image format that is not sampled";
 
 /// What a texture whose border this device cannot sample is refused as (D837).
 const BORDER_UNSAMPLABLE: &str = concat!(
@@ -595,6 +599,14 @@ impl VulkanBackend {
             orbistoun_gpu::TextureEncoding::R16 { .. } => {
                 ((width as usize) * (height as usize)).div_ceil(2)
             }
+            // A guest format's faces lie packed one after another, counted whole (D923).
+            orbistoun_gpu::TextureEncoding::Guest { code, .. } => {
+                let words = guest_formats::guest_words(code, (width, height, faces));
+                self.refused += usize::from(words.is_none());
+                words.ok_or(BackendError::Unsupported {
+                    command: GUEST_UNSAMPLED,
+                })?
+            }
         };
         // A mip chain's levels follow the base, each its own extent (D833): one-word texels of a
         // flat image only.
@@ -612,6 +624,8 @@ impl VulkanBackend {
         }
         let words = if levels > 1 {
             framebuffer::chain_texels(width, height, levels)
+        } else if let orbistoun_gpu::TextureEncoding::Guest { .. } = encoding {
+            face_words
         } else {
             face_words * faces as usize
         };

@@ -8181,6 +8181,8 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         | crate::backend::TextureEncoding::Bc5
         | crate::backend::TextureEncoding::R8 { .. } => 0,
         crate::backend::TextureEncoding::R16 { .. } => 1 << 18 | 1 << 22,
+        // A guest format's texels are kept apart by its code (D923).
+        crate::backend::TextureEncoding::Guest { code, .. } => 1 << 26 | code as u32,
         // Never read from guest memory, so never in the cache (D817).
         crate::backend::TextureEncoding::DepthFloat
         | crate::backend::TextureEncoding::DepthCompare

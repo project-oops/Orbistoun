@@ -2929,6 +2929,15 @@ fn staged_texture<'a>(texture: &TextureWords<'a>, coarse_level: bool) -> (vk::Fo
         orbistoun_gpu::TextureEncoding::R8 { .. } => (vk::Format::R8_UNORM, as_they_are()),
         // Sixteen bits a texel, two to a word, sampled as `R16_UNORM` through its lanes (D920).
         orbistoun_gpu::TextureEncoding::R16 { .. } => (vk::Format::R16_UNORM, as_they_are()),
+        // The guest's bits as they are, in the format that holds them; `create_texture` asks the
+        // device whether it samples that one and widens them where not (D923).
+        orbistoun_gpu::TextureEncoding::Guest { code, .. } => (
+            orbistoun_gpu::formats::sampled(u32::from(code))
+                .ok()
+                .and_then(|sampled| sampled.native)
+                .map_or(vk::Format::UNDEFINED, crate::guest_formats::vk_format),
+            as_they_are(),
+        ),
     }
 }
 
@@ -2962,10 +2971,10 @@ fn create_texture(
     sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
-    let (format, staged) =
+    let (format, staged, components) =
         orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::TextureStaged, || {
-            staged_texture(&texture, coarse_level)
-        });
+            guest_or_staged(devices, &texture, coarse_level)
+        })?;
     let image_made = orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::TextureImage);
     let Staged {
         texels: padded,
@@ -3039,7 +3048,7 @@ fn create_texture(
         .image(image)
         .view_type(view_type)
         .format(format)
-        .components(texture_components(texture.encoding))
+        .components(components)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(aspect)
@@ -3077,6 +3086,35 @@ fn create_texture(
         kept: None,
         bytes: size,
     })
+}
+
+/// A texture's host format, staged texels and view components: a guest format's as the device
+/// samples it or widened ([`crate::guest_formats::staged`], D923), and any other encoding's as
+/// [`staged_texture`] lays it out.
+fn guest_or_staged<'a>(
+    devices: Devices<'_>,
+    texture: &TextureWords<'a>,
+    coarse_level: bool,
+) -> Result<(vk::Format, Staged<'a>, vk::ComponentMapping), DispatchError> {
+    let orbistoun_gpu::TextureEncoding::Guest { code, selects } = texture.encoding else {
+        let (format, staged) = staged_texture(texture, coarse_level);
+        return Ok((format, staged, texture_components(texture.encoding)));
+    };
+    let (width, height) = (texture.width, texture.height.unwrap_or(1));
+    let layers = texture.faces.max(1) * texture.slices.unwrap_or(1);
+    let (format, texels, components) = crate::guest_formats::staged(
+        (devices.instance, devices.physical),
+        texture.words,
+        (width, height, layers),
+        (code, selects),
+    )?;
+    let staged = Staged {
+        texels,
+        width,
+        height,
+        levels: 1,
+    };
+    Ok((format, staged, components))
 }
 
 /// A host buffer holding `texels`, from which a texture's are copied in.
@@ -7215,6 +7253,45 @@ pub fn draw_with_bc3_texture(
                 width,
                 height: Some(height),
                 encoding: orbistoun_gpu::TextureEncoding::Bc3,
+                faces: 1,
+                slices: None,
+                layered: false,
+                levels: 1,
+                hash: None,
+            }),
+            ..Bound::default()
+        },
+    )
+}
+
+/// [`draw_with_texture`] with a texture in guest image format `code` under destination selects
+/// `selects` (D923): `words` its texels or blocks of a `width` x `height` image, tightly packed,
+/// sampled natively where the device can and widened where not, or always widened inside
+/// [`crate::guest_formats::widening`].
+///
+/// # Errors
+///
+/// When no device is available, the format is not sampled, or any Vulkan call fails.
+pub fn draw_with_guest_texture(
+    (vertex_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    size: (u32, u32),
+    (words, width, height): (&[u32], u32, u32),
+    (code, selects): (u16, [u8; 4]),
+) -> Result<Pixels, DispatchError> {
+    let (frame_width, frame_height) = size;
+    render(
+        clear,
+        frame_width,
+        frame_height,
+        Some((vertex_words, fragment_words)),
+        Geometry::Vertex(VertexDraw::TRIANGLE),
+        Bound {
+            textures: &TexturesBound::first(TextureWords {
+                words,
+                width,
+                height: Some(height),
+                encoding: orbistoun_gpu::TextureEncoding::Guest { code, selects },
                 faces: 1,
                 slices: None,
                 layered: false,
