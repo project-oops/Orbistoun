@@ -10,6 +10,7 @@
 //! layer detects those writes and synthesises the transfers.
 
 mod backend;
+pub mod bc;
 pub mod colour_slots;
 pub mod cp;
 pub mod dcc;
@@ -18,6 +19,7 @@ pub mod detiled;
 pub mod dispatch;
 pub mod display;
 pub mod draw_buffers;
+pub mod formats;
 pub mod msaa;
 pub mod packet;
 pub mod perf;
@@ -27,6 +29,7 @@ pub mod register_defaults;
 pub mod registers;
 mod render;
 pub mod streamout;
+pub mod swizzle;
 pub mod tessellation;
 pub mod tiling;
 pub mod translations;
