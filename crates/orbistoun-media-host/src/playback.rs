@@ -4,12 +4,14 @@
 //! A media player decodes on its own threads and the title pulls finished frames, so this crate
 //! does the same: one thread per stream, each holding its own decoder, each a few frames ahead of
 //! the reader and blocked when the queue is full. Times are milliseconds from the start of the
-//! presentation: a sample's composition time less the track's first edit (ISO/IEC 14496-12
-//! 8.6.6), which is also how an encoder's priming samples are left out.
+//! presentation. A picture's is its composition time less the track's first edit (ISO/IEC
+//! 14496-12 8.6.6). Sound is timed from its stream's first sample and handed out whole, the
+//! encoder's priming included, as the console's player hands it out (REQ-20261020T1135Z-vd01:
+//! 48 AAC frames from 0 ms for a one-second clip).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use crate::mp4::{self, Format, Mp4Error, Track, TrackKind};
@@ -86,6 +88,8 @@ pub struct AudioFrame {
 /// What a stream's thread hands the reader.
 enum Delivery<T> {
     Frame(T),
+    /// The stream's last frame.
+    Last(T),
     /// The stream could not go on; the text is why.
     Failed(String),
 }
@@ -93,20 +97,66 @@ enum Delivery<T> {
 /// One stream being decoded on its own thread.
 struct Lane<T> {
     frames: Receiver<Delivery<T>>,
+    /// A delivery taken from the queue to see whether one was there, not yet handed out.
+    peeked: Mutex<Option<Delivery<T>>>,
+    /// Whether the last frame has been handed out.
+    finished: AtomicBool,
     thread: Option<JoinHandle<()>>,
 }
 
 impl<T> Lane<T> {
+    fn new(frames: Receiver<Delivery<T>>, thread: JoinHandle<()>) -> Self {
+        Self {
+            frames,
+            peeked: Mutex::new(None),
+            finished: AtomicBool::new(false),
+            thread: Some(thread),
+        }
+    }
+
+    fn take(&self) -> Option<Delivery<T>> {
+        let peeked = self
+            .peeked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        peeked.or_else(|| self.frames.try_recv().ok())
+    }
+
     fn next(&self) -> Result<Option<T>, String> {
-        match self.frames.try_recv() {
-            Ok(Delivery::Frame(frame)) => Ok(Some(frame)),
-            Ok(Delivery::Failed(why)) => Err(why),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => Ok(None),
+        match self.take() {
+            Some(Delivery::Frame(frame)) => Ok(Some(frame)),
+            Some(Delivery::Last(frame)) => {
+                self.finished.store(true, Ordering::Relaxed);
+                Ok(Some(frame))
+            }
+            Some(Delivery::Failed(why)) => Err(why),
+            None => Ok(None),
         }
     }
 
     fn ended(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// Whether every frame has been handed out: the last one taken, or the thread gone with
+    /// nothing left behind it.
+    fn drained(&self) -> bool {
+        if self.finished.load(Ordering::Relaxed) {
+            return true;
+        }
+        let mut peeked = self.peeked.lock().unwrap_or_else(PoisonError::into_inner);
+        if peeked.is_some() {
+            return false;
+        }
+        match self.frames.try_recv() {
+            Ok(delivery) => {
+                *peeked = Some(delivery);
+                false
+            }
+            Err(TryRecvError::Disconnected) => true,
+            Err(TryRecvError::Empty) => false,
+        }
     }
 }
 
@@ -222,6 +272,12 @@ impl Playback {
     pub fn decoded(&self) -> bool {
         self.video.as_ref().is_none_or(Lane::ended) && self.audio.as_ref().is_none_or(Lane::ended)
     }
+
+    /// Whether every picture has been decoded and handed out: true as soon as the last one has
+    /// been taken, before another is asked for.
+    pub fn pictures_ended(&self) -> bool {
+        self.video.as_ref().is_none_or(Lane::drained)
+    }
 }
 
 impl Drop for Playback {
@@ -271,14 +327,15 @@ fn start_video(
                     return;
                 }
             };
-            let deliver = |pictures: Vec<Picture>| {
+            // One picture is held back, so the last can go out marked as the last.
+            let mut held: Option<VideoFrame> = None;
+            let mut deliver = |pictures: Vec<Picture>| {
                 pictures.into_iter().all(|picture| {
                     let time_ms = ms(picture.timestamp - track.start, track.timescale);
-                    send(
-                        &sender,
-                        &stop,
-                        Delivery::Frame(VideoFrame { time_ms, picture }),
-                    )
+                    match held.replace(VideoFrame { time_ms, picture }) {
+                        Some(previous) => send(&sender, &stop, Delivery::Frame(previous)),
+                        None => true,
+                    }
                 })
             };
             for sample in &track.samples {
@@ -306,18 +363,21 @@ fn start_video(
             }
             match decoder.drain() {
                 Ok(pictures) => {
-                    deliver(pictures);
+                    if !deliver(pictures) {
+                        return;
+                    }
                 }
                 Err(error) => {
                     let _ = sender.send(Delivery::Failed(error.to_string()));
+                    return;
                 }
+            }
+            if let Some(last) = held {
+                send(&sender, &stop, Delivery::Last(last));
             }
         })
         .map_err(|error| MediaError::Host(format!("no decoding thread: {error}")))?;
-    Ok(Lane {
-        frames,
-        thread: Some(thread),
-    })
+    Ok(Lane::new(frames, thread))
 }
 
 fn start_audio(
@@ -345,23 +405,17 @@ fn start_audio(
                     return;
                 }
             };
-            // Samples per channel decoded so far, and how many of the first are priming: the
-            // media time the first edit starts at, in samples.
+            // Sample frames decoded so far: each decode is timed from the stream's first sample,
+            // priming included.
             let mut position = 0_u64;
-            let skip = (track.start.max(0) as u128 * u128::from(sample_rate)
-                / u128::from(track.timescale.max(1))) as u64;
             let width = usize::from(channels.max(1));
             let mut deliver = |pcms: Vec<Pcm>| {
-                for mut pcm in pcms {
-                    let count = (pcm.samples.len() / width) as u64;
-                    let dropped = skip.saturating_sub(position).min(count);
-                    pcm.samples.drain(..dropped as usize * width);
-                    position += count;
+                for pcm in pcms {
+                    let time_ms = position * 1000 / u64::from(sample_rate.max(1));
+                    position += (pcm.samples.len() / width) as u64;
                     if pcm.samples.is_empty() {
                         continue;
                     }
-                    let first = position - (pcm.samples.len() / width) as u64 - skip;
-                    let time_ms = first * 1000 / u64::from(sample_rate.max(1));
                     if !send(&sender, &stop, Delivery::Frame(AudioFrame { time_ms, pcm })) {
                         return false;
                     }
@@ -401,10 +455,7 @@ fn start_audio(
             }
         })
         .map_err(|error| MediaError::Host(format!("no decoding thread: {error}")))?;
-    Ok(Lane {
-        frames,
-        thread: Some(thread),
-    })
+    Ok(Lane::new(frames, thread))
 }
 
 #[cfg(all(test, windows))]
@@ -469,9 +520,32 @@ mod tests {
         let times: Vec<u64> = video.iter().map(|frame| frame.time_ms).collect();
         let expected: Vec<u64> = (0..30).map(|index| index * 1000 / 30).collect();
         assert_eq!(times, expected);
+        assert!(playback.pictures_ended());
+        // Every AAC frame, the encoder's priming frame first, 1024 sample frames each, timed from
+        // 0 as the console's player times them (vd01: frame 1 at 21 ms).
+        let movie = crate::mp4::parse(&file).expect("the fixture parses");
+        let frames = movie.tracks[1].samples.len();
         assert_eq!(audio[0].time_ms, 0);
+        assert_eq!(audio[1].time_ms, 21);
         let samples: usize = audio.iter().map(|frame| frame.pcm.samples.len() / 2).sum();
-        assert!((48_000..48_000 + 1024).contains(&samples), "{samples}");
+        assert_eq!(samples, frames * 1024);
+    }
+
+    /// The last picture taken ends the pictures at once, before another is asked for.
+    #[test]
+    fn the_pictures_end_with_the_last_one_taken() {
+        let file: Arc<[u8]> = Arc::from(&include_bytes!("../tests/data/probe_av.mp4")[..]);
+        let playback = Playback::open(&file).expect("the fixture opens");
+        let mut taken = 0;
+        while taken < 30 {
+            match playback.next_video().expect("video decodes") {
+                Some(_) => {
+                    taken += 1;
+                    assert_eq!(playback.pictures_ended(), taken == 30, "after {taken}");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
     }
 
     /// Dropping a player mid-stream stops its threads rather than leaving them blocked.

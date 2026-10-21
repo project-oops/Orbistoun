@@ -25,6 +25,8 @@ orbistoun-env = { workspace = true }
 # The guest's audio ports, and the host device they play on when a run asks for one.
 orbistoun-audio = { workspace = true }
 orbistoun-audio-host = { workspace = true }
+# A media player's source, decoded on the host's own decoder (D925).
+orbistoun-media-host = { workspace = true }
 orbistoun-paths = { workspace = true }
 orbistoun-abi = { workspace = true }
 orbistoun-core = { workspace = true }

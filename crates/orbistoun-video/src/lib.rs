@@ -8,6 +8,7 @@ use orbistoun_hle::guest_module;
 
 pub mod av_player;
 pub mod font;
+pub mod media;
 pub mod png_dec;
 pub mod png_enc;
 pub mod queued;
@@ -888,6 +889,20 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAvPlayerStreamCount", av_player::stream_count),
         ("sceAvPlayerPostInit", av_player::post_init),
         ("sceAvPlayerStop", av_player::stop),
+        ("sceAvPlayerAddSource", av_player::add_source_plain),
+        ("sceAvPlayerAddSourceEx", av_player::add_source_ex),
+        ("sceAvPlayerGetStreamInfo", av_player::get_stream_info),
+        ("sceAvPlayerEnableStream", av_player::enable_stream),
+        ("sceAvPlayerStart", av_player::start),
+        ("sceAvPlayerGetVideoDataEx", av_player::get_video_data_ex),
+        ("sceAvPlayerGetAudioData", av_player::get_audio_data),
+        ("sceAvPlayerCurrentTime", av_player::current_time),
+        ("sceAvPlayerPause", av_player::pause),
+        ("sceAvPlayerResume", av_player::resume),
+        ("sceAvPlayerSetTrickSpeed", av_player::set_trick_speed),
+        ("sceAvPlayerSetAvSyncMode", av_player::set_av_sync_mode),
+        ("sceAvPlayerChangeStream", av_player::change_stream),
+        ("sceAvPlayerSetLogCallback", av_player::set_log_callback),
         ("sceVideoRecordingSetInfo", recording_p::set_info),
         ("scePngDecQueryMemorySize", png_dec::query_memory_size),
         ("scePngDecCreate", png_dec::create),

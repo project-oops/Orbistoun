@@ -5,43 +5,44 @@ name = "sceAvPlayerInitEx"
 purpose = "Opens a media player: takes its memory through the init block's allocate callback and writes the handle."
 returns = "status"
 edge_cases = [
-    "MEASURED (link-bound, a 0x230-byte block: size word 0x230 at +0, object word at +0x08, callbacks at +0x10, +0x18, +0x20, +0x28): answered 0, called the allocate callback at +0x10 once with the object word first and 0x20 second, and wrote as the handle exactly the pointer the callback answered (equals-alloc-ptr 1, offset-from-alloc 0).",
+    "MEASURED (link-bound, a 0x230-byte block: size word 0x230 at +0, object word at +0x08, callbacks at +0x10, +0x18, +0x20, +0x28): answered 0, called the allocate callback at +0x10 once with the object word, 0x20 and 0x5c0, and wrote as the handle exactly the pointer the callback answered (equals-alloc-ptr 1, offset-from-alloc 0).",
     "MEASURED: a block whose size word is 0x100 answers 0x806a0001, and so does a null allocate slot.",
+    "MEASURED (vd01): the event callback is the slot at +0x60, and the frame buffers come through the second allocator pair (+0x20 allocates, +0x28 frees). PPSA02664 puts its event object at +0x58 and asks for 6 frame buffers at +0x228; the probe left +0x228 zero and was given six.",
     "Not measured: a null block or handle pointer, a size word above 0x230, and an allocation that fails; orbistoun answers its placeholder there.",
 ]
-note = "The allocate callback's third argument was not rowed - the probe's callback logged it, the check did not (re-filed as obSCEne REQ-20261014T1300Z-rf03 item 4) - so orbistoun passes 0x1000 there, a page, valid whether the third argument is a size or an alignment."
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle)."
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle); report-20261020-gt23-census.log 4808, 4831 (InitEx-first-cb0|a2|0x5c0); REQ-20261020T1135Z-vd01, report-20261020-vd01-census.log (000-boot/vd01-avplayer, alloc-call, ev-slot); PPSA02664 eboot image+0xf8cb09..0xf8cee2."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA25872-app0"]
 found_on = "2026-10-14"
 
 [[function]]
 name = "sceAvPlayerClose"
-purpose = "Closes a player and frees its memory through the deallocate callback."
+purpose = "Closes a player: reports it stopped and frees its frame buffers, its source's block and its own memory through the init block's callbacks."
 returns = "status"
 edge_cases = [
-    "MEASURED: answered 0 and made one callback, for each of two players opened in turn.",
-    "orbistoun calls the deallocate slot at +0x18 with the object word and the handle; which slot Close called, and with what, was not rowed.",
+    "MEASURED: answered 0 and made one callback, for each of two players opened in turn with no source.",
+    "MEASURED (vd01): a player that was asked for a source - even one whose file was missing - fires event 1 at Close, then frees what Start allocated (the frame buffers through +0x28), the 16 MiB source block and the player's block (through +0x18).",
     "A handle InitEx did not open answers the placeholder.",
 ]
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, Close-first, Close-second)."
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (Close-first, Close-second); REQ-20261020T1135Z-vd01, report-20261020-vd01-census.log (player1-close, player2-close, dealloc-call)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-14"
 
 [[function]]
 name = "sceAvPlayerIsActive"
-purpose = "Whether a player is active."
+purpose = "Whether a player is still playing its source."
 returns = "status"
 edge_cases = [
     "MEASURED: a player with no source answered 0x15aa801 with the handle 0x15aa800, before and after a refused AddSourceEx - true in the low byte, the rest of rax left over. orbistoun answers 1.",
+    "MEASURED (vd01): true with a source before Start and during play; false from the moment the last picture was handed out, with sound still to come.",
     "A handle InitEx did not open answers 0.",
 ]
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, IsActive-before-source, IsActive-after-source)."
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (IsActive-before-source, IsActive-after-source); REQ-20261020T1135Z-vd01 (is-active-before-start, is-active-after-playback, is-active-turned-false)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-14"
 
@@ -51,7 +52,8 @@ purpose = "Completes a player's set-up from a post-init block."
 returns = "status"
 edge_cases = [
     "MEASURED: on a player with no source, the block {u32 0x800000 at +0, u32 1 at +8, u16 4 at +0x1c} answers 0x806a0001, and so does an all-zero block. PPSA02664 passes that first block before adding a source, and on the placeholder logs '[PS5VideoPlayback] ERROR: sceAvPlayerPostInit() failed'.",
-    "orbistoun answers 0x806a0001 for any block on a player it opened, since every player here has no source; a handle InitEx did not open answers the placeholder.",
+    "Both were measured on the probe's mostly-zero init block; PPSA02664's own blocks are asked in REQ-20261021T0000Z-vd02 arm 1.",
+    "orbistoun answers 0x806a0001 on a player it opened with no source, and the placeholder otherwise.",
 ]
 found_by = "static"
 known_by = "measured"
@@ -64,12 +66,12 @@ name = "sceAvPlayerStreamCount"
 purpose = "How many streams a player's source holds."
 returns = "count"
 edge_cases = [
-    "MEASURED: 0 for a player with no source.",
+    "MEASURED: 0 for a player with no source; 2 for a source with a video and a sound stream.",
     "A handle InitEx did not open answers the placeholder.",
 ]
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, StreamCount-before-source)."
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (StreamCount-before-source); REQ-20261020T1135Z-vd01 (stream-count)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-14"
 
@@ -79,10 +81,201 @@ purpose = "Stops a player's playback."
 returns = "status"
 edge_cases = [
     "MEASURED: on a player whose PostInit failed (the block PPSA02664 passes), 0x806a0002, and 0x806a0002 again on a second Stop; IsActive afterwards still answers the handle with its low bit set. On a handle InitEx did not give, 0x806a0001.",
-    "orbistoun answers 0x806a0002 for any player it opened, since every player here has no source, and 0x806a0001 for any other handle.",
+    "MEASURED (vd01): with a source, during play and after its end alike, 0 and event 1.",
 ]
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261015T0503Z-av01, reports/hardware/report-20261015-batch1.log lines 887-894 (000-boot/sd02-savedata-avplayer, avplayer-stop)."
-found_in = ["PPSA02664-app0"]
+cites = "obSCEne REQ-20261015T0503Z-av01, reports/hardware/report-20261015-batch1.log lines 887-894 (000-boot/sd02-savedata-avplayer, avplayer-stop); REQ-20261020T1135Z-vd01 (player1-stop-after-end, player2-stop-midplay)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceAvPlayerAddSourceEx"
+purpose = "Adds a source to a player from a details block naming its URI."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): the block is 0x80 bytes, the URI pointer at +0, its length at +8 and the source type at +0x50 (PPSA02664 builds it so). A file with type 1 or type 0 answers 0; a missing file answers 0x806a0002.",
+    "MEASURED: every call first allocates 0x1000000 bytes aligned to 0x40 through the allocate callback, kept until Close, and a source that opens fires event 2 (ready).",
+    "Not measured: a second source, other source types, a file that does not play; orbistoun answers its placeholder there.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01, report-20261020-vd01-census.log (000-boot/vd01-avplayer, add-source-real, add-source-type0, add-source-missing, add-source-events-500ms); PPSA02664 eboot image+0xf8d1db..0xf8d238."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerAddSource"
+purpose = "Adds the file at a path to a player."
+returns = "status"
+edge_cases = [
+    "ASSUMED: behaves as AddSourceEx with a file source type. PPSA04263 calls it from its video thread (image+0x30413ca); no probe has yet.",
+]
+note = "Asked of the console next: PPSA04263's call passes its player handle and a path buffer (image+0x30413ca)."
+found_by = "static"
+known_by = "assumed"
+found_in = ["PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerGetStreamInfo"
+purpose = "Describes one stream of a player's source."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): writes the type at +0 (1 video, 2 sound), the details from +8 (video: u32 width, u32 height; sound: u16 channels, u32 rate at +0xc, a zero u32 at +0x10), the language at +0x14 and the duration in milliseconds at +0x18; +4 and the bytes from +0x20 are left as they were.",
+    "MEASURED: a video stream's u32 at +0x10 was 479696 for the 320x240 clip; what it is is not known, and orbistoun does not write it.",
+    "MEASURED: an id past the last answers 0x806a0001 and writes nothing.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (stream-0, stream-1, stream-2)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerEnableStream"
+purpose = "Enables one stream of a player's source."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): accepted for streams 0 and 1 before Start; 0x806a0002 once playing.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player1-enable-stream0, player1-enable-stream1, player2-enable-stream)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerStart"
+purpose = "Starts a player's playback."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): answers 0 and fires event 3 (playing). For the 320x240 clip it allocated 0x495300, 0xc1f980 and 0x2e0300 bytes through +0x10 and 0x1d9800 and 0x118000 through +0x20; the frames came from the last, 0x2e000 apart, six of them.",
+    "orbistoun decodes on the host and allocates only the frame buffers, through +0x20: the init block's count of them, each the pitch times 1.5 rows rounded to 8 KiB, the pitch the width rounded to 256 (both assumed from the one size measured; REQ-20261021T0000Z-vd02 arm 2).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (start, start-events-500ms, alloc-call, video-frame-0-alloc)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerGetVideoDataEx"
+purpose = "Hands out the next decoded picture when it is due, with its frame info; true in the low byte when it does."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): true in the low byte when a picture is handed out. The info's first 0x40 bytes: data pointer, a zero u64, time in ms at +0x10, width +0x18, height +0x1c, aspect 1.0 as a float +0x20, language +0x24, a zero u32, crops left/right/top/bottom +0x2c..+0x38 (right = pitch - width), pitch +0x3c. PPSA02664 reads +0x10, +0x1c, +0x2c..+0x3c.",
+    "MEASURED: the picture is 4:2:0 with interleaved chroma at pitch x height, in a frame buffer from the +0x20 allocator; frame 0 went in the second of six, frame 29 back in the first. Its first luma row equals an independent decoder's picture 0.",
+    "MEASURED: pictures came as the sound handed out reached their times; orbistoun's clock is the guest clock since Start, never behind the sound.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (video-frame-N, video-frame-0-yuv, video-frame-0-alloc); PPSA02664 eboot image+0xf8ee9d..0xf8eec2."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerGetAudioData"
+purpose = "Hands out the next decoded sound with its frame info; true in the low byte when it does."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): true in the low byte; the info's first 0x28 bytes: data pointer, a zero u64, time in ms at +0x10, u16 channels +0x18, u32 rate +0x1c, size in bytes +0x20, language +0x24. 16-bit interleaved samples, one AAC frame (4096 bytes in stereo) per call, the encoder's priming frame first at 0 ms.",
+    "MEASURED: the data pointer lay in none of the callbacks' allocations; orbistoun keeps the sound in memory of its own.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (audio-frame-N, audio-frame-0-data, audio-decode-summary)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerCurrentTime"
+purpose = "Where playback is, in milliseconds."
+returns = "count"
+edge_cases = [
+    "MEASURED (vd01): 0 before Start; during play, the time of the last sound handed out.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (current-time-before-start, video-frame-N|current-time)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerPause"
+purpose = "Pauses a player."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): 0 and event 4 while playing; 0x806a0002 when already paused.",
+    "Not measured before Start; orbistoun answers its placeholder there.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player2-pause, player2-pause1-events)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerResume"
+purpose = "Resumes a paused player."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): 0 and event 3 when paused; 0x806a0002 when playing.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player2-resume, player2-resume1-events)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerSetTrickSpeed"
+purpose = "Sets a player's playback speed, in percent."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): 100 is accepted while playing; 200 answers 0x806a0004. Other speeds are not measured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player2-trick-speed)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerSetAvSyncMode"
+purpose = "Sets how a player synchronises pictures and sound."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): modes 0 and 1 are accepted while playing. Other modes are not measured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player2-sync-mode)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerChangeStream"
+purpose = "Replaces one playing stream with another."
+returns = "status"
+edge_cases = [
+    "MEASURED (vd01): (1, 1) is accepted while playing. Other pairs are not measured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1135Z-vd01 (player2-change-stream)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAvPlayerSetLogCallback"
+purpose = "Installs a callback for the player's log."
+returns = "status"
+edge_cases = [
+    "MEASURED: answered 0, and the callback was never called during the measured lifecycle.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log (000-boot/avplayer-lifecycle, SetLogCallback)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"

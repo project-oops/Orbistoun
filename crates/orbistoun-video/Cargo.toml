@@ -23,3 +23,5 @@ png = { workspace = true }
 crc32fast = { workspace = true }
 # libScePngEnc (`png_enc`).
 miniz_oxide = { workspace = true }
+# libSceAvPlayer says why a source stopped playing.
+tracing = { workspace = true }

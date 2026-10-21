@@ -23,6 +23,7 @@ pub mod experiment;
 pub mod fault;
 pub mod flip_origins;
 pub mod frame_region;
+mod media;
 pub mod page_guard;
 pub mod profile;
 pub mod render;
@@ -663,6 +664,8 @@ fn install_presentation() {
     orbistoun_kernel::install_heap_protect(orbistoun_libc::protect_heap_range);
     // A file-backed `mmap` reads its pages through the descriptor table, which the fs crate owns.
     orbistoun_kernel::install_file_read(orbistoun_fs::descriptor::read_at);
+    // A media player's source, decoded on the host's own decoder (D925).
+    orbistoun_video::media::install_media(media::open);
     // Flips a command buffer carries, queued by their builder and carried out at their release
     // (D728).
     orbistoun_gpu::display::install(orbistoun_gpu::display::Display {

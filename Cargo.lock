@@ -3585,6 +3585,7 @@ dependencies = [
  "orbistoun-kernel",
  "orbistoun-mem",
  "png",
+ "tracing",
 ]
 
 [[package]]
@@ -3606,6 +3607,7 @@ dependencies = [
  "orbistoun-kernel",
  "orbistoun-libc",
  "orbistoun-loader",
+ "orbistoun-media-host",
  "orbistoun-mem",
  "orbistoun-nid",
  "orbistoun-overrides",
