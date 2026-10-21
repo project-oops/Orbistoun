@@ -242,9 +242,9 @@ fn synthesize(spectra: &[[f64; 256]]) -> Vec<f64> {
     out
 }
 
-/// Quantises `spectrum` into 30 units at the finest precision a flat gradient of 0 gives: each
-/// unit's scale factor is the smallest that holds its largest value.
-fn quantize(spectrum: &[f64]) -> ChannelCode {
+/// Quantises `spectrum` into 30 units at the precision a flat gradient of `g` gives: each unit's
+/// scale factor is the smallest that holds its largest value.
+fn quantize(spectrum: &[f64], g: i32) -> ChannelCode {
     let units = (0..30)
         .map(|i| {
             let range = &spectrum[UNIT_COEFF_INDEX[i]..UNIT_COEFF_INDEX[i + 1]];
@@ -258,7 +258,7 @@ fn quantize(spectrum: &[f64]) -> ChannelCode {
                 peak <= 2.0_f64.powi(sf - 15),
                 "the signal fits the scale factors"
             );
-            let (coarse_bits, fine_bits) = precisions(sf, 0);
+            let (coarse_bits, fine_bits) = precisions(sf, g);
             let scale = 2.0_f64.powi(sf - 15);
             let limit = (1 << coarse_bits) - 1;
             let fine_limit = (1 << fine_bits) - 1;
@@ -342,27 +342,43 @@ fn the_fast_transform_is_the_dct4() {
     }
 }
 
-/// A two-tone signal, transformed, quantised finely and written as mono frames, decodes back to
-/// itself one frame late: every 16-bit sample within one step.
+/// Stream A: the two-tone signal, transformed and quantised under a flat gradient of 4, as four
+/// mono 48 kHz frames, two to a 2048-byte superframe. A superframe's frames follow each other,
+/// each ending on a byte, and the superframe is padded to its size. Returns the configuration
+/// word, the stream, and the signal's blocks; frame `t` codes blocks `t` and `t + 1`.
+fn two_tone_stream() -> ([u8; 4], Vec<u8>, Vec<Vec<f64>>) {
+    let g = 4;
+    let blocks = signal(5);
+    let mut stream = Vec::new();
+    for superframe in 0..2 {
+        let mut w = BitWriter::default();
+        for t in [2 * superframe, 2 * superframe + 1] {
+            let code = quantize(&forward(&blocks[t], &blocks[t + 1]), g);
+            write_header(&mut w, t % 2 == 0, 18, None, i64::from(g));
+            write_sf_fixed(&mut w, &code.units);
+            write_spectra(&mut w, &code, 30, g);
+            w.bits = w.bits.next_multiple_of(8);
+        }
+        stream.extend(w.finish(2048));
+    }
+    (word(0, 1024, 1), stream, blocks)
+}
+
+/// A two-tone signal, transformed, quantised and written as mono frames two to a superframe,
+/// decodes back to itself one frame late: every 16-bit sample within one step.
 #[test]
 fn finely_quantised_frames_decode_to_their_signal() {
-    let blocks = signal(6);
-    let mut decoder = Decoder::new(Config::parse(word(0, 2048, 0)).expect("a valid word"));
+    let (config, stream, blocks) = two_tone_stream();
+    let mut decoder = Decoder::new(Config::parse(config).expect("a valid word"));
     let mut pcm = Vec::new();
-    for t in 0..5 {
-        let code = quantize(&forward(&blocks[t], &blocks[t + 1]));
-        let mut w = BitWriter::default();
-        write_header(&mut w, true, 18, None, 0);
-        write_sf_fixed(&mut w, &code.units);
-        write_spectra(&mut w, &code, 30, 0);
-        let frame = w.finish(2048);
+    for superframe in stream.chunks(2048) {
         let used = decoder
-            .decode_frame(&frame, &mut pcm)
-            .expect("the frame decodes");
+            .decode_superframe(superframe, &mut pcm)
+            .expect("the superframe decodes");
         assert!(used <= 2048);
     }
-    assert_eq!(pcm.len(), 5 * 256);
-    for t in 1..5 {
+    assert_eq!(pcm.len(), 4 * 256);
+    for t in 1..4 {
         for i in 0..256 {
             let got = i32::from(to_i16(pcm[t * 256 + i]));
             let want = i32::from(to_i16(blocks[t][i]));
@@ -374,16 +390,15 @@ fn finely_quantised_frames_decode_to_their_signal() {
     }
 }
 
-/// Coarse values at precisions 2 to 7 are Huffman-coded; the frame decodes to exactly what the
-/// textbook synthesis makes of those values, over three frames of overlap.
-#[test]
-fn huffman_coded_spectra_decode_to_their_synthesis() {
+/// Stream B: three mono 48 kHz frames of 1024 bytes, one to a superframe, whose coarse values are
+/// random at precisions 2 to 7 and so Huffman-coded throughout. Returns the configuration word,
+/// the stream, and each frame's code.
+fn huffman_stream() -> ([u8; 4], Vec<u8>, Vec<ChannelCode>) {
     let mut rng = Lcg(3);
     let g = 13;
     let books = codebooks();
-    let mut decoder = Decoder::new(Config::parse(word(0, 1024, 0)).expect("a valid word"));
-    let mut pcm = Vec::new();
-    let mut spectra = Vec::new();
+    let mut stream = Vec::new();
+    let mut codes = Vec::new();
     for _ in 0..3 {
         let units: Vec<Unit> = (0..30)
             .map(|i| {
@@ -417,13 +432,28 @@ fn huffman_coded_spectra_decode_to_their_synthesis() {
         write_header(&mut w, true, 18, None, i64::from(g));
         write_sf_fixed(&mut w, &code.units);
         write_spectra(&mut w, &code, 30, g);
+        stream.extend(w.finish(1024));
+        codes.push(code);
+    }
+    (word(0, 1024, 0), stream, codes)
+}
+
+/// Coarse values at precisions 2 to 7 are Huffman-coded; the frame decodes to exactly what the
+/// textbook synthesis makes of those values, over three frames of overlap.
+#[test]
+fn huffman_coded_spectra_decode_to_their_synthesis() {
+    let (config, stream, codes) = huffman_stream();
+    let mut decoder = Decoder::new(Config::parse(config).expect("a valid word"));
+    let mut pcm = Vec::new();
+    let mut spectra = Vec::new();
+    for (frame, code) in stream.chunks(1024).zip(&codes) {
         decoder
-            .decode_frame(&w.finish(1024), &mut pcm)
+            .decode_frame(frame, &mut pcm)
             .expect("the frame decodes");
         let decoded = &decoder.blocks[0].channels[0].quantized;
         let written: Vec<i32> = code.units.iter().flat_map(|u| u.coarse.clone()).collect();
         assert_eq!(&decoded[..], &written[..], "the coarse values read back");
-        spectra.push(dequantized(&code, 30, g));
+        spectra.push(dequantized(code, 30, 13));
     }
     let want = synthesize(&spectra);
     for (i, (got, want)) in pcm.iter().zip(&want).enumerate() {
@@ -645,4 +675,36 @@ fn malformed_frames_are_refused_by_name() {
         Err(Error::Truncated)
     );
     assert_eq!(pcm.len(), 256, "only the one frame that decoded");
+}
+
+/// Prints streams A and B for a hardware decode to check this decoder against: each stream's
+/// configuration word and bytes, and the 16-bit samples decoded here, as hex. Run with
+/// `cargo test -p orbistoun-atrac9 -- --ignored --nocapture print_console_fixtures`.
+#[test]
+#[ignore = "prints the fixtures a hardware request ships; it checks nothing"]
+fn print_console_fixtures() {
+    let hex = |bytes: &[u8]| {
+        bytes.iter().fold(String::new(), |mut out, b| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    };
+    let streams = [
+        ("a", two_tone_stream().0, two_tone_stream().1, 2048),
+        ("b", huffman_stream().0, huffman_stream().1, 1024),
+    ];
+    for (name, config, stream, superframe) in streams {
+        let mut decoder = Decoder::new(Config::parse(config).expect("a valid word"));
+        let mut pcm = Vec::new();
+        for chunk in stream.chunks(superframe) {
+            decoder
+                .decode_superframe(chunk, &mut pcm)
+                .expect("the superframe decodes");
+        }
+        let samples: Vec<u8> = pcm.iter().flat_map(|&s| to_i16(s).to_le_bytes()).collect();
+        println!("stream-{name}-config {}", hex(&config));
+        println!("stream-{name}-bytes {}", hex(&stream));
+        println!("stream-{name}-pcm16 {}", hex(&samples));
+    }
 }

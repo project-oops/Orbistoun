@@ -223,7 +223,9 @@ impl Decoder {
     }
 
     /// Decodes every frame of the superframe at the start of `input`, appending its samples to
-    /// `out` interleaved, and answers how many bytes the frames used.
+    /// `out` interleaved, and answers how many bytes the frames used. A superframe's frames follow
+    /// one another, each starting on the byte after the last ends; padding, if any, is at the
+    /// superframe's end (LibAtrac9 `CSharp/LibAtrac9/Atrac9Decoder.cs`, `DecodeSuperFrame`).
     pub fn decode_superframe(&mut self, input: &[u8], out: &mut Vec<f64>) -> Result<usize, Error> {
         let mut used = 0;
         for _ in 0..self.config.frames_per_superframe() {
