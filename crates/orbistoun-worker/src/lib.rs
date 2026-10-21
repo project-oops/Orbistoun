@@ -1346,6 +1346,9 @@ fn install_guest_region_lookups() {
     orbistoun_gpu::agc_driver::install_queue_registration(
         orbistoun_video::queued::register_end_of_pipe,
     );
+    orbistoun_gpu::agc_driver::install_queue_unregistration(
+        orbistoun_video::queued::unregister_end_of_pipe,
+    );
 }
 
 /// Plants the `ORBISTOUN_WRITE` values on every import each clause names.

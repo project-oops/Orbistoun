@@ -3787,8 +3787,10 @@ fn kernel_create_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// `sceKernelGetEventFilter(event)`: the filter of an event [`kernel_wait_equeue`] delivered, the
-/// `i16` at `+0x08` of FreeBSD's `struct kevent` (D560), answered as an `int`. Its name says which
-/// field it reads; that it reads it this way is assumed. A null event answers the placeholder.
+/// `i16` at `+0x08` of FreeBSD's `struct kevent` (D560), answered as an `int`: sign-extended to 32
+/// bits, with the upper half of rax zero. Measured (obSCEne kq01,
+/// `report-20261020-kq01-census.log` rows 3625 and 3636): `0xfffffff5` for a user event, and
+/// `0x908` for a block whose bytes are their own offsets. A null event answers the placeholder.
 fn kernel_get_event_filter(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
@@ -3796,15 +3798,15 @@ fn kernel_get_event_filter(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's delivered event, by the call's contract; read through the checked
     // accessor.
     match unsafe { guest::read_u32(args[0].wrapping_add(0x08)) } {
-        Some(word) => i64::from((word & 0xffff) as u16 as i16) as u64,
+        Some(word) => u64::from(i32::from((word & 0xffff) as u16 as i16) as u32),
         None => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 
 /// `sceKernelGetEventId(event)`: the identifier of an event [`kernel_wait_equeue`] delivered, the
-/// `u64` at `+0x00` of `struct kevent` (D560). Read as [`kernel_get_event_filter`] reads its field,
-/// and assumed the same way: PPSA25872 takes it from a user event it triggered with ids 0 and 1
-/// and compares it against both (image+0x11c4212). A null event answers the placeholder.
+/// `u64` at `+0x00` of `struct kevent` (D560). Measured (obSCEne kq01,
+/// `report-20261020-kq01-census.log` rows 3624 and 3635): `0x22` for user event 0x22, and all
+/// eight bytes of a block whose bytes are their own offsets. A null event answers the placeholder.
 fn kernel_get_event_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
@@ -3814,12 +3816,13 @@ fn kernel_get_event_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     unsafe { guest::read_u64(args[0]) }.unwrap_or(u64::from(GuestError::Unimplemented.as_raw()))
 }
 
-/// The answer to a refused queue change (D930): a queue nobody created is the vendor `ESRCH` the
-/// event-flag family answers on the hardware (D524), an event nobody added FreeBSD's `ENOENT`, and
-/// a malformed change its `EINVAL`.
+/// The answer to a refused queue call (D930), as hardware answered each (obSCEne kq01,
+/// `report-20261020-kq01-census.log` rows 3499-3511 and 3575-3579): a queue that is null, never
+/// issued or deleted is `EBADF` (`0x80020009`), and an event nobody added is `ENOENT`
+/// (`0x80020002`). A malformed change is FreeBSD's `EINVAL`; no guest call makes one.
 fn equeue_refusal(refusal: equeue::Refusal) -> u64 {
     let errno = match refusal {
-        equeue::Refusal::NoQueue => orbistoun_core::errno::NO_SUCH,
+        equeue::Refusal::NoQueue => orbistoun_core::errno::BAD_DESCRIPTOR,
         equeue::Refusal::NoEvent => orbistoun_core::errno::NO_ENTRY,
         equeue::Refusal::Invalid => orbistoun_core::errno::INVALID,
         equeue::Refusal::TimedOut => ETIMEDOUT,
@@ -3859,8 +3862,9 @@ fn kernel_delete_user_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     user_event_change(args[0], args[1], equeue::EV_DELETE, 0, 0)
 }
 
-/// `sceKernelDeleteEqueue(equeue)`: deletes a queue and every event registered against it, waking
-/// a thread waiting on it (D930). A queue nobody created is the vendor `ESRCH`.
+/// `sceKernelDeleteEqueue(equeue)`: deletes a queue and every event registered against it (D930).
+/// A thread already waiting on it is not woken, as on hardware (see [`equeue::delete_equeue`]). A
+/// second delete, like any call on a queue that is gone, is `EBADF`.
 fn kernel_delete_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if equeue::delete_equeue(args[0]) {
         OK
@@ -3984,8 +3988,9 @@ fn posix_pthread_setcancelstate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// FreeBSD `ETIMEDOUT`, under the measured `0x8002_0000` vendor mapping.
 ///
-/// Shared by the event queue and the event flag, the two calls that can time out. The value is
-/// the published errno; neither call has been captured timing out on the hardware.
+/// Shared by the event queue and the event flag, the two calls that can time out. The event queue
+/// answers it on hardware for an empty queue at every timeout tried (obSCEne kq01,
+/// `report-20261020-kq01-census.log` rows 3512-3522).
 const ETIMEDOUT: u32 = 60;
 /// `sceKernelWaitEqueue(equeue, events, wanted, delivered, timeout)`.
 ///
@@ -3993,12 +3998,12 @@ const ETIMEDOUT: u32 = 60;
 /// wanted (`kevent(2)`'s `int nevents`), an out-count, and a pointer to a microsecond timeout. The
 /// delivered structure is `struct kevent`; see [`sync::PendingEvent`].
 ///
-/// The timeout is a 32-bit count: PPSA25872 stores a dword 0 and passes its address to drain a
-/// queue, calling until the wait answers non-zero (image+0x11c4208..0x11c4259), so the four bytes
-/// after it are whatever its stack held (D930).
+/// The timeout is a 32-bit count of microseconds. PPSA25872 stores a dword 0 and passes its
+/// address to drain a queue, calling until the wait answers non-zero (image+0x11c4208..0x11c4259).
+/// Hardware returned in 4 us for a slot holding 0 below 1 (obSCEne kq01,
+/// `report-20261020-kq01-census.log` row 3456).
 ///
-/// A bad handle, or a queue deleted while the caller waited on it, is refused with the vendor
-/// `ESRCH` (`0x80020003`) the rest of this family answers on the hardware.
+/// A queue that is null, never issued or deleted is `EBADF` (rows 3577-3578).
 fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::equeue_exists(args[0]) {
         return equeue_refusal(equeue::Refusal::NoQueue);
@@ -7738,8 +7743,9 @@ mod tests {
         assert_eq!(answer(&[0xa1; GUEST_ARG_REGISTERS]), 0x8002_0009);
     }
 
-    /// `sceKernelGetEventFilter` answers a delivered event's filter, sign-extended: the `i16` at
-    /// `+0x08` of `struct kevent` (D560).
+    /// `sceKernelGetEventFilter` answers a delivered event's filter as a 32-bit `int`: the `i16` at
+    /// `+0x08` of `struct kevent` (D560), sign-extended to 32 bits and no further. Hardware answered
+    /// rax `0xfffffff5` for a user event (obSCEne kq01, `report-20261020-kq01-census.log` row 3625).
     #[test]
     fn an_events_filter_is_read_from_its_kevent() {
         let event = super::sync::PendingEvent {
@@ -7754,7 +7760,7 @@ mod tests {
         .to_bytes();
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = event.as_ptr() as u64;
-        assert_eq!(super::kernel_get_event_filter(&args) as i64, -14);
+        assert_eq!(super::kernel_get_event_filter(&args), 0xffff_fff2);
     }
 
     /// A user event goes from trigger to wait as PPSA25872 drives it (D930): added with the edge
@@ -7814,9 +7820,19 @@ mod tests {
         );
     }
 
-    /// Changes to missing events and queues are refused by name, not accepted (D930).
+    /// Changes to missing events and queues are refused with what hardware answered (obSCEne kq01,
+    /// `report-20261020-kq01-census.log` rows 3499-3511 and 3575-3579): an event nobody added is
+    /// `ENOENT`, and a queue that is null, never issued or deleted is `EBADF`.
     #[test]
     fn user_event_and_queue_refusals() {
+        assert_eq!(
+            super::kernel_trigger_user_event(&args([0, 0x99, 0, 0])),
+            0x8002_0009
+        );
+        assert_eq!(
+            super::kernel_add_user_event_edge(&args([0, 0x22, 0, 0])),
+            0x8002_0009
+        );
         let queue = super::sync::create_equeue("refusals");
         assert_eq!(
             super::kernel_trigger_user_event(&args([queue, 0x99, 0, 0])),
@@ -7841,16 +7857,16 @@ mod tests {
         );
         assert_eq!(
             super::kernel_delete_equeue(&args([queue, 0, 0, 0])),
-            0x8002_0003
+            0x8002_0009
         );
         assert_eq!(
             super::kernel_trigger_user_event(&args([queue, 0x22, 0, 0])),
-            0x8002_0003
+            0x8002_0009
         );
         let mut events = [0_u8; 0x20];
         assert_eq!(
             super::kernel_wait_equeue(&args([queue, events.as_mut_ptr() as u64, 1, 0])),
-            0x8002_0003
+            0x8002_0009
         );
     }
 

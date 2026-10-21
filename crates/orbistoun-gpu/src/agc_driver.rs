@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 guest_module! {
     "libSceAgcDriver" {
         "sceAgcDriverAddEqEvent" => 6,
+        // (queue, id): PPSA04263 passes the two in rdi and esi (image+0x1dee40).
+        "sceAgcDriverDeleteEqEvent" => 2,
         "sceAgcDriverCreateQueue" => 3,
         // (queue): refused as measured.
         "sceAgcDriverDestroyQueue" => 1,
@@ -140,6 +142,36 @@ fn add_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match queue_registration().get() {
         Some(register) if register(args[0], args[1], args[2]) => 0,
         Some(_) => BAD_QUEUE,
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// Removes an end-of-pipe registration from a queue, answering whether it was there - installed
+/// by the worker, as [`QueueRegistration`] is.
+pub type QueueUnregistration = fn(u64, u64) -> bool;
+
+fn queue_unregistration() -> &'static OnceLock<QueueUnregistration> {
+    static UNREGISTER: OnceLock<QueueUnregistration> = OnceLock::new();
+    &UNREGISTER
+}
+
+/// Installs what `sceAgcDriverDeleteEqEvent` removes through. First install wins.
+pub fn install_queue_unregistration(unregister: QueueUnregistration) {
+    let _ = queue_unregistration().set(unregister);
+}
+
+/// `SCE_KERNEL_ERROR_ENOENT`: what `sceAgcDriverDeleteEqEvent` answers for an event that is not
+/// registered (obSCEne REQ-20261020T1315Z-kq01, `report-20261020-kq01-census.log` row 3647).
+const NOT_REGISTERED: u64 = 0x8002_0002;
+
+/// `sceAgcDriverDeleteEqEvent(queue, id)`: removes the end-of-pipe event [`add_eq_event`]
+/// registered, so no later release posts to it (D762, D930). Measured (obSCEne
+/// REQ-20261020T1315Z-kq01, rows 3645-3647): `0` the first time, `0x80020002` the second. A queue
+/// that is not live has nothing registered and answers the same; that case is not measured.
+fn delete_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match queue_unregistration().get() {
+        Some(unregister) if unregister(args[0], args[1]) => 0,
+        Some(_) => NOT_REGISTERED,
         None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
 }
@@ -6235,6 +6267,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
         ("sceAgcDriverSetTFRing", set_tf_ring),
         ("sceAgcDriverAddEqEvent", add_eq_event),
+        ("sceAgcDriverDeleteEqEvent", delete_eq_event),
         ("sceAgcDriverGetEqContextId", get_eq_context_id),
         ("sceAgcDriverGetEqEventType", get_eq_event_type),
         (
@@ -8774,6 +8807,20 @@ mod tests {
         assert_eq!(served(&[0x5e2d_0000_ee40, 0, 0, 0, 0, 0]), 0);
         assert_eq!(served(&[0x5e2d_0000_ee40, 1, 0, 0, 0, 0]), 0);
         assert_eq!(served(&[0xdead, 0, 0, 0, 0, 0]), 0x8002_0009);
+    }
+
+    /// `sceAgcDriverDeleteEqEvent` answers `0` for a registered event and `0x80020002` once it is
+    /// gone (obSCEne REQ-20261020T1315Z-kq01, `report-20261020-kq01-census.log` rows 3646-3647).
+    #[test]
+    fn delete_eq_event_answers_as_measured() {
+        super::install_queue_unregistration(|handle, id| handle == 0x5e2d_0000_ee41 && id == 0);
+        let served = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "sceAgcDriverDeleteEqEvent")
+            .map(|&(_, f)| f)
+            .expect("served");
+        assert_eq!(served(&[0x5e2d_0000_ee41, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(served(&[0x5e2d_0000_ee41, 1, 0, 0, 0, 0]), 0x8002_0002);
     }
 
     /// `sceAgcDriverGetEqEventType` answers a kevent's `data` and `sceAgcDriverGetEqContextId` the

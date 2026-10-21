@@ -196,3 +196,16 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 5266 and 10029-10051, 166-agc/driver-create-queue and driver-queue-types."
 found_in = ["STKT00001"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDriverDeleteEqEvent"
+arity = 2
+purpose = "(queue, id): removes the end-of-pipe event sceAgcDriverAddEqEvent registered against an event queue."
+edge_cases = [
+    "Two arguments: PPSA04263 tail-calls it with the queue in rdi and the id in esi (image+0x1dee40).",
+    "MEASURED: 0 for a registered event, then 0x80020002 (ENOENT) for the same one again.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3645-3647."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-21"

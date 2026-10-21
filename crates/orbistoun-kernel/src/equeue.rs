@@ -12,7 +12,7 @@
 //! order they were posted, among the knotes that became ready around them.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
@@ -127,7 +127,7 @@ pub struct Change {
 /// Why a queue refused a change or a wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The handle names no queue, or names one deleted while the caller waited on it.
+    /// The handle names no queue: never created, or deleted.
     NoQueue,
     /// No such event is registered and the change did not add one: FreeBSD's `ENOENT`
     /// (`kern_event.c:1873-1876`).
@@ -168,6 +168,33 @@ enum Route {
     Filter(i16, u64),
 }
 
+impl Route {
+    /// The identifier the route was registered under.
+    const fn id(self) -> u64 {
+        match self {
+            Self::Ident(id) | Self::Filter(_, id) => id,
+        }
+    }
+}
+
+/// Asked, on behalf of a waiter about to block, for the next event of a route's `id` after the
+/// waiter's logical time in nanoseconds, or `None` when there is none to give it. The event's
+/// `display_nanos` is when it happens, and the waiter's clock moves up to it (D786).
+pub type EventSource = fn(id: u64, waiter_nanos: u64) -> Option<PendingEvent>;
+
+/// One subsystem registration on a queue.
+#[derive(Debug, Clone, Copy)]
+struct RouteEntry {
+    route: Route,
+    /// The caller's opaque word, echoed on every delivery.
+    udata: u64,
+    /// Whether a post replaces this route's event while it waits uncollected, as an `EV_CLEAR`
+    /// knote is queued once however often it fires, rather than queueing another.
+    coalesce: bool,
+    /// What a wait about to block asks for this route's next event, if anything.
+    source: Option<EventSource>,
+}
+
 /// What the ready list holds, oldest first.
 #[derive(Debug, Clone, Copy)]
 enum Ready {
@@ -180,8 +207,8 @@ enum Ready {
 /// A queue's state, under one lock so a change and a wait see the same thing.
 #[derive(Debug, Default)]
 struct State {
-    /// Subsystem routes with the caller's `udata`, in the order they were registered.
-    routes: Vec<(Route, u64)>,
+    /// Subsystem routes, in the order they were registered.
+    routes: Vec<RouteEntry>,
     /// Registered events by filter and identifier.
     knotes: BTreeMap<(i16, u64), Knote>,
     /// What a wait delivers, oldest first.
@@ -192,8 +219,6 @@ struct State {
 struct GuestEqueue {
     name: String,
     state: Mutex<State>,
-    /// Set when the queue is deleted, so a thread waiting on it stops waiting.
-    deleted: AtomicBool,
     /// Waits begun against this queue.
     ///
     /// A queue waited on and never posted to is a stuck thread, and without this count it looks like
@@ -201,7 +226,7 @@ struct GuestEqueue {
     waited: AtomicU64,
     /// Events actually handed to a caller.
     delivered: AtomicU64,
-    /// Signalled when something becomes ready or the queue is deleted.
+    /// Signalled when something becomes ready.
     arrived: Condvar,
 }
 
@@ -214,6 +239,27 @@ impl GuestEqueue {
     fn push(&self, state: &mut State, ready: Ready) {
         state.ready.push_back(ready);
         self.arrived.notify_all();
+    }
+
+    /// Posts `event` to `entry`'s route with the route's `udata`: in place of the route's
+    /// uncollected event when it coalesces and has one, at the back otherwise.
+    fn post(&self, state: &mut State, entry: RouteEntry, event: PendingEvent) {
+        let event = PendingEvent {
+            udata: entry.udata,
+            ..event
+        };
+        if entry.coalesce {
+            let waiting = state
+                .ready
+                .iter_mut()
+                .find(|ready| matches!(ready, Ready::Posted(r, _) if *r == entry.route));
+            if let Some(Ready::Posted(_, held)) = waiting {
+                *held = event;
+                self.arrived.notify_all();
+                return;
+            }
+        }
+        self.push(state, Ready::Posted(entry.route, event));
     }
 }
 
@@ -235,7 +281,6 @@ pub fn create_equeue(name: &str) -> EqueueHandle {
             Arc::new(GuestEqueue {
                 name: name.to_owned(),
                 state: Mutex::new(State::default()),
-                deleted: AtomicBool::new(false),
                 waited: AtomicU64::new(0),
                 delivered: AtomicU64::new(0),
                 arrived: Condvar::new(),
@@ -247,17 +292,18 @@ pub fn create_equeue(name: &str) -> EqueueHandle {
 
 /// Deletes a queue, answering whether there was one.
 ///
-/// Its events go with it, as FreeBSD's `kqueue_drain` drops every knote (`kern_event.c:2429-2440`).
-/// A thread waiting on it is woken and told the queue is gone.
+/// Its events go with it, as FreeBSD's `kqueue_drain` drops every knote (`kern_event.c:2429-2440`),
+/// and the handle refuses every call after. A thread already waiting on it is not woken: on
+/// hardware it was still blocked 2 s after the delete (obSCEne kq01,
+/// `report-20261020-kq01-census.log` row 3618), so its own timeout ends its wait, as a FreeBSD
+/// `kevent` caller keeps its reference to a closed kqueue until it returns.
 pub fn delete_equeue(handle: EqueueHandle) -> bool {
     let Some(queue) = equeues().lock().ok().and_then(|mut t| t.remove(&handle)) else {
         return false;
     };
-    queue.deleted.store(true, Ordering::Release);
     if let Some(mut state) = queue.state() {
         *state = State::default();
     }
-    queue.arrived.notify_all();
     true
 }
 
@@ -454,8 +500,8 @@ fn scan(state: &mut State, wanted: usize) -> Vec<PendingEvent> {
 ///
 /// # Errors
 ///
-/// [`Refusal::NoQueue`] for a handle naming no queue, or one deleted during the wait, and
-/// [`Refusal::TimedOut`] when nothing became ready in time.
+/// [`Refusal::NoQueue`] for a handle naming no queue, and [`Refusal::TimedOut`] when nothing
+/// became ready in time, which is how a wait on a queue deleted under it ends.
 pub fn wait_events(
     handle: EqueueHandle,
     wanted: usize,
@@ -465,16 +511,45 @@ pub fn wait_events(
     // Counted before the wait, so a wait that never returns is still counted.
     queue.waited.fetch_add(1, Ordering::Relaxed);
     let mut state = queue.state().ok_or(Refusal::NoQueue)?;
+    // The sources are asked once a wait, the first time it would block.
+    let mut asked = false;
     loop {
-        if queue.deleted.load(Ordering::Acquire) {
-            return Err(Refusal::NoQueue);
-        }
         let events = scan(&mut state, wanted);
         if !events.is_empty() {
             queue
                 .delivered
                 .fetch_add(events.len() as u64, Ordering::Relaxed);
             return Ok(events);
+        }
+        if !asked && until != Blocking::Never {
+            asked = true;
+            let sources: Vec<RouteEntry> = state
+                .routes
+                .iter()
+                .filter(|entry| entry.source.is_some())
+                .copied()
+                .collect();
+            if !sources.is_empty() {
+                // Asked without the queue's lock, so a source may take its own locks, and post,
+                // without deadlocking against a poster that holds them.
+                drop(state);
+                let waiter = orbistoun_hle::clocks::thread_time();
+                let found: Vec<(RouteEntry, PendingEvent)> = sources
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let ask = entry.source?;
+                        ask(entry.route.id(), waiter).map(|event| (entry, event))
+                    })
+                    .collect();
+                state = queue.state().ok_or(Refusal::NoQueue)?;
+                for (entry, event) in found {
+                    // A route removed while its source was asked takes nothing.
+                    if state.routes.iter().any(|r| r.route == entry.route) {
+                        queue.post(&mut state, entry, event);
+                    }
+                }
+                continue;
+            }
         }
         state = match until {
             Blocking::Never => return Err(Refusal::TimedOut),
@@ -504,19 +579,30 @@ pub fn take_events(handle: EqueueHandle, wanted: usize) -> Vec<PendingEvent> {
 }
 
 /// Adds a route to a queue, answering whether the queue exists. A route already there keeps its
-/// place and takes the new `udata`, as a second `EV_ADD` updates a knote rather than adding one.
-fn add_route(handle: EqueueHandle, route: Route, udata: u64) -> bool {
+/// place and takes the new registration, as a second `EV_ADD` updates a knote rather than adding
+/// one.
+fn add_route(handle: EqueueHandle, entry: RouteEntry) -> bool {
     let Some(queue) = queue(handle) else {
         return false;
     };
     let Some(mut state) = queue.state() else {
         return false;
     };
-    match state.routes.iter_mut().find(|(r, _)| *r == route) {
-        Some(entry) => entry.1 = udata,
-        None => state.routes.push((route, udata)),
+    match state.routes.iter_mut().find(|r| r.route == entry.route) {
+        Some(existing) => *existing = entry,
+        None => state.routes.push(entry),
     }
     true
+}
+
+/// A route that queues each post and has no source, as flips and end-of-pipe releases register.
+const fn plain(route: Route, udata: u64) -> RouteEntry {
+    RouteEntry {
+        route,
+        udata,
+        coalesce: false,
+        source: None,
+    }
 }
 
 /// Removes a route and any completion posted to it and not yet collected, as `EV_DELETE` drops a
@@ -529,7 +615,7 @@ fn remove_route(handle: EqueueHandle, route: Route) -> bool {
         return false;
     };
     let before = state.routes.len();
-    state.routes.retain(|(r, _)| *r != route);
+    state.routes.retain(|r| r.route != route);
     state
         .ready
         .retain(|ready| !matches!(ready, Ready::Posted(r, _) if *r == route));
@@ -546,7 +632,7 @@ pub fn register_event(handle: EqueueHandle, identifier: u64) -> bool {
 
 /// The same, carrying the caller's opaque word so a delivery can echo it.
 pub fn register_event_with_udata(handle: EqueueHandle, identifier: u64, udata: u64) -> bool {
-    add_route(handle, Route::Ident(identifier), udata)
+    add_route(handle, plain(Route::Ident(identifier), udata))
 }
 
 /// Removes what [`register_event_with_udata`] registered, answering whether it was there.
@@ -558,7 +644,33 @@ pub fn unregister_event(handle: EqueueHandle, identifier: u64) -> bool {
 /// whether the queue exists. Kept apart from plain identifiers, so a subsystem that posts by
 /// filter ([`post_filtered_event`]) reaches only what registered for it.
 pub fn register_filtered_event(handle: EqueueHandle, filter: i16, id: u64, udata: u64) -> bool {
-    add_route(handle, Route::Filter(filter, id), udata)
+    add_route(handle, plain(Route::Filter(filter, id), udata))
+}
+
+/// Registers `filter`'s event `id` as [`register_filtered_event`] does, for an event the queue
+/// holds at most once: a post while the last is uncollected replaces it in its place, as an
+/// `EV_CLEAR` knote is queued once however often it fires. A display's vblank is such an event:
+/// one wait takes one, however many blanks passed (obSCEne vb01).
+///
+/// `source`, when given, is asked for the next event by a wait about to block on the queue (see
+/// [`EventSource`]): how an event comes to a waiter when nothing posts it on its own, as on the
+/// logical clock. Answers whether the queue exists.
+pub fn register_coalescing_event(
+    handle: EqueueHandle,
+    filter: i16,
+    id: u64,
+    udata: u64,
+    source: Option<EventSource>,
+) -> bool {
+    add_route(
+        handle,
+        RouteEntry {
+            route: Route::Filter(filter, id),
+            udata,
+            coalesce: true,
+            source,
+        },
+    )
 }
 
 /// Removes what [`register_filtered_event`] registered, answering whether it was there.
@@ -577,20 +689,14 @@ pub fn post_filtered_event(filter: i16, event: impl Fn(u64) -> PendingEvent) -> 
         let Some(mut state) = queue.state() else {
             continue;
         };
-        let mine: Vec<(Route, u64)> = state
+        let mine: Vec<RouteEntry> = state
             .routes
             .iter()
-            .filter(|(route, _)| matches!(route, Route::Filter(f, _) if *f == filter))
+            .filter(|entry| matches!(entry.route, Route::Filter(f, _) if f == filter))
             .copied()
             .collect();
-        for (route, udata) in mine {
-            let Route::Filter(_, id) = route else {
-                continue;
-            };
-            queue.push(
-                &mut state,
-                Ready::Posted(route, PendingEvent { udata, ..event(id) }),
-            );
+        for entry in mine {
+            queue.post(&mut state, entry, event(entry.route.id()));
             posted += 1;
         }
     }
@@ -612,14 +718,11 @@ pub fn post_event(ident: u64, event: PendingEvent) -> usize {
         let Some(mut state) = queue.state() else {
             continue;
         };
-        let Some(&(_, udata)) = state.routes.iter().find(|(r, _)| *r == route) else {
+        let Some(&entry) = state.routes.iter().find(|r| r.route == route) else {
             continue;
         };
         // The caller's own word, echoed back the way `kevent` echoes it.
-        queue.push(
-            &mut state,
-            Ready::Posted(route, PendingEvent { udata, ..event }),
-        );
+        queue.post(&mut state, entry, event);
         posted += 1;
     }
     posted
@@ -643,8 +746,9 @@ pub fn post_event_everywhere(event: PendingEvent) -> usize {
         let (route, udata) = state
             .routes
             .first()
-            .copied()
-            .unwrap_or((Route::Ident(event.ident), event.udata));
+            .map_or((Route::Ident(event.ident), event.udata), |r| {
+                (r.route, r.udata)
+            });
         queue.push(
             &mut state,
             Ready::Posted(route, PendingEvent { udata, ..event }),
@@ -1009,14 +1113,23 @@ mod tests {
         assert!(start.elapsed() >= std::time::Duration::from_millis(20));
     }
 
-    /// Deleting a queue refuses everything after, and wakes a thread waiting on it.
+    /// Deleting a queue refuses everything after, but does not wake a thread already waiting on it:
+    /// on hardware that thread was still blocked 2 s after the delete (obSCEne kq01,
+    /// `report-20261020-kq01-census.log` row 3618). Its own timeout is what ends its wait.
     #[test]
-    fn a_deleted_queue_wakes_its_waiter_and_refuses_after() {
+    fn a_deleted_queue_leaves_its_waiter_waiting_and_refuses_after() {
         let queue = super::create_equeue("deleted");
-        let waiter = std::thread::spawn(move || super::wait_events(queue, 1, Blocking::Forever));
+        let until =
+            Blocking::Until(std::time::Instant::now() + std::time::Duration::from_millis(200));
+        let waiter = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            (super::wait_events(queue, 1, until), start.elapsed())
+        });
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(super::delete_equeue(queue));
-        assert_eq!(waiter.join().expect("returns"), Err(Refusal::NoQueue));
+        let (outcome, took) = waiter.join().expect("returns");
+        assert_eq!(outcome, Err(Refusal::TimedOut), "ended by its own timeout");
+        assert!(took >= std::time::Duration::from_millis(200), "{took:?}");
         assert!(!super::delete_equeue(queue), "only once");
         assert!(!super::register_event(queue, 1));
         assert_eq!(trigger(queue, 1, 0), Err(Refusal::NoQueue));
@@ -1054,5 +1167,91 @@ mod tests {
         trigger(queue, 1, 0).expect("triggered");
         super::post_event(port, completion(port, 1, 0));
         assert_eq!(idents(&super::take_events(queue, 8)), vec![port, 1, port]);
+    }
+
+    /// A coalescing route holds one uncollected event, the latest, in the place the first took on
+    /// the ready list: a wait takes one vblank however many passed (obSCEne vb01).
+    #[test]
+    fn a_coalescing_route_holds_its_latest_event_in_its_place() {
+        let queue = super::create_equeue("coalescing");
+        let port = 0x5155;
+        assert!(super::register_event(queue, port));
+        assert!(super::register_coalescing_event(
+            queue, -1301, 7, 0x77, None
+        ));
+        super::post_event(port, completion(port, 1, 0));
+        for data in 1..=3 {
+            super::post_filtered_event(-1301, |id| completion(id, data, 0));
+        }
+        super::post_event(port, completion(port, 2, 0));
+        let events = super::take_events(queue, 8);
+        assert_eq!(idents(&events), vec![port, 7, port], "{events:?}");
+        assert_eq!(events[1].data, 3, "the latest blank's");
+        assert_eq!(events[1].udata, 0x77, "the registration's word");
+        super::post_filtered_event(-1301, |id| completion(id, 4, 0));
+        assert_eq!(
+            super::take_events(queue, 8).len(),
+            1,
+            "collected, so queued again"
+        );
+    }
+
+    /// The event `source` answers for a waiter: the next one after `waiter_nanos`, a refresh on.
+    #[allow(clippy::unnecessary_wraps)]
+    fn next_blank(id: u64, waiter_nanos: u64) -> Option<PendingEvent> {
+        Some(PendingEvent {
+            display_nanos: waiter_nanos + 16_666_667,
+            ..completion(id, 1, 0)
+        })
+    }
+
+    /// A source that has nothing to give. It answers `Option` because an `EventSource` does.
+    #[allow(clippy::unnecessary_wraps)]
+    fn no_blank(_: u64, _: u64) -> Option<PendingEvent> {
+        None
+    }
+
+    /// A wait about to block asks the route's source, and takes what it answers, carrying its time;
+    /// a poll does not ask, and a source with nothing leaves the wait to its timeout.
+    #[test]
+    fn a_wait_about_to_block_asks_the_routes_source() {
+        let queue = super::create_equeue("sourced");
+        assert!(super::register_coalescing_event(
+            queue,
+            -1302,
+            9,
+            0x99,
+            Some(next_blank)
+        ));
+        assert!(
+            super::take_events(queue, 4).is_empty(),
+            "a poll does not ask"
+        );
+        let soon =
+            || Blocking::Until(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let start = std::time::Instant::now();
+        let events = super::wait_events(queue, 4, soon()).expect("the source answered");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "without blocking"
+        );
+        assert_eq!(idents(&events), vec![9]);
+        assert_eq!(events[0].udata, 0x99);
+        assert_eq!(
+            events[0].display_nanos,
+            orbistoun_hle::clocks::thread_time() + 16_666_667
+        );
+
+        let quiet = super::create_equeue("quiet source");
+        assert!(super::register_coalescing_event(
+            quiet,
+            -1302,
+            9,
+            0,
+            Some(no_blank)
+        ));
+        let until =
+            Blocking::Until(std::time::Instant::now() + std::time::Duration::from_millis(20));
+        assert_eq!(super::wait_events(quiet, 4, until), Err(Refusal::TimedOut));
     }
 }

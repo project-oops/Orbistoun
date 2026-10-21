@@ -80,10 +80,13 @@ fn a_queue_answers_to_the_handle_it_wrote_and_no_other() {
     );
     assert_eq!(
         refused,
-        u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw()),
+        u64::from(
+            orbistoun_core::GuestError::vendor(orbistoun_core::errno::BAD_DESCRIPTOR).as_raw()
+        ),
         concat!(
-            "and it refuses with the vendor code the event-flag family answers, which obSCEne ",
-            "measured - not the placeholder a guest would fail to recognise (D125)"
+            "and it refuses with EBADF, as hardware refused a queue nobody created (obSCEne kq01, ",
+            "report-20261020-kq01-census.log rows 3500-3501 and 3510-3511) - not the placeholder ",
+            "a guest would fail to recognise (D125)"
         )
     );
     drop(name);

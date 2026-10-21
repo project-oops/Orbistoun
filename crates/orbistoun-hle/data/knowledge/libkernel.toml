@@ -213,9 +213,10 @@ purpose = "Registers a user event, by identifier, against an event queue."
 edge_cases = [
     "Arity 2: the third register holds 0x7fff0001, orbistoun's own placeholder left by an earlier stub, which is what fixes the count rather than a guess.",
     'PPSA02664 registers identifiers 0x1 and 0x2 against the queue it named "flip equeu", both accepted once sceKernelCreateEqueue began writing its out-parameter.',
-    "A handle no queue answers is refused with the vendor ESRCH the event-flag family answers, not a placeholder: a registration accepted against a queue nobody created promises delivery from something that does not exist.",
+    "MEASURED: the event is EV_CLEAR (flags 0x20 when delivered), delivered once per run of triggers; adding the same id again answers 0 and keeps one event; a null queue is 0x80020009 (EBADF). orbistoun adds it as EV_ADD | EV_CLEAR (D930).",
 ]
-known_by = "guest-observed"
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3451, 3458-3470, 3502-3505 and 3511."
 found_in = ["PPSA02664"]
 found_on = "2026-09-03"
 
@@ -2710,10 +2711,10 @@ purpose = "(event): the filter of an event sceKernelWaitEqueue delivered."
 returns = "count"
 edge_cases = [
     "PPSA25872's GPU threads call it on the events they wait for once their first submissions complete.",
-    "orbistoun answers the i16 at +0x08 of the event, sign-extended, as the struct kevent layout of D560 places it; a null event answers the placeholder.",
+    "MEASURED: the i16 at +0x08 of the event as a 32-bit int, the upper half of rax zero: 0xfffffff5 for a user event, 0x908 for a block whose bytes are their own offsets. A null event answers the placeholder.",
 ]
-known_by = "assumed"
-assumptions = ["The name says which field it reads; that it reads the kevent field at +0x08 as an int is assumed from D560's layout, not measured."]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3625 and 3636."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-11"
 
@@ -2854,10 +2855,11 @@ arity = 1
 purpose = "(equeue): deletes an event queue and every event registered against it."
 edge_cases = [
     "One argument: PPSA25872 passes only rdi (image+0x16df3fb).",
-    "orbistoun wakes a thread waiting on the queue and answers it the bad-queue ESRCH; a queue nobody created is ESRCH too (D930).",
+    "MEASURED: 0 for a live queue, then 0x80020009 (EBADF) for the same handle again; waits and triggers on a deleted queue are EBADF too.",
+    "MEASURED: a thread already blocked in sceKernelWaitEqueue on the queue is not woken by the delete; it was still blocked 2 s later. orbistoun leaves it waiting until its own timeout (D930).",
 ]
-known_by = "guest-observed"
-assumptions = ["What a waiter blocked on a deleted queue sees, and the code for a bad handle, are assumed (kq01 section 8)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3575-3579 and 3614-3618."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-20"
 
@@ -2867,10 +2869,11 @@ arity = 2
 purpose = "(equeue, id): removes a user event and any delivery it had pending."
 edge_cases = [
     "Two arguments: PPSA25872 passes the queue and id 0 (image+0x11c452f).",
-    "orbistoun applies it as EV_DELETE; an id nobody added is ENOENT (D930).",
+    "orbistoun applies it as EV_DELETE (D930).",
+    "MEASURED: 0 the first time, then 0x80020002 (ENOENT) for the same id; ENOENT for an id never added, and a trigger after the delete is ENOENT.",
 ]
-known_by = "guest-observed"
-assumptions = ["The ENOENT code for an unregistered id is assumed from FreeBSD kern_event.c:1873-1876 (kq01 section 6)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3506-3509."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-20"
 
@@ -2880,10 +2883,10 @@ arity = 1
 purpose = "(event): the identifier of an event sceKernelWaitEqueue delivered."
 edge_cases = [
     "PPSA25872 calls it on a user event (filter -11) it triggered with ids 0 and 1 and compares the answer against both (image+0x11c4212).",
-    "orbistoun answers the u64 at +0x00 of the event, the ident of struct kevent as D560 places it; a null event answers the placeholder.",
+    "MEASURED: all eight bytes at +0x00 of the event, the kevent ident: 0x22 for user event 0x22, and 0x0706050403020100 for a block whose bytes are their own offsets. A null event answers the placeholder.",
 ]
-known_by = "assumed"
-assumptions = ["That it reads the kevent ident at +0x00 is assumed from D560's layout, not measured (obSCEne REQ-20261020T1315Z-kq01 section 9)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3624 and 3635."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-20"
 
@@ -2893,9 +2896,11 @@ arity = 3
 purpose = "(equeue, id, udata): fires a user event registered against the queue."
 edge_cases = [
     "Three arguments: PPSA25872 zeroes edx before the call (image+0x16f1e32) and triggers ids 0, 1 and 999.",
-    "orbistoun applies it as a kevent change with NOTE_TRIGGER: the event is delivered once by the next wait however many triggers came before it, carrying the last trigger's udata; an id nobody added is ENOENT (D930).",
+    "orbistoun applies it as a kevent change with NOTE_TRIGGER (D930).",
+    "MEASURED: triggers before a wait coalesce into one event carrying the last trigger's udata, data and fflags 0; events come back in trigger order.",
+    "MEASURED: an id never added is 0x80020002 (ENOENT); a null or never-issued queue is 0x80020009 (EBADF).",
 ]
-known_by = "guest-observed"
-assumptions = ["The udata a coalesced trigger leaves and the ENOENT code for an unregistered id are assumed from FreeBSD kern_event.c (kq01 sections 3 and 6)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1315Z-kq01, reports/hardware/report-20261020-kq01-census.log rows 3471-3482 and 3499-3501."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-20"

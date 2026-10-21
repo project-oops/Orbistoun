@@ -124,6 +124,13 @@ pub fn register_end_of_pipe(queue: u64, id: u64, udata: u64) -> bool {
     orbistoun_kernel::sync::register_filtered_event(queue, EVFILT_AGC, id, udata)
 }
 
+/// `sceAgcDriverDeleteEqEvent(queue, id)`: removes what [`register_end_of_pipe`] registered, with
+/// any end-of-pipe event posted to it and not yet collected, answering whether it was there.
+#[must_use]
+pub fn unregister_end_of_pipe(queue: u64, id: u64) -> bool {
+    orbistoun_kernel::sync::unregister_filtered_event(queue, EVFILT_AGC, id)
+}
+
 /// Posts the driver's end-of-pipe event to every queue registered for it (D762), as hardware posts
 /// it for a retired interrupting release (`-eo03`, `kevent-32b`): `ident` the registered id,
 /// `filter` `EVFILT_AGC`, `flags` `AGC_EVENT_FLAGS`, `fflags` 0, `data` the release's context
