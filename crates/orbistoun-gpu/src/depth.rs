@@ -204,6 +204,32 @@ pub const fn depth_target_id(target: &DepthTarget) -> ResourceId {
     depth_target_slice_id(target.base, target.slice)
 }
 
+/// The slices a layered depth-only draw sends its primitives to (D936): `SLICE_START` to
+/// `SLICE_MAX` of `DB_DEPTH_VIEW` (`gfx103.json`: bits 10:0 with 12:11 above them, and 23:13 with
+/// 31:30), where `PA_CL_VS_OUT_CNTL` has the hardware read each primitive's layer and no colour
+/// buffer is bound, so the depth view is the one the layers index. [`None`] for any other draw, or
+/// a view of one slice.
+#[must_use]
+pub fn depth_layer_slices(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<(u32, u32)> {
+    let out_cntl = latest(crate::registers::PA_CL_VS_OUT_CNTL)?;
+    let unbound = latest(crate::registers::CB_COLOR0_INFO)
+        .is_none_or(|info| crate::registers::decode_colour_target_format(info).is_unbound());
+    if out_cntl & crate::registers::USE_VTX_RENDER_TARGET_INDX == 0 || !unbound {
+        return None;
+    }
+    let view = latest(DB_DEPTH_VIEW)?;
+    let start = (view & 0x7FF) | (view >> 11 & 0x3) << 11;
+    let last = (view >> 13 & 0x7FF) | (view >> 30 & 0x3) << 11;
+    (last > start).then_some((start, last))
+}
+
+/// The id of the depth target `slice` slices on from `target`'s surface's slice zero: a sibling of
+/// `target` in the same surface (D936).
+#[must_use]
+pub const fn depth_target_sibling(target: ResourceId, slice: u32) -> ResourceId {
+    ResourceId((target.0 & !(0x1FFF << 40)) | (slice as u64 & 0x1FFF) << 40)
+}
+
 /// The id of slice `slice` of the surface whose slice zero is `first`
 /// ([`depth_target_id_at`]): a depth cube's faces (D918).
 #[must_use]
@@ -857,6 +883,42 @@ mod tests {
         assert_eq!(
             depth_target_at(&written).map(|t| t.base),
             Some(0x3_0000 << 8)
+        );
+    }
+
+    /// A draw whose primitives pick their layer and whose colour buffer is unbound sends them to
+    /// its depth view's slices (D936); bound colour, no layer, or one slice is not such a draw.
+    #[test]
+    fn a_layered_depth_only_draw_names_its_depth_slices() {
+        use super::depth_layer_slices;
+        let draw = |out_cntl: u32, info: Option<u32>, view: u32| {
+            depth_layer_slices(move |register| match register {
+                0xA207 => Some(out_cntl),
+                0xA31C => info,
+                0xA002 => Some(view),
+                _ => None,
+            })
+        };
+        let layered = 1 << 18;
+        let cube = 5 << 13;
+        assert_eq!(draw(layered, Some(0), cube), Some((0, 5)), "COLOR_INVALID");
+        assert_eq!(
+            draw(layered, None, cube),
+            Some((0, 5)),
+            "no colour buffer set"
+        );
+        assert_eq!(
+            draw(layered, Some(0xa << 2), cube),
+            None,
+            "a colour buffer bound"
+        );
+        assert_eq!(draw(0, Some(0), cube), None, "no layer read");
+        assert_eq!(draw(layered, Some(0), 0), None, "one slice");
+        // A later slice's sibling sits in the same surface.
+        let first = depth_target_id_at(0x7400_08f5_4000);
+        assert_eq!(
+            super::depth_target_sibling(super::depth_target_slice_of(first, 3), 1),
+            super::depth_target_slice_of(first, 1)
         );
     }
 

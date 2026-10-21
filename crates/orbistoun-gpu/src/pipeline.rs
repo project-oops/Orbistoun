@@ -2480,16 +2480,22 @@ impl Pipeline {
             // copies of the same bytes agree (D746).
             let slot = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
             let written = |slot: u32| traced.stored.contains(&slot);
-            if ranges
+            if let Some((held, other)) = ranges
                 .iter()
                 .zip(0..)
-                .any(|(&held, other)| overlaps(held, range) && (written(slot) || written(other)))
+                .find(|&(&held, other)| overlaps(held, range) && (written(slot) || written(other)))
             {
-                return Err(concat!(
-                    "two buffers the dispatch binds overlap, one of them written, and two copies of ",
-                    "one byte would disagree (D746)"
-                )
-                .to_owned());
+                // Named by both ranges and which is written, so the program's two views of one
+                // buffer are found.
+                return Err(format!(
+                    "two buffers the dispatch binds overlap, one of them written, and two copies of one byte would disagree (D746): slot {other} at {:#x}, {:#x} bytes{}, and slot {slot} at {:#x}, {:#x} bytes{}",
+                    held.0,
+                    held.1,
+                    if written(other) { ", written" } else { "" },
+                    range.0,
+                    range.1,
+                    if written(slot) { ", written" } else { "" },
+                ));
             }
             ranges.push(range);
         }
@@ -6385,11 +6391,16 @@ fn push_geometry_commands(
                 sent[slot] = Some(words);
             }
         }
-        if let Some(chunks) = chunks.get(index).filter(|chunks| !chunks.is_empty()) {
-            push_chunks(commands, chunks, draw.instances, &mut bound);
-            continue;
+        let call = (
+            draw,
+            chunks.get(index).filter(|chunks| !chunks.is_empty()),
+            sweep.latest(at, VGT_INDEX_TYPE),
+        );
+        // A layered depth-only draw is drawn once into each slice its depth view names (D936).
+        let slices = crate::depth::depth_layer_slices(|r| sweep.latest(at, r));
+        if push_draw_or_passes(commands, call, (depth_target, slices), &mut bound) {
+            layer_sent = None;
         }
-        commands.push(draw_command(draw, sweep.latest(at, VGT_INDEX_TYPE)));
     }
     for dispatch in dispatch_calls(walked, stream) {
         commands.push(RenderCommand::Dispatch {
@@ -6398,6 +6409,70 @@ fn push_geometry_commands(
             z: dispatch.groups[2],
         });
     }
+}
+
+/// Pushes `drawn` once a slice where it is a layered depth-only draw over `slices` of `depth`
+/// ([`push_slice_passes`], D936), answering `true` - the draw layer was changed under the sender -
+/// and once otherwise ([`push_draw`]).
+fn push_draw_or_passes(
+    commands: &mut Vec<RenderCommand>,
+    drawn: (&DrawCall, Option<&Vec<Chunk>>, Option<u32>),
+    (depth, slices): (Option<ResourceId>, Option<(u32, u32)>),
+    bound: &mut Vec<(ShaderStage, ResourceId)>,
+) -> bool {
+    if let (Some(depth), Some(slices)) = (depth, slices) {
+        push_slice_passes(commands, drawn, (depth, slices), bound);
+        true
+    } else {
+        push_draw(commands, drawn, bound);
+        false
+    }
+}
+
+/// Pushes the command that draws `draw`: its chunks where it was split into them, the draw whole
+/// otherwise.
+fn push_draw(
+    commands: &mut Vec<RenderCommand>,
+    (draw, chunks, index_type): (&DrawCall, Option<&Vec<Chunk>>, Option<u32>),
+    bound: &mut Vec<(ShaderStage, ResourceId)>,
+) {
+    match chunks {
+        Some(chunks) => push_chunks(commands, chunks, draw.instances, bound),
+        None => commands.push(draw_command(draw, index_type)),
+    }
+}
+
+/// Pushes `draw` once for each slice from `first` to `last` of its depth target's surface (D936):
+/// each pass with that slice's depth target bound and the layer it is, from zero, as the one its
+/// primitive shader keeps the primitives of (D859); then the submission's own targets again. The
+/// colour targets each pass binds are the ones bound before it, which a depth-only draw writes
+/// nothing to.
+fn push_slice_passes(
+    commands: &mut Vec<RenderCommand>,
+    drawn: (&DrawCall, Option<&Vec<Chunk>>, Option<u32>),
+    (depth, (first, last)): (ResourceId, (u32, u32)),
+    bound: &mut Vec<(ShaderStage, ResourceId)>,
+) {
+    let colour = commands
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            RenderCommand::SetRenderTargets { colour, .. } => Some(colour.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for slice in first..=last {
+        commands.push(RenderCommand::SetRenderTargets {
+            colour: colour.clone(),
+            depth: Some(crate::depth::depth_target_sibling(depth, slice)),
+        });
+        commands.push(RenderCommand::SetDrawLayer(Some(slice - first)));
+        push_draw(commands, drawn, bound);
+    }
+    commands.push(RenderCommand::SetRenderTargets {
+        colour,
+        depth: Some(depth),
+    });
 }
 
 /// The layer a draw renders, as a `SetDrawLayer` where it changed since `sent` - the draw-data
@@ -14395,6 +14470,58 @@ mod tests {
 
     /// A draw under `PRIMGEN_PASSTHRU_EN` is seeded for a passthrough primitive shader, its
     /// primitive packed in `v0`; one without it is not.
+    /// A layered depth-only draw is drawn once into each slice its depth view names, each pass
+    /// with that slice's depth target and its layer from zero, and the submission's targets bound
+    /// again after (D936): Grand Theft Auto V draws a point light's shadow cube's six faces in one
+    /// draw.
+    #[test]
+    fn a_layered_depth_only_draw_is_a_pass_a_slice() {
+        use super::RenderCommand;
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Auto { vertices: 3 },
+        };
+        let cube = crate::depth::depth_target_id_at(0x7400_08f5_4000);
+        let colour = vec![ResourceId(9)];
+        let mut commands = vec![RenderCommand::SetRenderTargets {
+            colour: colour.clone(),
+            depth: Some(cube),
+        }];
+        super::push_slice_passes(
+            &mut commands,
+            (&draw, None, None),
+            (cube, (0, 5)),
+            &mut Vec::new(),
+        );
+        let passes: Vec<(ResourceId, Option<u32>)> = commands
+            .windows(3)
+            .filter_map(|three| match three {
+                [
+                    RenderCommand::SetRenderTargets {
+                        depth: Some(depth), ..
+                    },
+                    RenderCommand::SetDrawLayer(layer),
+                    RenderCommand::Draw { .. },
+                ] => Some((*depth, *layer)),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<(ResourceId, Option<u32>)> = (0..6)
+            .map(|face| (crate::depth::depth_target_slice_of(cube, face), Some(face)))
+            .collect();
+        assert_eq!(passes, expected);
+        assert_eq!(
+            commands.last(),
+            Some(&RenderCommand::SetRenderTargets {
+                colour,
+                depth: Some(cube)
+            }),
+            "the submission's own targets again"
+        );
+    }
+
     #[test]
     fn a_passthrough_draw_is_seeded_as_one() {
         use super::{DI_PT_TRILIST, PRIMGEN_PASSTHRU_EN, VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN};

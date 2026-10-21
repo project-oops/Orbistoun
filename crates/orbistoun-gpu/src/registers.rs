@@ -2170,7 +2170,7 @@ pub(crate) const PA_CL_VS_OUT_CNTL: u32 = 0xA207;
 /// `PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`, bit 18: each primitive goes to the layer its
 /// vertices export (D859). radeonsi sets it exactly when the shader writes the layer
 /// (`si_state_shaders.cpp` 996).
-const USE_VTX_RENDER_TARGET_INDX: u32 = 1 << 18;
+pub(crate) const USE_VTX_RENDER_TARGET_INDX: u32 = 1 << 18;
 /// `PA_CL_VS_OUT_CNTL.USE_VTX_VIEWPORT_INDX`, bit 19: each primitive goes through the viewport its
 /// vertices export.
 const USE_VTX_VIEWPORT_INDX: u32 = 1 << 19;
