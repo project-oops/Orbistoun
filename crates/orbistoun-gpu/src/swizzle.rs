@@ -1,13 +1,13 @@
 //! Every tiled swizzle mode at every element size a sampled format takes, as the exclusive-or
 //! equations addrlib addresses them by (D923).
 //!
-//! On this generation a tiled surface is blocks of 4 KiB or 64 KiB, row-major across the surface's
-//! pitch. Within a block each bit of an element's `x` and `y` flips a fixed set of bits of its byte
-//! offset, so a block is laid out by one term per coordinate bit, and in a few modes the low bits of
-//! the block's own column and row flip more ("above the block").
+//! On this generation a tiled surface is blocks of 256 bytes, 4 KiB or 64 KiB, row-major across the
+//! surface's pitch. Within a block each bit of an element's `x` and `y` flips a fixed set of bits
+//! of its byte offset, so a block is laid out by one term per coordinate bit, and in a few modes the
+//! low bits of the block's own column and row flip more ("above the block").
 //!
-//! [`EQUATIONS`] holds every such basis for `64KB_R_X`, `64KB_D_X`, `4KB_D_X`, `64KB_S`, `4KB_S`
-//! and `64KB_Z_X` at one, two, four, eight and sixteen bytes an element, as
+//! [`EQUATIONS`] holds every such basis for `64KB_R_X`, `64KB_D_X`, `4KB_D_X`, `64KB_S`, `4KB_S`,
+//! `64KB_Z_X` and `256B_S` at one, two, four, eight and sixteen bytes an element, as
 //! `tools/addrlib/equation` reads them off Mesa's addrlib under the console's configuration (family
 //! NV, revision 0x82, `GB_ADDR_CONFIG` 0x4) and checks them against addrlib's own address for every
 //! texel of two surfaces. addrlib refuses `64KB_Z_X` at sixteen bytes, so it is absent. An element
@@ -43,7 +43,7 @@ pub struct Equation {
 const NONE_ABOVE: [u32; 3] = [0; 3];
 
 /// Every equation `tools/addrlib/equation` reads, by mode then element size.
-pub const EQUATIONS: [Equation; 29] = [
+pub const EQUATIONS: [Equation; 34] = [
     Equation {
         mode: SwizzleMode::Tiled64KbRX,
         bytes: 1,
@@ -334,6 +334,56 @@ pub const EQUATIONS: [Equation; 29] = [
         x_above: NONE_ABOVE,
         y_above: [0x800, 0, 0],
     },
+    Equation {
+        mode: SwizzleMode::Tiled256BS,
+        bytes: 1,
+        block: (16, 16),
+        block_bytes: 256,
+        x: &[0x1, 0x2, 0x4, 0x8],
+        y: &[0x10, 0x20, 0x40, 0x80],
+        x_above: NONE_ABOVE,
+        y_above: NONE_ABOVE,
+    },
+    Equation {
+        mode: SwizzleMode::Tiled256BS,
+        bytes: 2,
+        block: (16, 8),
+        block_bytes: 256,
+        x: &[0x2, 0x4, 0x8, 0x80],
+        y: &[0x10, 0x20, 0x40],
+        x_above: NONE_ABOVE,
+        y_above: NONE_ABOVE,
+    },
+    Equation {
+        mode: SwizzleMode::Tiled256BS,
+        bytes: 4,
+        block: (8, 8),
+        block_bytes: 256,
+        x: &[0x4, 0x8, 0x80],
+        y: &[0x10, 0x20, 0x40],
+        x_above: NONE_ABOVE,
+        y_above: NONE_ABOVE,
+    },
+    Equation {
+        mode: SwizzleMode::Tiled256BS,
+        bytes: 8,
+        block: (8, 4),
+        block_bytes: 256,
+        x: &[0x8, 0x40, 0x80],
+        y: &[0x10, 0x20],
+        x_above: NONE_ABOVE,
+        y_above: NONE_ABOVE,
+    },
+    Equation {
+        mode: SwizzleMode::Tiled256BS,
+        bytes: 16,
+        block: (4, 4),
+        block_bytes: 256,
+        x: &[0x40, 0x80],
+        y: &[0x10, 0x20],
+        x_above: NONE_ABOVE,
+        y_above: NONE_ABOVE,
+    },
 ];
 
 /// `mode`'s equation at `bytes` an element, or `None` where addrlib gives none here.
@@ -476,7 +526,7 @@ mod tests {
     #[test]
     fn the_equations_agree_with_the_hand_modelled_layouts() {
         type Hand = fn(u32, u32, u32) -> usize;
-        let cases: [(SwizzleMode, u32, Hand); 13] = [
+        let cases: [(SwizzleMode, u32, Hand); 16] = [
             (
                 SwizzleMode::Tiled64KbRX,
                 1,
@@ -541,6 +591,21 @@ mod tests {
                 SwizzleMode::Tiled4KbS,
                 16,
                 tiling::tiled_byte_offset_4kb_s_bpp16,
+            ),
+            (
+                SwizzleMode::Tiled256BS,
+                4,
+                tiling::tiled_byte_offset_256b_s_bpp4,
+            ),
+            (
+                SwizzleMode::Tiled256BS,
+                8,
+                tiling::tiled_byte_offset_256b_s_bpp8,
+            ),
+            (
+                SwizzleMode::Tiled256BS,
+                16,
+                tiling::tiled_byte_offset_256b_s_bpp16,
             ),
         ];
         for (mode, bytes, hand) in cases {

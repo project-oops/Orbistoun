@@ -24,7 +24,7 @@
 //
 // Usage: equation <swizzle mode> <bytes per texel> [blocks] [3d]
 //   blocks: how many blocks a side the terms are read and checked over, a power of two (8)
-//   swizzle mode: 64KB_R_X, 64KB_D_X, 4KB_D_X, 64KB_S, 4KB_S, 64KB_Z_X
+//   swizzle mode: 64KB_R_X, 64KB_D_X, 4KB_D_X, 64KB_S, 4KB_S, 64KB_Z_X, 256B_S
 //   3d: a three-dimensional surface, whose terms for `z` are read and checked as well; its blocks
 //       run across, then down, then through the slices
 //
@@ -63,6 +63,7 @@ constexpr Mode kModes[] = {
     {"64KB_R_X", ADDR_SW_64KB_R_X}, {"64KB_D_X", ADDR_SW_64KB_D_X},
     {"4KB_D_X", ADDR_SW_4KB_D_X},   {"64KB_S", ADDR_SW_64KB_S},
     {"4KB_S", ADDR_SW_4KB_S},     {"64KB_Z_X", ADDR_SW_64KB_Z_X},
+    {"256B_S", ADDR_SW_256B_S},
 };
 
 struct Surface {

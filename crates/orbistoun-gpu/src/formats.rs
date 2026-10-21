@@ -612,7 +612,9 @@ impl Sampled {
     /// selects ([`crate::pipeline`]'s `DST_SEL`: 0 and 1 the constants, 4 to 7 the texel's `X` to
     /// `W`, `gfx6.json` `SQ_SEL_XYZW01`), on the `native` image when `native` and on the widened
     /// one otherwise. `None` where a select is reserved (2, 3) or names a channel the format lacks
-    /// ([`HostChannel::Missing`]).
+    /// ([`HostChannel::Missing`]), and, for an sRGB format, where it moves a channel to another
+    /// place: whether the console decodes sRGB before or after its selects is not measured
+    /// (`REQ-20261021T0100Z-tx01` section 4), and the host decodes before.
     #[must_use]
     pub fn view(&self, selects: [u32; 4], native: bool) -> Option<[Swizzle; 4]> {
         let widened = [
@@ -621,15 +623,22 @@ impl Sampled {
             HostChannel::B,
             HostChannel::A,
         ];
+        let srgb = matches!(
+            self.layout,
+            Layout::Plain(Plain {
+                numeric: Numeric::Srgb,
+                ..
+            }) | Layout::Blocks { srgb: true, .. }
+        );
         let channels = self.channels;
         let mut out = [Swizzle::Zero; 4];
-        for (slot, select) in out.iter_mut().zip(selects) {
+        for (place, (slot, select)) in out.iter_mut().zip(selects).enumerate() {
             *slot = match select {
                 0 => Swizzle::Zero,
                 1 => Swizzle::One,
                 4..=7 => {
                     let guest = (select - 4) as usize;
-                    if channels[guest] == HostChannel::Missing {
+                    if channels[guest] == HostChannel::Missing || (srgb && guest != place) {
                         return None;
                     }
                     Swizzle::Channel(if native {
@@ -1103,6 +1112,14 @@ mod tests {
             "widened, Z is the host's blue"
         );
         assert_eq!(rgb.view([2, 5, 6, 1], true), None, "a reserved select");
+        // An sRGB format's channels are read in their places alone, alpha among them.
+        let srgb = sampled(130).expect("8_8_8_8_SRGB");
+        assert!(srgb.view([4, 5, 6, 7], true).is_some());
+        assert!(
+            srgb.view([4, 5, 6, 1], true).is_some(),
+            "a constant in a place"
+        );
+        assert_eq!(srgb.view([7, 6, 5, 4], true), None, "channels moved");
     }
 
     /// A CPU decode widens each layout to its texels' values: `16_16_FLOAT` to floats, `8_8_SNORM`'s

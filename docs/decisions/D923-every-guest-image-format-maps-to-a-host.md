@@ -27,8 +27,12 @@ that layout is `assumed` until obSCEne measures it (`REQ-20261020T1300Z-tx01`):
 - the meaning of the scaled and unpublished codes, which stay refused.
 
 Tiling at every element size comes from `swizzle.rs`. It holds the exclusive-or equations that
-`tools/addrlib/equation` reads off addrlib for six swizzle modes at 1, 2, 4, 8 and 16 bytes per
-element. A test checks them against the thirteen layouts `tiling.rs` models by hand.
+`tools/addrlib/equation` reads off addrlib for seven swizzle modes at 1, 2, 4, 8 and 16 bytes per
+element. A test checks them against the sixteen layouts `tiling.rs` models by hand.
+
+A draw texture that no other reader binds goes to `guest_texture` (`pipeline.rs`), as long as it is
+a flat, one-level, uncompressed, tiled 2D image in a float format. Its elements are detiled by the
+mode's equation and bound as `Guest`.
 
 **Why:** orbistoun sampled about eleven formats, and each new one meant a hand-written path chosen
 for the title that needed it. A guest texture in any other format dropped its draw, and the reason
