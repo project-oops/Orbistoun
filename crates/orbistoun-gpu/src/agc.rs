@@ -1422,8 +1422,17 @@ fn dcb_draw_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             args[0],
             &packet::build::draw_indirect(args[1] as u32, modifier),
         ),
-        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+        None => refuse_indirect_modifier("sceAgcDcbDrawIndirect", args[2]),
     }
+}
+
+/// Refuses an indirect draw whose modifier names a register with a bit whose effect is unmeasured,
+/// saying which modifier, so the run names the value a census has to measure.
+fn refuse_indirect_modifier(builder: &str, modifier: u64) -> u64 {
+    tracing::warn!(
+        "{builder} refused modifier {modifier:#x}: it names a register with a bit whose effect is unmeasured (REQ-20261020T2245Z-di02)"
+    );
+    u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
 }
 
 /// `sceAgcDcbDrawIndexIndirect(dcb, offset, modifier)`: 20 bytes
@@ -1434,7 +1443,7 @@ fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             args[0],
             &packet::build::draw_index_indirect(args[1] as u32, modifier),
         ),
-        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+        None => refuse_indirect_modifier("sceAgcDcbDrawIndexIndirect", args[2]),
     }
 }
 
@@ -1451,10 +1460,16 @@ fn draw_indirect_multi(indexed: bool, args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
     }
     // SAFETY: the dispatch published `spilled` as the first stack argument's address on the
     // calling thread's live stack.
-    let Some(modifier) =
-        (unsafe { guest::read_u64(spilled) }).and_then(packet::build::IndirectModifier::new)
-    else {
+    let Some(raw) = (unsafe { guest::read_u64(spilled) }) else {
         return refused;
+    };
+    let Some(modifier) = packet::build::IndirectModifier::new(raw) else {
+        let builder = if indexed {
+            "sceAgcDcbDrawIndexIndirectMulti"
+        } else {
+            "sceAgcDcbDrawIndirectMulti"
+        };
+        return refuse_indirect_modifier(builder, raw);
     };
     let draw = packet::build::MultiDraw {
         offset: args[1] as u32,
