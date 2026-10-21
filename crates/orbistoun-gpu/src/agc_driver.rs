@@ -1584,7 +1584,8 @@ fn note_dispatch_writes(
         .map(|(&(at, bytes), before)| {
             let lit = match before {
                 crate::dispatch::BufferBefore::Words(words) => Some(words.iter().any(|&w| w != 0)),
-                crate::dispatch::BufferBefore::Unread(_) => None,
+                crate::dispatch::BufferBefore::Unread(_)
+                | crate::dispatch::BufferBefore::Alias(_) => None,
             };
             (at, bytes, lit)
         })
@@ -1815,7 +1816,9 @@ fn buffer_writes_into<'a>(
             continue;
         }
         let (runs, whole): (Runs<'_>, bool) = match before {
+            // Written back through the slot it shares a buffer with (D937).
             BufferBefore::Words(words) if words.is_empty() => continue,
+            BufferBefore::Alias(_) => continue,
             BufferBefore::Words(words) => {
                 if after.words.len() != words.len() {
                     return Err("the device answered a buffer of another size".to_owned());
@@ -1926,6 +1929,8 @@ fn uniform_buffers(
                     after.whole_words()
                 }
                 crate::dispatch::BufferBefore::Words(_) => &after.words,
+                // A fill through the slot it shares a buffer with, if any (D937).
+                crate::dispatch::BufferBefore::Alias(_) => return None,
             };
             let (&first, rest) = held.split_first()?;
             rest.iter().all(|&word| word == first).then_some(cp::Fill {
@@ -1943,12 +1948,16 @@ impl GuestCp<'_> {
     fn read_buffers(
         &self,
         ranges: &[(u64, u64)],
-        unread: &[bool],
+        (unread, aliases): (&[bool], &[Option<usize>]),
     ) -> Result<Vec<crate::dispatch::BufferBefore>, String> {
         ranges
             .iter()
             .enumerate()
             .map(|(slot, &(address, bytes))| {
+                // The same range as an earlier slot binds that slot's buffer (D937).
+                if let Some(&Some(earlier)) = aliases.get(slot) {
+                    return Ok(crate::dispatch::BufferBefore::Alias(earlier));
+                }
                 let span = usize::try_from(bytes.next_multiple_of(4))
                     .map_err(|_| "a buffer larger than this host addresses")?;
                 if unread.get(slot).copied().unwrap_or(false) {
@@ -2149,7 +2158,7 @@ impl GuestCp<'_> {
             };
             // Named with its program, so the listing of the code that formed the range is found.
             let buffers = self
-                .read_buffers(&prepared.buffers, &prepared.unread)
+                .read_buffers(&prepared.buffers, (&prepared.unread, &prepared.aliases))
                 .map_err(|why| format!("{why}, in the program at {:#x}", prepared.program))?;
             Ok::<_, String>((window, buffers))
         })?;

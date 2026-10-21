@@ -1802,11 +1802,11 @@ impl VulkanBackend {
     }
 
     /// The next draw's fixed-function state that has no exact Vulkan form, by name - its blend,
-    /// raster operation or polygon offset - or else its polygon offset as Vulkan's depth bias.
+    /// raster operation or polygon offset - or else what its polygon offset does to its depths.
     fn fixed_function(
         &self,
         encoding: orbistoun_gpu::TargetEncoding,
-    ) -> Result<Option<[f32; 3]>, &'static str> {
+    ) -> Result<Option<depth::DepthOffset>, &'static str> {
         framebuffer::blend_attachment(self.blend, self.blend_constants, self.write_mask)
             .map(drop)?;
         for output in self.more_outputs_for_draw() {

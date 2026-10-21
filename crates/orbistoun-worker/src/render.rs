@@ -943,6 +943,9 @@ fn execute_dispatch_here(
             orbistoun_gpu::dispatch::BufferBefore::Unread(words) => {
                 orbistoun_gpu_vulkan::BufferIn::Unread(*words)
             }
+            orbistoun_gpu::dispatch::BufferBefore::Alias(earlier) => {
+                orbistoun_gpu_vulkan::BufferIn::Alias(*earlier)
+            }
         })
         .collect();
     let done = perf::span(perf::Span::DispatchOnDevice, || {

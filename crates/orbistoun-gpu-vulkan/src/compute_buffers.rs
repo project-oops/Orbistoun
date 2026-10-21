@@ -274,6 +274,9 @@ pub(crate) struct BoundBuffers {
     /// One per slot of the dispatch's own; every other element of the bound array binds one of
     /// these, which the module never reaches.
     slots: Vec<Slot>,
+    /// For each buffer handed over, in order, the slot that holds it: its own, or the earlier one
+    /// it aliases (D937).
+    held_at: Vec<usize>,
     /// The set's layout, set one of the pipeline.
     pub(crate) layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -364,6 +367,8 @@ pub enum BufferIn<'a> {
     /// A buffer of this many words the program only stores to: nothing is read or uploaded, and
     /// the device starts it at zero.
     Unread(usize),
+    /// The buffer handed at this earlier index, bound here too (D937).
+    Alias(usize),
 }
 
 impl BufferIn<'_> {
@@ -372,6 +377,7 @@ impl BufferIn<'_> {
         match self {
             Self::Words(words) => words.len(),
             Self::Unread(words) => words,
+            Self::Alias(_) => 1,
         }
         .max(1)
     }
@@ -421,12 +427,29 @@ impl BoundBuffers {
         let context = (instance, physical, device);
         // Buffers for the dispatch's own slots only: the module reaches no other, so the rest of
         // the array binds one of these.
-        let mut slots = contents
-            .iter()
-            .map(|&handed| Slot::create(context, handed))
-            .collect::<Result<Vec<_>, _>>()?;
+        // A buffer handed as an alias binds the slot it names; every other its own (D937).
+        let mut slots = Vec::with_capacity(contents.len());
+        let mut held_at = Vec::with_capacity(contents.len());
+        for &handed in contents {
+            if let BufferIn::Alias(earlier) = handed {
+                let held = *held_at.get(earlier).ok_or_else(|| {
+                    DispatchError::Unsupported(
+                        "a buffer aliases one handed over after it (D937)".to_owned(),
+                    )
+                })?;
+                held_at.push(held);
+                continue;
+            }
+            held_at.push(slots.len());
+            slots.push(Slot::create(context, handed)?);
+        }
         let lists = bind_lists(device, &mut slots)?;
-        let bound_at = |index: usize| slots.get(index).unwrap_or(&slots[0]);
+        let bound_at = |index: usize| {
+            held_at
+                .get(index)
+                .and_then(|&held| slots.get(held))
+                .unwrap_or(&slots[0])
+        };
 
         let bindings = layout_bindings();
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
@@ -492,6 +515,7 @@ impl BoundBuffers {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         Ok(Some(Self {
             slots,
+            held_at,
             layout,
             pool,
             set,
@@ -661,7 +685,8 @@ impl BoundBuffers {
         device: &ash::Device,
         queue: (vk::Queue, u32),
     ) -> Result<Vec<BufferOut>, DispatchError> {
-        self.slots
+        let held: Vec<BufferOut> = self
+            .slots
             .iter()
             .map(|slot| {
                 use orbistoun_gpu::perf::{Span, SpanGuard};
@@ -707,7 +732,13 @@ impl BoundBuffers {
                     whole: None,
                 })
             })
-            .collect()
+            .collect::<Result<_, DispatchError>>()?;
+        // Each buffer handed over answers its slot's words; an alias, the slot it shares (D937).
+        Ok(self
+            .held_at
+            .iter()
+            .filter_map(|&slot| held.get(slot).cloned())
+            .collect())
     }
 
     /// The memory properties each of the dispatch's own buffers was allocated with.

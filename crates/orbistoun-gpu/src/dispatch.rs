@@ -697,6 +697,10 @@ pub enum BufferBefore {
     /// A buffer of this many words the program only stores to: guest memory is not read, and
     /// what the run stored is found from its write mask.
     Unread(usize),
+    /// The buffer at an earlier slot again, bound to the same guest range (D937): the device binds
+    /// that one buffer here too, so what either slot stores the other reads, and only that slot's
+    /// words are written back.
+    Alias(usize),
 }
 
 /// A device's list of stored words as runs of consecutive indices, each its first index and values.

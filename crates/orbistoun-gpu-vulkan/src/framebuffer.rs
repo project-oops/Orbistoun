@@ -3520,9 +3520,8 @@ pub(crate) struct Start<'a> {
     pub(crate) depth: Option<crate::depth::DepthDraw>,
     /// The guest's cull state; `None` culls nothing.
     pub(crate) cull: Option<orbistoun_gpu::depth::CullState>,
-    /// The polygon offset as Vulkan's constant factor, clamp and slope factor
-    /// ([`crate::depth::depth_bias`]); `None` offsets nothing.
-    pub(crate) depth_bias: Option<[f32; 3]>,
+    /// The polygon offset ([`crate::depth::depth_bias`]); `None` offsets nothing.
+    pub(crate) depth_bias: Option<crate::depth::DepthOffset>,
     /// The clear the depth attachment takes before the draw.
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
     /// The primitive shader's and the pixel shader's buffers (D733).
@@ -3611,6 +3610,21 @@ const fn scaled_rect(rect: vk::Rect2D, scale: u32) -> vk::Rect2D {
     }
 }
 
+/// The viewport a bound draw is built with ([`drawn_viewport`]), its depth range collapsed onto
+/// the end of `0..1` a polygon offset pins its depths to (D938). Clipping is in clip space, before
+/// the range applies, so the draw keeps the primitives it had.
+fn offset_viewport(transform: orbistoun_gpu::ViewportTransform, bound: &Bound<'_>) -> vk::Viewport {
+    let viewport = drawn_viewport(transform, tests_depth(bound));
+    match bound.depth_bias.filter(|_| bound.depth.is_some()) {
+        Some(crate::depth::DepthOffset::Pinned(at)) => vk::Viewport {
+            min_depth: at,
+            max_depth: at,
+            ..viewport
+        },
+        _ => viewport,
+    }
+}
+
 /// Whether a draw bound so tests depth: a depth pass whose state enables the test, or one whose
 /// state is not known.
 fn tests_depth(bound: &Bound<'_>) -> bool {
@@ -3687,15 +3701,15 @@ fn viewport_within_limits(
 /// unchanged for none.
 fn biased(
     raster: vk::PipelineRasterizationStateCreateInfo<'_>,
-    bias: Option<[f32; 3]>,
+    bias: Option<crate::depth::DepthOffset>,
 ) -> vk::PipelineRasterizationStateCreateInfo<'_> {
     match bias {
-        Some([constant, clamp, slope]) => raster
+        Some(crate::depth::DepthOffset::Bias([constant, clamp, slope])) => raster
             .depth_bias_enable(true)
             .depth_bias_constant_factor(constant)
             .depth_bias_clamp(clamp)
             .depth_bias_slope_factor(slope),
-        None => raster,
+        Some(crate::depth::DepthOffset::Pinned(_)) | None => raster,
     }
 }
 
@@ -5806,7 +5820,7 @@ fn build_pipeline(
         let scale = bound.resident.map_or(1, ResidentAttachment::scale);
         viewport_within_limits(
             devices,
-            scaled_viewport(drawn_viewport(transform, tests_depth(&bound)), scale),
+            scaled_viewport(offset_viewport(transform, &bound), scale),
         )?;
     }
     let (Some(buffers_layout), Some(draw_buffers)) =
@@ -6271,7 +6285,7 @@ fn create_graphics_pipeline(
             min_depth: 0.0,
             max_depth: 1.0,
         },
-        |transform| scaled_viewport(drawn_viewport(transform, tests_depth(&bound)), scale),
+        |transform| scaled_viewport(offset_viewport(transform, &bound), scale),
     )];
     // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
     // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
@@ -6812,9 +6826,8 @@ struct Bound<'a> {
     depth: Option<&'a crate::depth::DepthDraw>,
     /// The guest's cull state; `None` culls nothing.
     cull: Option<orbistoun_gpu::depth::CullState>,
-    /// The polygon offset as Vulkan's constant factor, clamp and slope factor; `None` offsets
-    /// nothing.
-    depth_bias: Option<[f32; 3]>,
+    /// The polygon offset; `None` offsets nothing.
+    depth_bias: Option<crate::depth::DepthOffset>,
     /// The clear the depth attachment takes before a resident draw.
     depth_clear: Option<crate::depth::DepthClear>,
     /// The draw's buffers (D733); none by default. By reference, so `Bound` stays cheap to pass by

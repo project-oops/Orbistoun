@@ -2194,6 +2194,9 @@ pub struct PreparedDispatch {
     /// Whether each of them, by slot, is one the program only stores to (D809): its words before
     /// the run are not read, and what the run stored is found from its write mask.
     pub unread: Vec<bool>,
+    /// For each slot bound to exactly the same guest range as an earlier one, that slot (D937):
+    /// the device binds one buffer at both.
+    pub aliases: Vec<Option<usize>>,
 }
 
 impl Pipeline {
@@ -2280,7 +2283,7 @@ impl Pipeline {
         keep_dispatch_program(address, program);
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers, formats, unread, global_base) = self
+        let (served, buffers, formats, (unread, aliases), global_base) = self
             .dispatch_buffers(state, &decoded, memory)
             .map_err(|why| {
                 dispatch_refusal(why, (&decoded, &self.encodings), (address, program))
@@ -2352,6 +2355,7 @@ impl Pipeline {
             groups: state.groups,
             buffers,
             unread,
+            aliases,
         })
     }
 
@@ -2454,6 +2458,7 @@ impl Pipeline {
             *word = value.unwrap_or(0);
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
+        let mut aliases = Vec::with_capacity(traced.sources.len());
         let mut global_base = None;
         for source in &traced.sources {
             // The global loads' buffer is what every wave of the dispatch reads (D883).
@@ -2480,6 +2485,14 @@ impl Pipeline {
             // copies of the same bytes agree (D746).
             let slot = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
             let written = |slot: u32| traced.stored.contains(&slot);
+            // A slot bound to exactly an earlier slot's range is that buffer again: the device
+            // binds one buffer at both, and no two copies of a byte exist (D937).
+            if let Some(earlier) = ranges.iter().position(|&held| held == range) {
+                aliases.push(Some(earlier));
+                ranges.push(range);
+                continue;
+            }
+            aliases.push(None);
             if let Some((held, other)) = ranges
                 .iter()
                 .zip(0..)
@@ -2512,11 +2525,27 @@ impl Pipeline {
                     formats
                 },
             );
-        // A buffer the program only stores to is not read before it runs (D809).
+        // A buffer the program only stores to is not read before it runs (D809); one another slot
+        // shares is read where either slot reads it (D937).
+        let stored_only =
+            |slot: usize| u32::try_from(slot).is_ok_and(|slot| traced.stored_only.contains(&slot));
         let unread = (0..ranges.len())
-            .map(|slot| u32::try_from(slot).is_ok_and(|slot| traced.stored_only.contains(&slot)))
+            .map(|slot| {
+                stored_only(slot)
+                    && aliases
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, alias)| *alias == Some(slot))
+                        .all(|(other, _)| stored_only(other))
+            })
             .collect();
-        Ok((traced.served, ranges, formats, unread, global_base))
+        Ok((
+            traced.served,
+            ranges,
+            formats,
+            (unread, aliases),
+            global_base,
+        ))
     }
 
     /// A dispatch's program translated for its entry state, its window, its buffers' formats and its
@@ -6692,7 +6721,8 @@ type DispatchBuffers = (
     BTreeMap<u32, u32>,
     Vec<(u64, u64)>,
     Option<orbistoun_translate::wavefront::BufferFormats>,
-    Vec<bool>,
+    // Which slots are only stored to (D809), and which share an earlier slot's buffer (D937).
+    (Vec<bool>, Vec<Option<usize>>),
     // Where the global loads' buffer starts, where the program has global loads (D883).
     Option<u64>,
 );
@@ -13081,6 +13111,16 @@ mod tests {
             .prepare_dispatch(&state(SOURCE + 16), &memory)
             .expect_err("two copies of one byte");
         assert!(overlapping.contains("overlap"), "{overlapping}");
+        // The same range bound to both slots is one buffer, written through either (D937).
+        let aliased = pipeline
+            .prepare_dispatch(&state(SOURCE), &memory)
+            .expect("one buffer bound twice prepares");
+        assert_eq!(aliased.buffers, [(SOURCE, 256), (SOURCE, 256)]);
+        assert_eq!(aliased.aliases, [None, Some(0)]);
+        assert!(
+            !aliased.unread[0],
+            "the buffer is read before the run, since a slot loads from it"
+        );
     }
 
     /// A primitive shader's format words are traced once and served from then on, and a program

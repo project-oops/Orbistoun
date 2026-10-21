@@ -913,8 +913,18 @@ pub(crate) fn rasterisation(cull: Option<CullState>) -> (vk::CullModeFlags, vk::
     (mode, face)
 }
 
-/// The depth bias a guest's polygon offset asks for, as Vulkan's constant factor, clamp and slope
-/// factor; [`None`] when no face that is drawn is offset.
+/// What a guest's polygon offset does to a draw's depths.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DepthOffset {
+    /// Vulkan's depth bias: its constant factor, clamp and slope factor.
+    Bias([f32; 3]),
+    /// Every depth moved to this end of `0..1`, the viewport's depth range collapsed onto it
+    /// (D938).
+    Pinned(f32),
+}
+
+/// The depth bias a guest's polygon offset asks for; [`None`] when no face that is drawn is
+/// offset.
 ///
 /// RADV writes Vulkan's depth bias into these registers on a `D32_SFLOAT` target (the format every
 /// depth target is held in here) as `DB_FMT_CNTL` [`FLOAT_DEPTH_OFFSET_FORMAT`], the constant factor
@@ -922,14 +932,19 @@ pub(crate) fn rasterisation(cull: Option<CullState>) -> (vk::CullModeFlags, vk::
 /// (`radv_cmd_buffer.c:4410-4446`); this reads them back the same way. The faces culled are not
 /// drawn, so only the others need agree.
 ///
+/// `DB_FMT_CNTL` left at zero counts the offset in whole depth units, then clamps to `0..1`
+/// (obSCEne REQ-20261020T2010Z-gt24): an offset of one or more, with no slope term and no clamp,
+/// moves every depth to an end of the range, and pins it there (D938).
+///
 /// # Errors
 ///
-/// An offset counted in other units than a float depth's, one that differs between two faces that
-/// are both drawn, and a clamp on a device without `depthBiasClamp`.
+/// An offset counted in other units than a float depth's or whole depth units, one in whole units
+/// that leaves a depth inside `0..1`, one that differs between two faces that are both drawn, and a
+/// clamp on a device without `depthBiasClamp`.
 pub(crate) fn depth_bias(
     bias: Option<DepthBias>,
     cull: Option<CullState>,
-) -> Result<Option<[f32; 3]>, &'static str> {
+) -> Result<Option<DepthOffset>, &'static str> {
     let Some(bias) = bias.filter(|b| b.front.is_some() || b.back.is_some()) else {
         return Ok(None);
     };
@@ -948,6 +963,18 @@ pub(crate) fn depth_bias(
     let Some(offset) = offset else {
         return Ok(None);
     };
+    if bias.format == WHOLE_DEPTH_OFFSET_FORMAT {
+        let constant = f32::from_bits(offset.offset);
+        return if offset.scale == 0 && bias.clamp == 0 && constant.abs() >= 1.0 {
+            Ok(Some(DepthOffset::Pinned(if constant > 0.0 {
+                1.0
+            } else {
+                0.0
+            })))
+        } else {
+            Err("a polygon offset in whole depth units that leaves a depth inside 0..1")
+        };
+    }
     if bias.format != FLOAT_DEPTH_OFFSET_FORMAT {
         return Err("a polygon offset in other units than a float depth's");
     }
@@ -955,18 +982,22 @@ pub(crate) fn depth_bias(
     if clamp != 0.0 && !crate::compute::depth_bias_clamp() {
         return Err("a polygon offset clamp on a device without depthBiasClamp");
     }
-    Ok(Some([
+    Ok(Some(DepthOffset::Bias([
         f32::from_bits(offset.offset),
         clamp,
         f32::from_bits(offset.scale) / 16.0,
-    ]))
+    ])))
 }
+
+/// `PA_SU_POLY_OFFSET_DB_FMT_CNTL` never written: no exponent, not float, so the offset counts in
+/// whole depth units (obSCEne REQ-20261020T2010Z-gt24).
+const WHOLE_DEPTH_OFFSET_FORMAT: u32 = 0;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DepthClear, depth_bias, depth_stencil_state, depth_stencil_state_on, rasterisation,
-        stencil_op,
+        DepthClear, DepthOffset, depth_bias, depth_stencil_state, depth_stencil_state_on,
+        rasterisation, stencil_op,
     };
     use ash::vk;
     use orbistoun_gpu::StencilOp;
@@ -1013,7 +1044,10 @@ mod tests {
             format: FLOAT_DEPTH_OFFSET_FORMAT,
             clamp: 0,
         };
-        assert_eq!(depth_bias(Some(bias), None), Ok(Some([-1024.0, 0.0, 2.0])));
+        assert_eq!(
+            depth_bias(Some(bias), None),
+            Ok(Some(DepthOffset::Bias([-1024.0, 0.0, 2.0])))
+        );
         assert_eq!(depth_bias(None, None), Ok(None));
         let front_only = DepthBias { back: None, ..bias };
         assert!(depth_bias(Some(front_only), None).is_err());
@@ -1024,13 +1058,44 @@ mod tests {
         };
         assert_eq!(
             depth_bias(Some(front_only), Some(back_culled)),
-            Ok(Some([-1024.0, 0.0, 2.0]))
+            Ok(Some(DepthOffset::Bias([-1024.0, 0.0, 2.0])))
         );
         let unorm = DepthBias {
             format: 0xF0,
             ..bias
         };
         assert!(depth_bias(Some(unorm), None).is_err());
+    }
+
+    /// With `DB_FMT_CNTL` left at zero an offset counts whole depth units and is clamped, as
+    /// measured (obSCEne REQ-20261020T2010Z-gt24, `report-20261020-gt24-poly-offset.log` rows 382
+    /// and 391): -10 reads back 0.0 and +10 reads back 1.0, so each pins the draw to that end. An
+    /// offset that leaves a depth inside the range, or carries a slope term, is refused.
+    #[test]
+    fn a_whole_unit_offset_pins_depth_to_an_end() {
+        use orbistoun_gpu::depth::{DepthBias, PolygonOffset};
+        let whole = |offset: f32, scale: f32| {
+            let face = PolygonOffset {
+                scale: scale.to_bits(),
+                offset: offset.to_bits(),
+            };
+            DepthBias {
+                front: Some(face),
+                back: Some(face),
+                format: 0,
+                clamp: 0,
+            }
+        };
+        assert_eq!(
+            depth_bias(Some(whole(-10.0, 0.0)), None),
+            Ok(Some(DepthOffset::Pinned(0.0)))
+        );
+        assert_eq!(
+            depth_bias(Some(whole(10.0, 0.0)), None),
+            Ok(Some(DepthOffset::Pinned(1.0)))
+        );
+        assert!(depth_bias(Some(whole(0.25, 0.0)), None).is_err());
+        assert!(depth_bias(Some(whole(10.0, 16.0)), None).is_err());
     }
     use orbistoun_gpu::depth::{
         DepthStencilState, decode_cull, decode_stencil_ref_mask, depth_stencil_from,
