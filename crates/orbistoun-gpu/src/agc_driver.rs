@@ -511,6 +511,14 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
             report.unmodelled_viewports
         ));
     }
+    if let (count @ 1.., first) = &report.untessellated_draws {
+        return Some(format!(
+            "{count} tessellated draw(s) are not drawn{}",
+            first
+                .as_ref()
+                .map_or_else(String::new, |first| format!(": {first}"))
+        ));
+    }
     if let (count @ 1.., first) = &report.unmodelled_layers {
         return Some(format!(
             "{count} draw(s) are not drawn into the layers the hardware would draw them into{}",

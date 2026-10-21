@@ -37,6 +37,7 @@ use crate::registers::{
     dispatch_calls, register_writes, register_writes_reading, shader_candidates,
     stencil_control_at, viewport_transform_from,
 };
+use crate::tessellation::refused_into;
 
 /// Which queue a command buffer was submitted to.
 ///
@@ -1015,6 +1016,9 @@ pub struct SubmissionReport {
     /// Draws whose multisampling state is not drawn as the guest set it ([`crate::msaa`]), and why
     /// the first was not (D931).
     pub multisampled_draws: (usize, Option<String>),
+    /// Draws not drawn because their registers run a tessellation stage (D928), and why the first
+    /// was refused, naming its shape.
+    pub untessellated_draws: (usize, Option<String>),
 }
 
 impl SubmissionReport {
@@ -6256,6 +6260,17 @@ fn push_more_colour_outputs(
     }
 }
 
+/// The shader each stage has bound among `commands`, in the order they were bound.
+fn bound_shaders(commands: &[RenderCommand]) -> Vec<(ShaderStage, ResourceId)> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            RenderCommand::BindShader { stage, shader } => Some((*stage, *shader)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Appends a submission's draws and dispatches to its command list, in the stream's order.
 ///
 /// An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
@@ -6277,18 +6292,16 @@ fn push_geometry_commands(
     let mut transform_sent = None;
     let mut scissor_sent = None;
     // What each stage has bound so far: the up-front binds, then each draw's own.
-    let mut bound: Vec<(ShaderStage, ResourceId)> = commands
-        .iter()
-        .filter_map(|command| match command {
-            RenderCommand::BindShader { stage, shader } => Some((*stage, *shader)),
-            _ => None,
-        })
-        .collect();
+    let mut bound = bound_shaders(commands);
     // Each draw's state from the latest writes before it, found in one pass and read a register at
     // a time.
     let mut sweep = crate::registers::RegisterSweep::new(writes);
     for (index, draw) in draws.iter().enumerate() {
         let at = draw.packet_offset;
+        // A tessellated draw's domain shader would draw as if it were the vertex stage (D928).
+        if refused_into(&mut report.untessellated_draws, |r| sweep.latest(at, r)) {
+            continue;
+        }
         // The shader each stage runs for this draw, bound when it is not the one already bound.
         for &(stage, shader) in shaders.get(index).map_or(&[][..], Vec::as_slice) {
             if !bound.contains(&(stage, shader)) {
