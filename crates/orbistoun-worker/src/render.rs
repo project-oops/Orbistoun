@@ -1182,6 +1182,14 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     });
     if outcome.refused > 0 {
         count_refusals(&outcome.refusals);
+        // A depth target sampled and never drawn: which, beside the ones the backend holds, so the
+        // pass that should have drawn it is found.
+        let (undrawn, held) = backend.undrawn_depth_targets();
+        if !undrawn.is_empty() {
+            tracing::info!(
+                "depth targets sampled and never drawn: {undrawn:x?}; the backend holds {held:x?}"
+            );
+        }
         return None;
     }
     // A dumped submission's frame is read now, for its snapshot; every other frame stays on the

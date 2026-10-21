@@ -243,6 +243,9 @@ pub type DepthTexels = (std::sync::Arc<[u32]>, u64, (u32, u32));
 #[derive(Debug)]
 pub struct VulkanBackend {
     refused: usize,
+    /// The depth targets a draw sampled that this backend never drew into nor was asked to clear,
+    /// since the run's report last asked: named there, beside the ones it holds.
+    undrawn_depth: std::collections::BTreeSet<ResourceId>,
     /// Shaders made resident, by content id: created once on first sight, reused across frames,
     /// and destroyed when the backend drops.
     shaders: BTreeMap<ResourceId, ResidentShader>,
@@ -399,6 +402,7 @@ impl VulkanBackend {
     pub const fn new() -> Self {
         Self {
             refused: 0,
+            undrawn_depth: std::collections::BTreeSet::new(),
             shaders: BTreeMap::new(),
             buffers: BTreeMap::new(),
             targets: BTreeMap::new(),
@@ -765,6 +769,16 @@ impl VulkanBackend {
         Some((texels, hash, (1, 1)))
     }
 
+    /// The depth targets a draw sampled that this backend never drew into nor cleared, since this
+    /// was last asked, and the depth targets it holds: what a report names beside a refused
+    /// [`RenderCommand::BindDepthTexture`], so the pass that should have drawn one is found.
+    pub fn undrawn_depth_targets(&mut self) -> (Vec<ResourceId>, Vec<ResourceId>) {
+        let undrawn = std::mem::take(&mut self.undrawn_depth)
+            .into_iter()
+            .collect();
+        (undrawn, self.depths.keys().copied().collect())
+    }
+
     /// Replaces depth target `target`'s depths with `texels`, one float's bits a texel: what a
     /// dispatch that stores to it wrote (D894). Its read-back depths are then these. `false` for a
     /// target this backend never drew.
@@ -826,6 +840,7 @@ impl VulkanBackend {
             }
             .or_else(|| self.cleared_texels(face_target, stencil));
             let Some((texels, hash, face_extent)) = fetched else {
+                self.undrawn_depth.insert(face_target);
                 self.refused += 1;
                 return Err(BackendError::Unsupported {
                     command: "BindDepthTexture of a depth target this backend never drew",
@@ -2354,6 +2369,12 @@ mod tests {
             stencil: false,
         };
         assert!(b.execute(&never).is_err(), "neither drawn nor cleared");
+        // Named for the report, once.
+        assert_eq!(
+            b.undrawn_depth_targets().0,
+            [orbistoun_gpu::ResourceId(0x4000_0000_0000_2000)]
+        );
+        assert!(b.undrawn_depth_targets().0.is_empty(), "taken");
     }
 
     /// Refusals are counted.
