@@ -762,6 +762,43 @@ fn read_scanout(address: u64, width: u32, height: u32) -> Option<Vec<u32>> {
 /// How many drawn submissions a run dumps, in order.
 const DUMPED_SUBMISSIONS: u64 = 64;
 
+/// How many depth targets a run dumps the first drawing submission of.
+const DUMPED_DEPTH_TARGETS: usize = 48;
+
+/// The depth targets `commands` draw into, in the order they name them.
+fn depth_targets_drawn(
+    commands: &[orbistoun_gpu::RenderCommand],
+) -> Vec<orbistoun_gpu::ResourceId> {
+    let mut targets = Vec::new();
+    for command in commands {
+        if let orbistoun_gpu::RenderCommand::SetRenderTargets {
+            depth: Some(depth), ..
+        } = command
+            && !targets.contains(depth)
+        {
+            targets.push(*depth);
+        }
+    }
+    targets
+}
+
+/// Dumps the first submission that draws into each depth target, as `depth-<id>`, up to
+/// [`DUMPED_DEPTH_TARGETS`] of them: a depth target sampled and never drawn is found against the
+/// passes that drew its neighbours, wherever in the run they came.
+fn dump_first_into_depth_target(submission: &Submission) {
+    static SEEN: Mutex<Vec<orbistoun_gpu::ResourceId>> = Mutex::new(Vec::new());
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for target in depth_targets_drawn(&submission.commands) {
+        if seen.len() >= DUMPED_DEPTH_TARGETS || seen.contains(&target) {
+            continue;
+        }
+        seen.push(target);
+        write_submission(submission, &format!("depth-{:x}", target.0));
+    }
+}
+
 /// The file in the run's frames directory holding the latest frame drawn at submit.
 const LATEST_DRAWN_FRAME: &str = "latest-drawn-frame.rgba";
 
@@ -1105,6 +1142,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     if number < DUMPED_SUBMISSIONS {
         write_submission(submission, &format!("drawn-{number:02}"));
     }
+    dump_first_into_depth_target(submission);
     keep_submission_before_named_flip(submission);
     let Some((&target, extent)) = submission.targets.iter().next() else {
         tracing::warn!("a submission's draws name no colour target to draw into");
@@ -2932,6 +2970,27 @@ fn report_released_labels() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// A submission's depth targets are the ones its `SetRenderTargets` name, each once, in order:
+    /// what decides which submissions a run dumps by depth target.
+    #[test]
+    fn a_submission_s_depth_targets_are_named_once_in_order() {
+        use orbistoun_gpu::{RenderCommand, ResourceId};
+        let set = |depth| RenderCommand::SetRenderTargets {
+            colour: vec![ResourceId(1)],
+            depth,
+        };
+        let commands = [
+            set(Some(ResourceId(0x20))),
+            set(None),
+            set(Some(ResourceId(0x10))),
+            set(Some(ResourceId(0x20))),
+        ];
+        assert_eq!(
+            super::depth_targets_drawn(&commands),
+            [ResourceId(0x20), ResourceId(0x10)]
+        );
+    }
 
     /// The run's host time per flip is each phase's milliseconds over its flips, costliest first,
     /// with the flips and the rate they came at: what a frame-bound stretch spends where, read at the
