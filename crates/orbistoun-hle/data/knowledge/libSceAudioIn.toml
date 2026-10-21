@@ -1,0 +1,63 @@
+library = "libSceAudioIn"
+
+[[function]]
+name = "sceAudioInOpen"
+arity = 6
+purpose = "Opens a capture port: (user, type, index, length, frequency, param), answering a handle."
+edge_cases = [
+    "MEASURED (000-boot/au01-audioin, no capture device attached, port-count 0): index 0, length 256, 16 or 48 kHz, param 0 or 1. Types 0 and 1 opened, and type 2 answered 0x80260104. The first handle was 0x30000007. With it held, each later port opened as 0x30000006 and was closed again.",
+    "orbistoun numbers ports from slot 7 downward, the highest free slot first. How many slots there are, and the order past the second port, are assumed. Every other shape answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log, 000-boot/au01-audioin open-t* rows."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudioInHqOpen"
+arity = 6
+purpose = "Opens a high-quality capture port, with the same arguments as sceAudioInOpen."
+edge_cases = [
+    "MEASURED (000-boot/au01-audioin, no capture device): refused for types 0 to 2 and params 0 and 1. It answered 0x80260103 at 16 kHz and 0x80260102 at 48 kHz.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log, 000-boot/au01-audioin hqopen-t* rows."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudioInGetSilentState"
+arity = 1
+purpose = "Whether a capture port reads silence: (handle)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audioin audioin-silent-state): 1 for an open port, on both calls.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudioInInput"
+arity = 2
+purpose = "Reads one length of samples from a capture port: (handle, &buffer), answering the sample count."
+edge_cases = [
+    "MEASURED (000-boot/au01-audioin audioin-input-call1-3, a param-0 port of length 256 at 16 kHz): each read answered 0x100 and wrote 0x200 zero bytes. The reads took 5.4, 3.0 and 1.2 ms, less than the 16 ms the samples span.",
+    "orbistoun writes the zeros and answers at once. That a read at 48 kHz writes as a 16 kHz one does is assumed: only the 16 kHz port was read. A param-1 read is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudioInClose"
+arity = 1
+purpose = "Closes a capture port: (handle)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audioin audioin-close): 0 the first time, and 0x80260109 for the same handle again.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-21"

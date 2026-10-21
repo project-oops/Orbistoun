@@ -1,0 +1,87 @@
+library = "libSceAudio3d"
+
+[[function]]
+name = "sceAudio3dInitialize"
+arity = 1
+purpose = "Initialises positional audio: (0)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-init): 0, then 0x80ea0007 on a second call.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dTerminate"
+arity = 0
+purpose = "Ends positional audio."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-terminate): 0 after initialising, then 0x80ea0007.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dPortOpen"
+arity = 3
+purpose = "Opens a positional audio port: (user, &parameters, &port)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-port-open-user, -255, after initialising with the default parameters): refused with 0x80ea0004, twice, for the signed-in user and for user 255. For user 255 the port slot's first four bytes became 0xffffffff; for the signed-in user they were left as they were.",
+    "The console had no 3D audio output configured, and neither has orbistoun, so it refuses as that console did.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dObjectReserve"
+arity = 2
+purpose = "Reserves an object on a port: (port, &object)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-obj-reserve, no port open): 0x80ea0002, the slot left as it was.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dObjectSetAttributes"
+arity = 4
+purpose = "Sets an object's attributes: (port, object, count, &attributes)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-set-attr, no port open, count 0, no attributes): 0x80ea0004.",
+    "With attributes it is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dPortFlush"
+arity = 1
+purpose = "Flushes a port: (port)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-flush, no port open): 0x80ea0002.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"
+
+[[function]]
+name = "sceAudio3dPortClose"
+arity = 1
+purpose = "Closes a port: (port)."
+edge_cases = [
+    "MEASURED (000-boot/au01-audio3d audio3d-port-close-255, on the slot a refused open left 0xffffffff in): 0x80ea0002.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261020T1125Z-au01, reports/hardware/report-20261020-au01-census.log."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-21"

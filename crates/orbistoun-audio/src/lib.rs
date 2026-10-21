@@ -5,8 +5,8 @@
 //! checks measure on hardware: with a host [`Sink`] installed a port's samples play on a device
 //! and the device paces it (D819); with none, a port paces itself by its sample rate.
 //! `audio_out2` serves its contexts and ports, and `ajm` its context set-up (initialise,
-//! register a codec, finalise) and instances; `ajm`'s batches, `audio3d` and `audio_in` are
-//! declarations only.
+//! register a codec, finalise), instances and batches. `audio3d` and `audio_in` answer as a
+//! console with no 3D audio output and no capture device does.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn, HandleAllocator};
 use orbistoun_hle::guest_module;
@@ -288,9 +288,8 @@ fn audio_out_set_volume(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The audio implementations this crate provides.
 ///
-/// The `ajm` module contributes its context set-up and instances, and `audio_out2` its user create
-/// and destroy;
-/// `audio3d` and `audio_in` none.
+/// The `ajm` module contributes its context set-up and instances, `audio_out2` its user create
+/// and destroy, and `audio3d` and `audio_in` what a console with neither device answers.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -309,6 +308,21 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmBatchJobDecode", ajm::ajm_batch_job_decode),
         ("sceAjmBatchStart", ajm::ajm_batch_start),
         ("sceAjmBatchWait", ajm::ajm_batch_wait),
+        ("sceAudioInOpen", audio_in::open),
+        ("sceAudioInHqOpen", audio_in::hq_open),
+        ("sceAudioInGetSilentState", audio_in::get_silent_state),
+        ("sceAudioInInput", audio_in::input),
+        ("sceAudioInClose", audio_in::close),
+        ("sceAudio3dInitialize", audio3d::initialize),
+        ("sceAudio3dTerminate", audio3d::terminate),
+        ("sceAudio3dPortOpen", audio3d::port_open),
+        ("sceAudio3dPortClose", audio3d::port_close),
+        ("sceAudio3dPortFlush", audio3d::port_flush),
+        ("sceAudio3dObjectReserve", audio3d::object_reserve),
+        (
+            "sceAudio3dObjectSetAttributes",
+            audio3d::object_set_attributes,
+        ),
         ("sceVoiceInit", voice::voice_init),
         ("sceVoiceSetThreadsParams", voice::voice_set_threads_params),
         ("sceVoiceCreatePort", voice::voice_create_port),

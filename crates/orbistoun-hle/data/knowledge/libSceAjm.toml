@@ -47,8 +47,9 @@ arity = 4
 purpose = "Creates a codec instance on an audio codec job manager context: (ctx, codec, flags, &instance)."
 returns = "status"
 edge_cases = [
-    "MEASURED (070-user/oneshot-setup-calls, one context): before its codec is registered it answered 0x8093000a, the 8-byte slot left 0xff. After registering, 0x0 with a 32-bit identifier written to the slot's low four bytes, the high four left: codec 0 gave 1 then 2, codecs 1, 2 and 3 gave 0x00400003, 0x00800004 and 0x00c00005, flags 0 and 2 on codec 0 gave 6 and 7.",
-    "The identifier is one more than the context's last, whatever the codec, with the codec in bits 22 and up. That a second context counts from 1 again is assumed: one context was measured.",
+    "MEASURED (070-user/oneshot-setup-calls, one context): before its codec is registered it answered 0x8093000a, the 8-byte slot left 0xff. After registering, 0x0 with a 32-bit identifier written to the slot's low four bytes, the high four left: codec 0 gave 1 then 2, codecs 1, 2 and 3 gave 0x4003, 0x8004 and 0xc005 (slot bytes 03400000, 04800000, 05c00000, a little-endian word), flags 0 and 2 on codec 0 gave 6 and 7.",
+    "MEASURED (000-boot/au01-ajm at9-inst-flag0-2, REQ-20261020T1125Z-au01): codec 1 with flags 0, 1 and 2 gave 0x4004, 0x4006 and 0x4008, each create made twice.",
+    "The identifier is one more than the context's last, whatever the codec, with the codec in bits 14 and up. That a second context counts from 1 again is assumed: one context was measured.",
     "GUEST-OBSERVED (D832 trial): PPSA04263 calls it on context 0x15 with codec 0 and flags 1, retrying about 14 times a second while it answers the placeholder; answered 0 it goes on to sceAjmBatchInitialize and sceAjmBatchJobDecode.",
     "A null slot, flags past 2, codecs past 3 and a context not live are unmeasured and answer the placeholder.",
 ]

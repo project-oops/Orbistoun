@@ -126,9 +126,10 @@ const INVALID_INSTANCE: u64 = 0x8093_0003;
 /// The flags `sceAjmInstanceCreate` was measured accepting: 0, 1 and 2 (REQ-ai01).
 const MEASURED_FLAGS: u64 = 3;
 
-/// Where an instance identifier carries its codec: bits 22 and up, as codecs 1 to 3 measured
-/// (`0x00400003`, `0x00800004`, `0x00c00005`, REQ-ai01).
-const CODEC_SHIFT: u32 = 22;
+/// Where an instance identifier carries its codec: bits 14 and up. Codecs 1 to 3 measured
+/// `0x4003`, `0x8004` and `0xc005` (REQ-ai01, slots `03400000`, `04800000`, `05c00000` read as
+/// little-endian words), and codec 1 `0x4004`, `0x4006` and `0x4008` (REQ-au01, `at9-inst-flag*`).
+const CODEC_SHIFT: u32 = 14;
 
 impl Registry {
     /// Whether `ctx` was issued below `issued_below` and is not finalised.
@@ -165,7 +166,7 @@ impl Registry {
     /// past those measured, or flags other than 0 to 2.
     ///
     /// Numbered from 1 per context, one more for each instance whatever its codec, with the codec
-    /// in bits 22 and up. Measured on a single context; that a second context counts from 1 again
+    /// in bits 14 and up. Measured on a single context; that a second context counts from 1 again
     /// is assumed.
     fn create(
         &mut self,
@@ -539,7 +540,7 @@ mod tests {
     use super::{ALREADY_REGISTERED, INVALID_INSTANCE, NOT_REGISTERED, Registry};
 
     /// `sceAjmInstanceCreate(ctx, codec, flags, &out)` refuses a codec the context has not
-    /// registered, and otherwise numbers instances from 1 with the codec in bits 22 and up; a
+    /// registered, and otherwise numbers instances from 1 with the codec in bits 14 and up; a
     /// second destroy of one is refused (REQ-ai01, `report-20261015-batch1.log`,
     /// `070-user/oneshot-setup-calls`).
     #[test]
@@ -552,9 +553,9 @@ mod tests {
         for codec in 1..4 {
             assert_eq!(registry.register(0x15, codec, 0x16), Some(0));
         }
-        assert_eq!(registry.create(0x15, 1, 1, 0x16), Some(Ok(0x0040_0003)));
-        assert_eq!(registry.create(0x15, 2, 1, 0x16), Some(Ok(0x0080_0004)));
-        assert_eq!(registry.create(0x15, 3, 1, 0x16), Some(Ok(0x00c0_0005)));
+        assert_eq!(registry.create(0x15, 1, 1, 0x16), Some(Ok(0x4003)));
+        assert_eq!(registry.create(0x15, 2, 1, 0x16), Some(Ok(0x8004)));
+        assert_eq!(registry.create(0x15, 3, 1, 0x16), Some(Ok(0xc005)));
         assert_eq!(registry.create(0x15, 0, 0, 0x16), Some(Ok(6)));
         assert_eq!(registry.create(0x15, 0, 2, 0x16), Some(Ok(7)));
         assert_eq!(registry.create(0x15, 0, 4, 0x16), None, "unmeasured flags");

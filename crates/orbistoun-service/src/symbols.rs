@@ -546,20 +546,10 @@ mod knowledge_tests {
     /// one losing its registration fails until an entry is added and justified.
     // Each entry's reason opens with the count of names the library declares, which a test checks.
     // A module that serves nothing goes here with its reason.
-    const SERVES_NOTHING: &[(&str, &str)] = &[
-        (
-            "libSceAudio3d",
-            "declared as 7 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceAudioIn",
-            "declared as 3 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceVideoRecording",
-            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-    ];
+    const SERVES_NOTHING: &[(&str, &str)] = &[(
+        "libSceVideoRecording",
+        "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
+    )];
 
     /// A declared library that serves nothing is either listed above or a bug: a module registered
     /// in `modules()` whose `implementations()` were never gathered declares functions nobody
