@@ -7766,12 +7766,175 @@ fn texture_from_words(
 ) -> Result<RenderCommand, &'static str> {
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
-        return crate::perf::span(crate::perf::Span::TextureBlocks, || {
+        let read = crate::perf::span(crate::perf::Span::TextureBlocks, || {
             read_block_texture(&descriptor, &words, block, slot, memory, texels)
         });
+        // Blocks in a tiling the block reader does not model are read by its equation (D923).
+        return read
+            .or_else(|why| guest_texture(&descriptor, words, slot, memory, texels).ok_or(why));
     }
-    texel_texture(&descriptor, words, slot, memory, texels)
+    if let Some(bound) = texel_texture(&descriptor, words, slot, memory, texels) {
+        return Ok(bound);
+    }
+    guest_texture(&descriptor, words, slot, memory, texels)
         .ok_or("its format, selects, tiling or shape is not one sampled exactly")
+}
+
+/// A flat image in a format [`crate::formats`] samples, where the readers above do not read it
+/// (D923): one level of a tiled 2D image, uncompressed, its elements detiled by
+/// [`crate::swizzle`]'s equation for its mode and element size and bound as they lie, in the
+/// guest's own format under its own selects. A chain's level, a linear image, a cube, a volume or
+/// an array, or a format, mode, size or selects nothing samples exactly, is `None`.
+fn guest_texture(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    let sampled = crate::formats::sampled(descriptor.format).ok()?;
+    let selects = destination_selects(words[3]);
+    // The selects are checked here, where a refusal names the descriptor, not at the device.
+    sampled.view(selects, false)?;
+    // An integer format is sampled through an integer image the module declares, which a draw's
+    // translation does not yet.
+    if sampled.layout.sampled_type() != crate::formats::SampledType::Float
+        || words[3] >> 28 != IMAGE_TYPE_2D
+        || descriptor.levels > 1
+        || descriptor.compression.is_some()
+        // `64KB_Z_X`'s pipe-bank XOR is not separated from its base here (`decode_image_descriptor`).
+        || (descriptor.tiling == SwizzleMode::Tiled64KbZX && words[0] & 0xFF != 0)
+    {
+        return None;
+    }
+    let layout = sampled.layout;
+    let size = layout.element_bytes();
+    let equation = crate::swizzle::equation(descriptor.tiling, size)?;
+    let extent = layout.element_extent();
+    let (across, down) = (
+        descriptor.width.div_ceil(extent),
+        descriptor.height.div_ceil(extent),
+    );
+    let encoding = crate::backend::TextureEncoding::Guest {
+        code: descriptor.format as u16,
+        selects: selects.map(|select| select as u8),
+    };
+    let span = equation.surface_bytes(across, down);
+    // Another image than any `TexelFormat` reading of the same address and extent.
+    let key = (
+        descriptor.base,
+        descriptor.width,
+        descriptor.height,
+        1 << 28 | descriptor.format,
+    );
+    let pipe_bank_xor = u32::from(descriptor.pipe_bank_xor);
+    let (hash, shared) = kept_or_read((texels, key, span), encoding, |spanned| {
+        let tiled = memory.read(descriptor.base, spanned)?;
+        let mut linear = equation.detile(tiled, (across, down), across, pipe_bank_xor)?;
+        linear.resize(linear.len().next_multiple_of(4), 0);
+        Some(
+            linear
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect(),
+        )
+    })?;
+    Some(block_bind(
+        slot,
+        hash,
+        shared,
+        (descriptor.width, descriptor.height, 1),
+        encoding,
+    ))
+}
+
+#[cfg(test)]
+mod guest_texture_tests {
+    use super::{RenderCommand, TexelCache, texture_from_words};
+
+    /// Guest memory of one surface at [`BASE`].
+    struct Surface(Vec<u8>);
+
+    const BASE: u64 = 0x10_0000;
+
+    impl super::GuestMemory for Surface {
+        fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+            let at = usize::try_from(address.checked_sub(BASE)?).ok()?;
+            self.0.get(at..at.checked_add(length)?)
+        }
+    }
+
+    /// A one-level 2D image's descriptor: `code` at [`BASE`], `width` x `height`, `SW_MODE` `mode`,
+    /// identity selects.
+    fn words(code: u32, (width, height): (u32, u32), mode: u32) -> [u32; 8] {
+        let selects = 4 | 5 << 3 | 6 << 6 | 7 << 9;
+        [
+            (BASE >> 8) as u32,
+            code << 20 | ((width - 1) & 3) << 30,
+            (width - 1) >> 2 | (height - 1) << 14,
+            selects | mode << 20 | super::IMAGE_TYPE_2D << 28,
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    /// A `BC7_UNORM` image in `64KB_S` - a format and tiling no other reader takes - binds as the
+    /// guest's own blocks, detiled by the mode's equation, in its own format (D923).
+    #[test]
+    fn a_guest_format_binds_its_detiled_elements() {
+        let equation = crate::swizzle::equation(crate::registers::SwizzleMode::Tiled64KbS, 16)
+            .expect("64KB_S at 16 bytes");
+        // Eight by eight texels, two by two blocks.
+        let linear: Vec<u8> = (0..64_u32).map(|i| (i * 37 + 11) as u8).collect();
+        let mut tiled = vec![0; equation.surface_bytes(2, 2)];
+        equation
+            .tile(&linear, &mut tiled, (2, 2), (2, 0))
+            .expect("tiled");
+        let bound = texture_from_words(
+            words(181, (8, 8), 9),
+            3,
+            &Surface(tiled),
+            &mut TexelCache::new(),
+        )
+        .expect("bound");
+        let RenderCommand::BindTexture {
+            slot,
+            texels,
+            width,
+            height,
+            encoding,
+            ..
+        } = bound
+        else {
+            panic!("a flat texture");
+        };
+        assert_eq!((slot, width, height), (3, 8, 8));
+        assert_eq!(
+            encoding,
+            crate::backend::TextureEncoding::Guest {
+                code: 181,
+                selects: [4, 5, 6, 7]
+            }
+        );
+        let bytes: Vec<u8> = texels.iter().flat_map(|word| word.to_le_bytes()).collect();
+        assert_eq!(bytes, linear);
+    }
+
+    /// An integer format is not bound through a float image, and a format nothing samples is not
+    /// bound at all.
+    #[test]
+    fn integer_and_unsampled_formats_are_refused() {
+        let surface = Surface(vec![0; 0x1_0000]);
+        for code in [6, 145, 155] {
+            assert!(
+                texture_from_words(words(code, (8, 8), 9), 0, &surface, &mut TexelCache::new())
+                    .is_err(),
+                "format {code}"
+            );
+        }
+    }
 }
 
 /// [`texture_from_words`] for an image read as texels rather than blocks.
@@ -13326,7 +13489,8 @@ mod tests {
 
     /// A `16_16_16_16_FLOAT` texture binds its texels detiled and untouched, two words each, for
     /// the host to sample as four half floats: Grand Theft Auto V's scene draws sample one in
-    /// `64KB_R_X`. Channels moved within a texel are not read, as for a packed float one.
+    /// `64KB_R_X`. Channels moved within a texel bind as the guest's own format, the selects for
+    /// the host's view to apply (D923).
     #[test]
     fn a_half_float_texture_binds_its_words_as_they_are() {
         use super::{RenderCommand, read_texture};
@@ -13365,11 +13529,24 @@ mod tests {
                 }
             }
         }
+        // Red and green exchanged: the texels as they are, the selects for the host's view to
+        // apply (D923).
         let mut swapped = bytes.clone();
         swapped[12..16].copy_from_slice(&word3(0xfa5).to_le_bytes());
-        assert!(
-            read_texture(table, 0, &Memory(swapped), &mut super::TexelCache::new()).is_none(),
-            "channels moved within a texel are not read"
+        let Some(RenderCommand::BindTexture {
+            encoding: moved,
+            texels: moved_texels,
+            ..
+        }) = read_texture(table, 0, &Memory(swapped), &mut super::TexelCache::new())
+        else {
+            panic!("channels moved within a texel bind in the guest's format");
+        };
+        assert_eq!(
+            moved,
+            crate::backend::TextureEncoding::Guest {
+                code: 71,
+                selects: [5, 4, 6, 7]
+            }
         );
         let Some(RenderCommand::BindTexture {
             texels,
@@ -13391,6 +13568,11 @@ mod tests {
             texels.as_ref(),
             expected.as_slice(),
             "row-major after detiling"
+        );
+        assert_eq!(
+            moved_texels.as_ref(),
+            expected.as_slice(),
+            "the same texels"
         );
     }
 
