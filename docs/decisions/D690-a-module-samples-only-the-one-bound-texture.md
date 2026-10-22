@@ -18,9 +18,10 @@ on the safe side.
 - Decoding the descriptor first: a subsystem built blind.
 - Counting distinct textures: needs the decoder that does not exist.
 
-A pixel shader may sample sixteen textures, at bindings 2, 4, then 7 to 20, each slot found where
-its descriptor came from: PPSA02664's pixel shader samples three, PPSA03416's more than four.
-Sixteen is what one stage may reach on every Vulkan device (the required minimum of
-`maxPerStageDescriptorSampledImages` and `maxPerStageDescriptorSamplers`). One image read through
-two samplers takes two slots, each with its own sampler. A seventeenth is refused, as is a
-second or later texture when any descriptor came from neither the table nor the user data.
+A pixel shader may sample thirty-two textures, at bindings 2, 4, then 7 to 36, each slot found
+where its descriptor came from: PPSA02664's pixel shader samples three, PPSA03416's more than four,
+Grand Theft Auto V's shadow shaders more than sixteen. Sixteen is the least one stage may reach on
+every Vulkan device (the required minimum of `maxPerStageDescriptorSampledImages` and
+`maxPerStageDescriptorSamplers`); the desktop devices orbistoun runs on allow far more. One image
+read through two samplers takes two slots, each with its own sampler. A thirty-third is refused, as
+is a second or later texture when any descriptor came from neither the table nor the user data.

@@ -261,21 +261,52 @@ impl DepthAttachment {
     ///
     /// When `words` is not one a texel, there is no device, or a Vulkan call fails.
     pub(crate) fn write_depth(&self, words: &[u32]) -> Result<(), DispatchError> {
+        self.write_aspect(words, vk::ImageAspectFlags::DEPTH)
+    }
+
+    /// Replaces its stencil with `words`, one value a texel in each word's low byte, row-major:
+    /// what a dispatch that stores to its stencil plane wrote. As [`Self::write_depth`] leaves it.
+    ///
+    /// # Errors
+    ///
+    /// When it holds no stencil, `words` is not one a texel, there is no device, or a Vulkan call
+    /// fails.
+    pub(crate) fn write_stencil(&self, words: &[u32]) -> Result<(), DispatchError> {
+        if !self.has_stencil() {
+            return Err(DispatchError::Unsupported(
+                "a stencil write to a depth attachment that holds none".to_owned(),
+            ));
+        }
+        self.write_aspect(words, vk::ImageAspectFlags::STENCIL)
+    }
+
+    /// Replaces one aspect with `words`, one a texel: a depth's `f32` bits, or a stencil value in
+    /// the low byte, packed as a copy from a buffer lays each aspect out.
+    fn write_aspect(
+        &self,
+        words: &[u32],
+        aspect: vk::ImageAspectFlags,
+    ) -> Result<(), DispatchError> {
         let texels = self.width as usize * self.height as usize;
         if words.len() != texels {
             return Err(DispatchError::Unsupported(format!(
-                "{} depths for a {}x{} depth target",
+                "{} texels for a {}x{} depth target",
                 words.len(),
                 self.width,
                 self.height
             )));
         }
+        let bytes: Vec<u8> = if aspect == vk::ImageAspectFlags::STENCIL {
+            words.iter().map(|&word| word as u8).collect()
+        } else {
+            words.iter().flat_map(|word| word.to_ne_bytes()).collect()
+        };
         let session = crate::compute::session()?;
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
-        let size = u64::from(self.width) * u64::from(self.height) * 4;
+        let size = bytes.len() as u64;
         let (buffer, memory) = crate::framebuffer::create_host_buffer(
             instance,
             physical,
@@ -288,14 +319,14 @@ impl DepthAttachment {
             // nothing else holds a mapping of it.
             let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
                 .map_err(|e| DispatchError::Vulkan("map_memory(depth write)", e))?
-                .cast::<u32>();
-            // SAFETY: the mapping covers `texels` words and `words` is that long; a fresh mapping
-            // cannot overlap the caller's slice.
-            unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), mapped, texels) };
+                .cast::<u8>();
+            // SAFETY: the mapping covers `size` bytes and `bytes` is that long; a fresh mapping
+            // cannot overlap the local vector.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped, bytes.len()) };
             // SAFETY: mapped immediately above and no pointer into it is used after this.
             unsafe { device.unmap_memory(memory) };
             crate::framebuffer::one_shot(&session, |device, command| {
-                self.record_depth_upload(device, command, buffer);
+                self.record_depth_upload(device, command, buffer, aspect);
             })
         })();
         // SAFETY: created above on this device, idle once the one-shot finished, destroyed once.
@@ -305,13 +336,14 @@ impl DepthAttachment {
         written
     }
 
-    /// Records [`Self::write_depth`]'s copy of `buffer` into the depth aspect, from and back to the
+    /// Records [`Self::write_aspect`]'s copy of `buffer` into `aspect`, from and back to the
     /// attachment layout a depth pass leaves it in.
     fn record_depth_upload(
         &self,
         device: &ash::Device,
         command: vk::CommandBuffer,
         buffer: vk::Buffer,
+        aspect: vk::ImageAspectFlags,
     ) {
         let range = vk::ImageSubresourceRange::default()
             .aspect_mask(aspects(self.format))
@@ -338,12 +370,11 @@ impl DepthAttachment {
             attachment_access,
             vk::AccessFlags::TRANSFER_WRITE,
         );
-        // Depth alone, one `f32` a texel, as `read_depth` copies it out; a stencil aspect keeps
-        // what it held.
+        // One aspect alone, as `read_aspect` copies it out; the other keeps what it held.
         let region = vk::BufferImageCopy::default()
             .image_subresource(
                 vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .aspect_mask(aspect)
                     .layer_count(1),
             )
             .image_extent(vk::Extent3D {

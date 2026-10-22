@@ -129,7 +129,8 @@ fn partial_group(
 /// threads, as radv sets up an unaligned dispatch (`USE_THREAD_DIMENSIONS`,
 /// `radv_cmd_buffer.c:14795-14863`): along each dimension the groups that cover it, the last
 /// running the remainder under `PARTIAL_TG_EN` (`partial`), or a whole group's where the grid divides
-/// evenly (D905).
+/// evenly (D905). Without `PARTIAL_TG_EN` the last group is a whole one, its threads past the grid
+/// running too (D940, assumed).
 fn thread_groups(
     grid: [u32; 3],
     full: [u32; 3],
@@ -146,11 +147,6 @@ fn thread_groups(
             threads => threads,
         };
         match partial {
-            None if remainder != full[i] => {
-                return Err(
-                    "a grid given in threads that groups do not divide, with no partial group",
-                );
-            }
             Some(partial) if partial[i] != remainder => {
                 return Err("a grid given in threads whose partial group is not its remainder");
             }
@@ -576,7 +572,8 @@ mod tests {
     /// A grid given in threads (`USE_THREAD_DIMENSIONS`) runs the groups that cover it, as radv
     /// sets one up for an unaligned dispatch (`radv_cmd_buffer.c:14795-14863`): Grand Theft Auto V's
     /// first dispatch gives `0x4800` threads of 64 under initiator `0x61`. A remainder runs in a
-    /// partial last group of exactly that many threads, and is refused without one (D905).
+    /// partial last group of exactly that many threads (D905), and without one in a whole last group
+    /// (D940): GTA V gives 0x477 threads of 64 under `0x61`.
     #[test]
     fn a_grid_given_in_threads_runs_the_groups_covering_it() {
         let state = state_at(&clear_writes(), 0x100, [0x4800, 1, 1], 0x61).expect("runs");
@@ -596,9 +593,11 @@ mod tests {
             })
         );
 
-        assert!(
-            state_at(&clear_writes(), 0x100, [100, 1, 1], 0x61).is_err(),
-            "a remainder with no partial group"
+        let whole = state_at(&clear_writes(), 0x100, [0x477, 1, 1], 0x61).expect("runs");
+        assert_eq!(
+            (whole.groups, whole.inputs.partial),
+            ([0x12, 1, 1], None),
+            "a remainder with no partial group runs a whole last group"
         );
         assert!(
             state_at(&partial, 0x100, [101, 1, 1], 0x63).is_err(),

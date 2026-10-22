@@ -58,8 +58,28 @@ pub const SUPPORTED: &[&str] = &[
     "ds_read_b64",
     "ds_read_b128",
     "s_min_i32",
+    "s_max_i32",
+    "s_min_u32",
+    "s_max_u32",
     "s_sub_u32",
     "s_not_b32",
+    "s_bitset1_b32",
+    "v_ffbh_u32_e32",
+    "v_movrels_b32_e32",
+    "v_bfe_i32",
+    "v_alignbyte_b32",
+    "s_orn2_saveexec_b64",
+    "s_cmp_lg_u64",
+    "v_movreld_b32_e32",
+    "v_permlanex16_b32",
+    "v_writelane_b32",
+    "v_add_f16_e32",
+    "v_sub_f16_e32",
+    "v_subrev_f16_e32",
+    "v_mul_f16_e32",
+    "v_max_f16_e32",
+    "v_min_f16_e32",
+    "v_fmac_f16_e32",
     "buffer_atomic_add",
     "buffer_atomic_fmin",
     "buffer_atomic_fmax",
@@ -126,6 +146,8 @@ pub const SUPPORTED: &[&str] = &[
     "s_andn1_saveexec_b64",
     "s_and_saveexec_b32",
     "s_bcnt1_i32_b64",
+    "s_ff1_i32_b32",
+    "s_ff1_i32_b64",
     "v_rndne_f32_e32",
     "v_floor_f32_e32",
     "v_fract_f32_e32",
@@ -195,6 +217,10 @@ pub const SUPPORTED: &[&str] = &[
     "s_cmp_le_u32",
     "s_cmpk_eq_i32",
     "s_cmpk_lg_i32",
+    "s_cmpk_gt_i32",
+    "s_cmpk_ge_i32",
+    "s_cmpk_lt_i32",
+    "s_cmpk_le_i32",
     "s_cselect_b64",
     "s_endpgm",
     "s_load_dword",
@@ -241,6 +267,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_neq_f32_e32",
     "v_cmp_ngt_f32_e32",
     "v_cmp_nlt_f32_e32",
+    "v_cmp_u_f32_e32",
     "v_cmp_lg_f32_e32",
     "v_cmp_nge_f32_e32",
     "v_cmp_nlg_f32_e32",
@@ -316,6 +343,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_mad_i32_i24",
     "v_mul_lo_u32",
     "v_mul_hi_u32",
+    "v_mul_hi_i32",
+    "v_bfm_b32",
+    "v_bcnt_u32_b32",
+    "v_ldexp_f32",
     "v_and_or_b32",
     "v_or3_b32",
     "v_max3_f32",
@@ -508,6 +539,14 @@ pub struct Texture {
     /// Which coordinates, across then down, a sample saturates first: those its sampler clamps to
     /// half a border (D743).
     pub saturate: [bool; 2],
+    /// Which coordinates, across then down, a sample mirrors once first: those its sampler mirrors
+    /// once, taken as their absolute value - the reflection about zero a mirror-once mode makes -
+    /// then clamped as the mode's clamp says.
+    pub mirror: [bool; 2],
+    /// Where the shader compares this texture against a reference itself: the sampler's
+    /// `DEPTH_COMPARE_FUNC` and whether it filters bilinearly. The image is then declared as it is,
+    /// not as depth.
+    pub shader_compare: Option<(u8, bool)>,
     /// The shape the binding is declared as: a cube, sampled with a three-component direction that
     /// [`coordinate`](Self::coordinate) is the type of (D811); a three-dimensional image, sampled at
     /// three coordinates (D823); or a depth texture sampled against a reference (D816).
@@ -727,6 +766,7 @@ pub fn writes_condition_code(name: &str) -> bool {
         "s_cmp_eq_i32"
             | "s_cmp_lg_i32"
             | "s_cmp_lg_u32"
+            | "s_cmp_lg_u64"
             | "s_cmp_eq_u32"
             | "s_cmp_gt_i32"
             | "s_cmp_ge_i32"
@@ -738,6 +778,10 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_cmp_le_u32"
             | "s_cmpk_eq_i32"
             | "s_cmpk_lg_i32"
+            | "s_cmpk_gt_i32"
+            | "s_cmpk_ge_i32"
+            | "s_cmpk_lt_i32"
+            | "s_cmpk_le_i32"
             // The arithmetic sets it on signed overflow.
             | "s_add_i32"
             | "s_sub_i32"
@@ -775,6 +819,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_bitcmp1_b32"
             | "s_and_saveexec_b64"
             | "s_andn1_saveexec_b64"
+            | "s_orn2_saveexec_b64"
             | "s_and_saveexec_b32"
             | "s_bcnt1_i32_b64"
     )
@@ -1409,8 +1454,24 @@ pub trait Model {
 
     /// A comparison of two values, producing a boolean. The opcode decides whether they are
     /// read as floats or as integers, so this serves both.
+    ///
+    /// `OpUnordered` and `OpOrdered` need the `Kernel` capability, which a Vulkan shader cannot
+    /// declare: either operand a NaN, or neither, is formed from `OpIsNan` instead.
     fn compare(&mut self, opcode: u16, lhs: Id, rhs: Id) -> Id {
         let bool_type = self.bool_type();
+        if matches!(opcode, op::UNORDERED | op::ORDERED) {
+            let b = self.builder();
+            let [left, right, either] = [b.id(), b.id(), b.id()];
+            b.function(op::IS_NAN, &[bool_type.0, left.0, lhs.0]);
+            b.function(op::IS_NAN, &[bool_type.0, right.0, rhs.0]);
+            b.function(op::LOGICAL_OR, &[bool_type.0, either.0, left.0, right.0]);
+            if opcode == op::UNORDERED {
+                return either;
+            }
+            let neither = b.id();
+            b.function(op::LOGICAL_NOT, &[bool_type.0, neither.0, either.0]);
+            return neither;
+        }
         let b = self.builder();
         let result = b.id();
         b.function(opcode, &[bool_type.0, result.0, lhs.0, rhs.0]);
@@ -2928,7 +2989,7 @@ pub fn instruction<M: Model + ?Sized>(
     }
     let name = name.as_str();
 
-    // A DPP16 form: the instruction with its first source read from another lane of its quad.
+    // A DPP16 form: the instruction with its first source read from another lane of its row.
     // Admitted only as `dpp_translated` describes, before translation began.
     if let Some(word) = dpp_word(model.encodings(), instruction) {
         return dpp_form(model, instruction, (name, word));
@@ -3009,6 +3070,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_wqm_b64" => whole_quad_mode(model, instruction),
         "s_quadmask_b64" => quad_mask(model, instruction),
         "s_brev_b32" => scalar_bit_reverse(model, instruction),
+        "s_bitset1_b32" => scalar_bit_set(model, instruction),
         "s_getpc_b64" => program_counter(model, instruction),
         // s_wqm_b32: the same for a 32-lane wavefront, whose mask is one register (`s_wqm_b32
         // exec_lo, exec_lo` before a texture sample).
@@ -3024,19 +3086,21 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
-        "s_and_saveexec_b64" => and_save_exec(model, instruction, false),
-        "s_andn1_saveexec_b64" => and_save_exec(model, instruction, true),
+        "s_and_saveexec_b64" => and_save_exec(model, instruction, SaveExec::And),
+        "s_andn1_saveexec_b64" => and_save_exec(model, instruction, SaveExec::AndNotSource),
+        "s_orn2_saveexec_b64" => and_save_exec(model, instruction, SaveExec::OrNotExec),
+        "s_cmp_lg_u64" => scalar_compare_64(model, instruction),
         "s_and_saveexec_b32" => and_save_exec_32(model, instruction),
         "s_bcnt1_i32_b64" => scalar_bit_count_64(model, instruction),
+        "s_ff1_i32_b32" | "s_ff1_i32_b64" => scalar_first_one(model, instruction, name),
 
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_orn2_b32" | "s_or_b32"
         | "s_xor_b32" | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32"
         | "s_lshr_b32" | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
-        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" | "s_sub_u32" => {
-            scalar_integer(model, instruction, name)
-        }
+        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" | "s_max_i32"
+        | "s_min_u32" | "s_max_u32" | "s_sub_u32" => scalar_integer(model, instruction, name),
 
         // Field assembly that writes no condition code: two 16-bit halves into one word, and a
         // run of ones into a register pair.
@@ -3046,7 +3110,8 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_cselect_b64" => scalar_select_64(model, instruction),
 
         // The compact scalar form: a destination and a sixteen-bit immediate.
-        "s_movk_i32" | "s_cmpk_eq_i32" | "s_cmpk_lg_i32" | "s_addk_i32" | "s_mulk_i32" => {
+        "s_movk_i32" | "s_cmpk_eq_i32" | "s_cmpk_lg_i32" | "s_cmpk_gt_i32" | "s_cmpk_ge_i32"
+        | "s_cmpk_lt_i32" | "s_cmpk_le_i32" | "s_addk_i32" | "s_mulk_i32" => {
             scalar_immediate(model, instruction, name)
         }
 
@@ -3120,10 +3185,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_lshl_or_b32" => shift_or(model, instruction),
         _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
-        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_mad_u32_u24" | "v_and_or_b32" | "v_or3_b32"
-        | "v_mul_lo_u32" | "v_mul_hi_u32" | "v_msad_u8" | "v_bfe_u32" => {
-            integer_long_form(model, instruction, name)
-        }
+        _ if LONG_FORMS.contains(&name) => integer_long_form(model, instruction, name),
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
@@ -3184,6 +3246,11 @@ fn vector_instruction<M: Model + ?Sized>(
         }
 
         "v_mov_b32_e32" => vector_move(model, instruction),
+        "v_movrels_b32_e32" => relative_move(model, instruction),
+        "v_movreld_b32_e32" => relative_write(model, instruction),
+        "v_permlanex16_b32" => permute_across_rows(model, instruction),
+        "v_writelane_b32" => write_lane(model, instruction),
+        _ if HALF_FLOATS.contains(&name) => half_float_arithmetic(model, instruction, name),
 
         // The short-form vector ALU: integer address arithmetic and float arithmetic.
         "v_add_f32_e32"
@@ -3223,6 +3290,7 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32"
         | "v_fract_f32_e32" | "v_trunc_f32_e32" => float_unary(model, instruction, name),
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
+        "v_ffbh_u32_e32" => leading_zeros(model, instruction),
 
         _ => memory_or_dropped_store(model, instruction, name),
     }
@@ -3326,7 +3394,10 @@ fn memory_instruction<M: Model + ?Sized>(
             buffer_atomic(model, instruction, name)
         }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
-        name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
+        // The sixteen-bit forms pack two channels a register, which is not modelled.
+        name if name.starts_with("tbuffer_") && !name.contains("_d16") => {
+            typed_buffer_memory(model, instruction, name)
+        }
         // The GDS bit (17 on GFX10, `aco_assembler.cpp:513`) points the access at the global data
         // share, shared by every wave and kept between dispatches; carried out on the local share it
         // would vanish with the workgroup.
@@ -3580,6 +3651,190 @@ fn bit_reverse<M: Model + ?Sized>(
         b.function(op::BIT_REVERSE, &[u32_type.0, reversed.0, value.0]);
         model.write_vector_lane(register, lane, reversed);
     }
+    model.count();
+    Ok(())
+}
+
+/// `v_ffbh_u32 d, s`: the count of `s`'s leading zero bits, per lane, and `0xffffffff` where `s` is
+/// zero (`V_FFBH_U32`, AMD's published RDNA instruction set). Counted by halving: where the top
+/// `n` bits are clear, `n` is added and the value shifted up by it, for `n` of 16, 8, 4, 2 and 1.
+fn leading_zeros<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_ffbh_u32 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let value = model.read_source(instruction, source, lane)?;
+        let zero = model.constant(0);
+        let mut count = zero;
+        let mut rest = value;
+        for step in [16, 8, 4, 2, 1] {
+            let away = model.constant(32 - step);
+            let top = model.binary(op::SHIFT_RIGHT_LOGICAL, rest, away);
+            let clear = model.compare(op::IEQUAL, top, zero);
+            let by = model.constant(step);
+            let more = model.add(count, by);
+            count = model.select(clear, more, count);
+            let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, rest, by);
+            rest = model.select(clear, shifted, rest);
+        }
+        let none = model.compare(op::IEQUAL, value, zero);
+        let all = model.constant(u32::MAX);
+        let counted = model.select(none, all, count);
+        model.write_vector_lane(register, lane, counted);
+    }
+    model.count();
+    Ok(())
+}
+
+/// How many registers past its source a relative move reads (D943): `m0` from zero to one less,
+/// each a register the move selects among. Grand Theft Auto V's cascade lookup reads `m0` of 0, 4,
+/// 8 or 12 past `v0` to `v2`.
+const RELATIVE_REGISTERS: u32 = 32;
+
+/// `v_movrels_b32 d, s`: vector register `s + m0` into `d`, per lane (`V_MOVRELS_B32`, AMD's
+/// published RDNA instruction set), as a selection among the [`RELATIVE_REGISTERS`] from `s`, which
+/// every model can read (D943). An `m0` past them reads `s` itself.
+fn relative_move<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let (Operand::Vector(register), Operand::Vector(first)) = (destination, source) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_movrels_b32 names other than vector registers",
+        });
+    };
+    let (register, first) = (u32::from(*register), u32::from(*first));
+    let last = (first + RELATIVE_REGISTERS).min(256);
+    let index = model.read_m0();
+    for lane in running_lanes(model) {
+        let mut value = model.read_source(instruction, source, lane)?;
+        for (offset, at) in (1..).zip(first + 1..last) {
+            let candidate = Operand::Vector(u16::try_from(at).unwrap_or(u16::MAX));
+            let read = model.read_source(instruction, &candidate, lane)?;
+            let wanted = model.constant(offset);
+            let here = model.compare(op::IEQUAL, index, wanted);
+            value = model.select(here, read, value);
+        }
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_movreld_b32 d, s`: `s` into vector register `d + m0`, per lane (`V_MOVRELD_B32`, AMD's
+/// published RDNA instruction set), as a write of each of the [`RELATIVE_REGISTERS`] from `d` that
+/// keeps its value except at the one `m0` names (D943).
+fn relative_write<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Vector(first) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_movreld_b32 names other than a vector destination",
+        });
+    };
+    let first = u32::from(*first);
+    let last = (first + RELATIVE_REGISTERS).min(256);
+    let index = model.read_m0();
+    for lane in running_lanes(model) {
+        let value = model.read_source(instruction, source, lane)?;
+        for (offset, at) in (0..).zip(first..last) {
+            let held = Operand::Vector(u16::try_from(at).unwrap_or(u16::MAX));
+            let old = model.read_source(instruction, &held, lane)?;
+            let wanted = model.constant(offset);
+            let here = model.compare(op::IEQUAL, index, wanted);
+            let written = model.select(here, value, old);
+            model.write_vector_lane(at, lane, written);
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_permlanex16_b32 d, s, sel_lo, sel_hi`: each lane takes `s` from the lane of the other row of
+/// sixteen in its half of the wave that four bits of the selects name - lane `i` of a row the bits
+/// at `4 * i` of `sel_lo` for `i` below eight, of `sel_hi` above (`V_PERMLANEX16_B32`, AMD's
+/// published RDNA instruction set). Every lane's source is read as it stands, as with fetch-inactive
+/// set (assumed).
+fn permute_across_rows<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let [
+        Operand::Vector(destination),
+        Operand::Vector(source),
+        select_low,
+        select_high,
+    ] = instruction.operands.as_slice()
+    else {
+        return Err(refuse(
+            "v_permlanex16_b32 does not name a vector destination, a vector source and two selects",
+        ));
+    };
+    let (destination, source) = (u32::from(*destination), u32::from(*source));
+    let low = model.read_source(instruction, select_low, 0)?;
+    let high = model.read_source(instruction, select_high, 0)?;
+    let nibble = model.constant(0xf);
+    for lane in running_lanes(model) {
+        let within = lane % 16;
+        let (word, shift) = if within < 8 {
+            (low, within * 4)
+        } else {
+            (high, (within - 8) * 4)
+        };
+        let shift = model.constant(shift);
+        let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+        let chosen = model.binary(op::BITWISE_AND, shifted, nibble);
+        let other_row = (lane & !31) + (((lane >> 4) & 1) ^ 1) * 16;
+        let row = model.constant(other_row);
+        let from = model.add(row, chosen);
+        let value = model.read_vector_at(source, from).ok_or_else(|| {
+            refuse("a permutation across rows in a model that holds one lane alone")
+        })?;
+        model.write_vector_lane(destination, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `s_bitset1_b32 d, s`: bit `s & 31` of the scalar register `d` set, the others kept
+/// (`S_BITSET1_B32`, AMD's published RDNA instruction set); the condition code is not written.
+fn scalar_bit_set<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Scalar(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_bitset1_b32 destination is not a scalar register",
+        });
+    };
+    let register = u32::from(*register);
+    let bit = model.read_source(instruction, source, 0)?;
+    let five = model.constant(31);
+    let at = model.binary(op::BITWISE_AND, bit, five);
+    let one = model.constant(1);
+    let mask = model.binary(op::SHIFT_LEFT_LOGICAL, one, at);
+    let held = model.read_scalar(register);
+    let set = model.binary(op::BITWISE_OR, held, mask);
+    model.write_scalar(register, set);
     model.count();
     Ok(())
 }
@@ -3930,6 +4185,9 @@ const GLSL_SIN: u32 = 13;
 /// GLSL.std.450 instruction number for `Cos`.
 const GLSL_COS: u32 = 14;
 /// GLSL.std.450 instruction number for `Exp2` (2^x).
+/// `GLSL.std.450` `FAbs`: a float's absolute value.
+const GLSL_FABS: u32 = 4;
+
 const GLSL_EXP2: u32 = 29;
 /// GLSL.std.450 instruction number for `Log2` (log2(x)).
 const GLSL_LOG2: u32 = 30;
@@ -5097,7 +5355,9 @@ fn scalar_integer<M: Model + ?Sized>(
         // `S_MUL_I32`: the product's low 32 bits, which signed and unsigned multiplication share;
         // the condition code is not written.
         "s_mul_i32" => (model.binary(op::IMUL, left, right), None),
-        "s_sub_u32" | "s_min_i32" => difference_or_minimum(model, name, left, right),
+        "s_sub_u32" | "s_min_i32" | "s_max_i32" | "s_min_u32" | "s_max_u32" => {
+            difference_or_minimum(model, name, left, right)
+        }
         // `S_MUL_HI_U32`: the unsigned product's high 32 bits; the condition code is not written.
         "s_mul_hi_u32" => (multiply_high(model, left, right), None),
         // `S_LSHR_B32`: `D = S0 >> S1[4:0]`, logical, and whether it is non-zero.
@@ -5146,8 +5406,10 @@ fn scalar_integer<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `S_SUB_U32`: the difference, and the borrow - whether the second source exceeded the first; or
-/// `S_MIN_I32`: the signed minimum, and whether the first source is the smaller.
+/// `S_SUB_U32`: the difference, and the borrow - whether the second source exceeded the first;
+/// `S_MIN_I32` and `S_MIN_U32`: the minimum, signed or unsigned, and whether the first source is the
+/// smaller; or `S_MAX_I32` and `S_MAX_U32`: the maximum, and whether the first source is the larger.
+/// Grand Theft Auto V's compute programs keep the result in `vcc_lo`.
 fn difference_or_minimum<M: Model + ?Sized>(
     model: &mut M,
     name: &str,
@@ -5158,8 +5420,14 @@ fn difference_or_minimum<M: Model + ?Sized>(
         let result = model.binary(op::ISUB, left, right);
         return (result, Some(model.compare(op::ULESS_THAN, left, right)));
     }
-    let less = model.compare(op::SLESS_THAN, left, right);
-    (model.select(less, left, right), Some(less))
+    let ordering = match name {
+        "s_max_i32" => op::SGREATER_THAN,
+        "s_max_u32" => op::UGREATER_THAN,
+        "s_min_u32" => op::ULESS_THAN,
+        _ => op::SLESS_THAN,
+    };
+    let first = model.compare(ordering, left, right);
+    (model.select(first, left, right), Some(first))
 }
 
 /// `s_andn2_b32` and `s_orn2_b32`: `S0 & ~S1` and `S0 | ~S1`, with the condition code whether the
@@ -5238,12 +5506,16 @@ fn scalar_immediate<M: Model + ?Sized>(
             model.write_scalar(register, constant);
         }
         // The compact compares. Signed, like every scalar compare.
-        "s_cmpk_eq_i32" | "s_cmpk_lg_i32" => {
+        "s_cmpk_eq_i32" | "s_cmpk_lg_i32" | "s_cmpk_gt_i32" | "s_cmpk_ge_i32" | "s_cmpk_lt_i32"
+        | "s_cmpk_le_i32" => {
             let current = model.read_scalar(register);
-            let spirv = if name == "s_cmpk_eq_i32" {
-                op::IEQUAL
-            } else {
-                op::INOT_EQUAL
+            let spirv = match name {
+                "s_cmpk_eq_i32" => op::IEQUAL,
+                "s_cmpk_lg_i32" => op::INOT_EQUAL,
+                "s_cmpk_gt_i32" => op::SGREATER_THAN,
+                "s_cmpk_ge_i32" => op::SGREATER_THAN_EQUAL,
+                "s_cmpk_lt_i32" => op::SLESS_THAN,
+                _ => op::SLESS_THAN_EQUAL,
             };
             let condition = model.compare(spirv, current, constant);
             model.set_condition_code(condition);
@@ -5303,6 +5575,37 @@ fn scalar_destination(
 /// These compare signed integers; an unsigned comparison agrees on non-negative pairs and reverses
 /// the order wherever one operand is negative. The condition code is one bit of hidden state, not
 /// an operand.
+/// How a save-exec instruction forms the new execution mask from its source and the old one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveExec {
+    /// The source and the mask (`s_and_saveexec_b64`).
+    And,
+    /// The source's complement and the mask (`s_andn1_saveexec_b64`).
+    AndNotSource,
+    /// The source or the mask's complement (`s_orn2_saveexec_b64`).
+    OrNotExec,
+}
+
+/// `s_cmp_lg_u64 a, b`: whether two 64-bit scalar sources differ, into the condition code
+/// (`S_CMP_LG_U64`, AMD's published RDNA instruction set).
+fn scalar_compare_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (first, second) = two_operands(instruction)?;
+    let (first_low, first_high) = sixty_four_bit_source(model, instruction, first)?;
+    let (second_low, second_high) = sixty_four_bit_source(model, instruction, second)?;
+    let low = model.compare(op::INOT_EQUAL, first_low, second_low);
+    let high = model.compare(op::INOT_EQUAL, first_high, second_high);
+    let bool_type = model.bool_type();
+    let b = model.builder();
+    let differ = b.id();
+    b.function(op::LOGICAL_OR, &[bool_type.0, differ.0, low.0, high.0]);
+    model.set_condition_code(differ);
+    model.count();
+    Ok(())
+}
+
 fn scalar_compare<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -5484,8 +5787,9 @@ fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), 
 ///
 /// A float condition is ordered - false where either operand is a NaN - and its `n` form is the
 /// negation, so unordered: `nlt` is not-less-than, true for a NaN. `neq` is the unordered
-/// not-equal and `lg` the ordered one. The integer conditions take their signedness from the type.
-/// The always-true, always-false, ordered and unordered tests (`t`, `f`, `o`, `u`) are not here.
+/// not-equal and `lg` the ordered one. The ordered and unordered tests (`o`, `u`) answer whether
+/// neither, or either, operand is a NaN. The integer conditions take their signedness from the
+/// type. The always-true and always-false tests (`t`, `f`) are not here.
 fn compare_op(name: &str) -> Option<(u16, bool)> {
     let base = name
         .strip_suffix("_e32")
@@ -5504,6 +5808,8 @@ fn compare_op(name: &str) -> Option<(u16, bool)> {
         ("f32", "nle") => op::FUNORD_GREATER_THAN,
         ("f32", "neq") => op::FUNORD_NOT_EQUAL,
         ("f32", "nlt") => op::FUNORD_GREATER_THAN_EQUAL,
+        ("f32", "o") => op::ORDERED,
+        ("f32", "u") => op::UNORDERED,
         ("i32" | "u32", "eq") => op::IEQUAL,
         ("i32" | "u32", "ne") => op::INOT_EQUAL,
         ("i32", "lt") => op::SLESS_THAN,
@@ -5873,7 +6179,7 @@ fn scalar_bit_test<M: Model + ?Sized>(
 fn and_save_exec<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    inverted: bool,
+    combine: SaveExec,
 ) -> Result<(), TranslateError> {
     let [destination, source] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
@@ -5895,8 +6201,8 @@ fn and_save_exec<M: Model + ?Sized>(
     let (source_low, source_high) = sixty_four_bit_source(model, instruction, source)?;
     // `s_andn1_saveexec_b64` inverts its source (GFX11's `s_and_not0_saveexec`,
     // `aco_opcodes.py:656`).
-    let (source_low, source_high) = if inverted {
-        let all = model.constant(u32::MAX);
+    let all = model.constant(u32::MAX);
+    let (source_low, source_high) = if combine == SaveExec::AndNotSource {
         (
             model.binary(op::BITWISE_XOR, source_low, all),
             model.binary(op::BITWISE_XOR, source_high, all),
@@ -5905,8 +6211,21 @@ fn and_save_exec<M: Model + ?Sized>(
         (source_low, source_high)
     };
     let (exec_low, exec_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
-    let low = model.binary(op::BITWISE_AND, source_low, exec_low);
-    let high = model.binary(op::BITWISE_AND, source_high, exec_high);
+    // `s_orn2_saveexec_b64`: the source or the old mask's complement (`S_ORN2_SAVEEXEC_B64`, AMD's
+    // published RDNA instruction set).
+    let (low, high) = if combine == SaveExec::OrNotExec {
+        let not_low = model.binary(op::BITWISE_XOR, exec_low, all);
+        let not_high = model.binary(op::BITWISE_XOR, exec_high, all);
+        (
+            model.binary(op::BITWISE_OR, source_low, not_low),
+            model.binary(op::BITWISE_OR, source_high, not_high),
+        )
+    } else {
+        (
+            model.binary(op::BITWISE_AND, source_low, exec_low),
+            model.binary(op::BITWISE_AND, source_high, exec_high),
+        )
+    };
     if let Some(mask) = saved_mask {
         model.write_lane_mask(mask, exec_low, exec_high)?;
     } else {
@@ -5944,6 +6263,61 @@ fn and_save_exec_32<M: Model + ?Sized>(
     model.set_condition_code(non_zero);
     model.count();
     Ok(())
+}
+
+/// `s_ff1_i32_b32 d, s` and `s_ff1_i32_b64 d, s`: the index of the source's lowest set bit, a pair's
+/// counted from its low half, and `0xffffffff` where none is set (`S_FF1_I32_B32`, `S_FF1_I32_B64`,
+/// AMD's published RDNA instruction set). No condition code. Grand Theft Auto V's compute programs
+/// take `s_ff1_i32_b64 vcc_lo, exec_lo` for the first running lane.
+fn scalar_first_one<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let (low, high) = if name == "s_ff1_i32_b64" {
+        sixty_four_bit_source(model, instruction, source)?
+    } else {
+        let low = model.read_source(instruction, source, 0)?;
+        (low, model.constant(0))
+    };
+    let zero = model.constant(0);
+    let (in_low, in_high) = (trailing_zeros(model, low), trailing_zeros(model, high));
+    let thirty_two = model.constant(32);
+    let in_high = model.add(in_high, thirty_two);
+    let low_clear = model.compare(op::IEQUAL, low, zero);
+    let index = model.select(low_clear, in_high, in_low);
+    let either = model.binary(op::BITWISE_OR, low, high);
+    let none = model.compare(op::IEQUAL, either, zero);
+    let all = model.constant(u32::MAX);
+    let index = model.select(none, all, index);
+    write_scalar_operand(model, instruction, destination, index)?;
+    model.count();
+    Ok(())
+}
+
+/// How many of `value`'s low bits are clear below its lowest set one, counted by halving; 32 for
+/// zero.
+fn trailing_zeros<M: Model + ?Sized>(model: &mut M, value: Id) -> Id {
+    let zero = model.constant(0);
+    let mut count = zero;
+    let mut rest = value;
+    for step in [16, 8, 4, 2, 1] {
+        let mask = model.constant((1 << step) - 1);
+        let low = model.binary(op::BITWISE_AND, rest, mask);
+        let clear = model.compare(op::IEQUAL, low, zero);
+        let by = model.constant(step);
+        let more = model.add(count, by);
+        count = model.select(clear, more, count);
+        let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, rest, by);
+        rest = model.select(clear, shifted, rest);
+    }
+    // Five halvings reach the last bit; a value with none set counts one more.
+    let one = model.constant(1);
+    let last = model.binary(op::BITWISE_AND, rest, one);
+    let none = model.compare(op::IEQUAL, last, zero);
+    let more = model.add(count, one);
+    model.select(none, more, count)
 }
 
 /// `s_bcnt1_i32_b64 d, s`: how many bits of the pair are set, and the condition code whether any
@@ -7748,11 +8122,6 @@ fn buffer_atomic<M: Model + ?Sized>(
     let word = instruction.word;
     let (literal_offset, offen, idxen) = (word & 0xFFF, word & 1 << 12 != 0, word & 1 << 13 != 0);
     let returning = word & 1 << 14 != 0;
-    if idxen {
-        return Err(refuse(
-            "a buffer atomic indexed by record is not translated",
-        ));
-    }
     let float = match name {
         "buffer_atomic_fmin" => Some(false),
         "buffer_atomic_fmax" => Some(true),
@@ -7769,22 +8138,35 @@ fn buffer_atomic<M: Model + ?Sized>(
     let instruction_offset = model.constant(literal_offset);
     for lane in running_lanes(model) {
         let scalar_offset = model.read_source(instruction, soffset, lane)?;
-        let voffset = if offen {
-            Some(model.read_source(instruction, vaddr, lane)?)
-        } else {
-            None
+        // The record index and the offset as a load reads them: one register for either, a pair,
+        // index first, for both (AMD's published RDNA instruction set).
+        let (vindex, voffset) = match (idxen, offen) {
+            (false, false) => (None, None),
+            (true, false) => (Some(model.read_source(instruction, vaddr, lane)?), None),
+            (false, true) => (None, Some(model.read_source(instruction, vaddr, lane)?)),
+            (true, true) => {
+                let Operand::Vector(first) = vaddr else {
+                    return Err(refuse(
+                        "a buffer atomic with both address modifiers does not name a register pair",
+                    ));
+                };
+                let index = model.read_source(instruction, &Operand::Vector(*first), lane)?;
+                let offset = model.read_source(instruction, &Operand::Vector(*first + 1), lane)?;
+                (Some(index), Some(offset))
+            }
         };
         let zero = model.constant(0);
         let offset = model.add(instruction_offset, voffset.unwrap_or(zero));
+        let index = vindex.unwrap_or(zero);
         let address = buffer_address(
             model,
             &addressed,
             scalar_offset,
             instruction_offset,
             voffset,
-            None,
+            vindex,
         );
-        let outside = buffer_out_of_bounds(model, &resource, flags, offset, zero, 4);
+        let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, 4);
         let bool_type = model.bool_type();
         let b = model.builder();
         let landed = b.id();
@@ -8079,6 +8461,7 @@ pub const SDWA_COMPARE: &[&str] = &[
     "v_cmp_nge_f32_e32",
     "v_cmp_nlg_f32_e32",
     "v_cmp_nle_f32_e32",
+    "v_cmp_u_f32_e32",
     // The forms whose answer narrows the execution mask: every float compare above's.
     "v_cmpx_lt_f32_e32",
     "v_cmpx_eq_f32_e32",
@@ -8463,8 +8846,8 @@ const DPP_FAMILIES: [&str; 2] = ["VOP1", "VOP2"];
 pub const DPP_STAGING_REGISTER: u32 = 256;
 
 /// Whether an instruction's modifier - `marker`, from its first source - is a DPP16 form this
-/// translates: a one- or two-source vector instruction whose word is a quad permute with every
-/// row and bank enabled and no source modifier (see `dpp_quad_permute`).
+/// translates: a one- or two-source vector instruction whose word names a row control and no
+/// source modifier (see `dpp_control`).
 #[must_use]
 pub fn dpp_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
     marker == DPP16_MARKER
@@ -8472,7 +8855,7 @@ pub fn dpp_translated(marker: u32, instruction: &Instruction, encodings: &Encodi
             .encoding
             .and_then(|index| encodings.encodings().get(usize::from(index)))
             .is_some_and(|family| DPP_FAMILIES.contains(&family.name.as_str()))
-        && instruction.second_word.and_then(dpp_quad_permute).is_some()
+        && instruction.second_word.and_then(dpp_control).is_some()
 }
 
 /// An instruction's DPP16 modifier word, when it carries one.
@@ -8485,42 +8868,93 @@ pub(crate) fn dpp_word(encodings: &EncodingTable, instruction: &Instruction) -> 
         .flatten()
 }
 
-/// The lane of its quad each lane of a quad reads, from a DPP16 word whose control (16:8) is a
-/// quad permute - below 0x100, two bits per lane - with every row (31:28) and bank (27:24)
-/// enabled and no source negate or absolute value (23:20), as AMD's published RDNA instruction
-/// set lays the word out. Any other word - a row shift, rotate, mirror or share, or a masked
-/// row or bank - is `None`.
-fn dpp_quad_permute(word: u32) -> Option<[u32; 4]> {
-    let control = (word >> 8) & 0x1ff;
-    let modifiers = (word >> 20) & 0xf;
-    let banks = (word >> 24) & 0xf;
-    let rows = word >> 28;
-    (control < 0x100 && modifiers == 0 && banks == 0xf && rows == 0xf)
-        .then(|| [0, 1, 2, 3].map(|place| (control >> (2 * place)) & 3))
+/// The lane each lane of a row of sixteen reads under a DPP16 word's control (16:8), as AMD's
+/// published RDNA instruction set lays the word out.
+#[derive(Clone, Copy)]
+enum DppControl {
+    /// `quad_perm:[a,b,c,d]`, below 0x100: two bits per lane, the lane of its quad each reads.
+    QuadPermute([u32; 4]),
+    /// `row_shl:n`, 0x101-0x10f: the lane `n` above, none past the row's end.
+    ShiftLeft(u32),
+    /// `row_shr:n`, 0x111-0x11f: the lane `n` below, none before the row's start.
+    ShiftRight(u32),
+    /// `row_ror:n`, 0x121-0x12f: the lane `n` below, around the row.
+    RotateRight(u32),
+    /// `row_mirror`, 0x140: the row reversed.
+    Mirror,
+    /// `row_half_mirror`, 0x141: each half of the row reversed.
+    HalfMirror,
+    /// `row_share:n`, 0x150-0x15f: lane `n` of the row, for every lane.
+    Share(u32),
+    /// `row_xmask:n`, 0x160-0x16f: the lane whose place is this one's exclusive-or `n`.
+    Xmask(u32),
 }
 
-/// An instruction in its DPP16 form, `op_dpp d, v, .. quad_perm:[a,b,c,d]`: the instruction, with
-/// each lane's first source `v` taken from the lane of its quad the permute names (AMD's published
-/// RDNA instruction set, DPP16). A source lane the execution mask leaves out is not read unless
-/// `FETCH_INACTIVE` (18) is set; then under `BOUND_CTRL` (19) the source reads 0, and otherwise
-/// the lane is not written at all.
+impl DppControl {
+    /// The place in its row the lane at `place` reads, or `None` when that lies past the row.
+    fn source(self, place: u32) -> Option<u32> {
+        match self {
+            Self::QuadPermute(permute) => Some((place & !3) | permute[(place & 3) as usize]),
+            Self::ShiftLeft(by) => (place + by < 16).then_some(place + by),
+            Self::ShiftRight(by) => place.checked_sub(by),
+            Self::RotateRight(by) => Some((place + 16 - by) & 15),
+            Self::Mirror => Some(15 - place),
+            Self::HalfMirror => Some((place & 8) | (7 - (place & 7))),
+            Self::Share(lane) => Some(lane),
+            Self::Xmask(mask) => Some(place ^ mask),
+        }
+    }
+}
+
+/// The row control of a DPP16 word with no source negate or absolute value (23:20); `None` for a
+/// control the instruction set leaves reserved, or a word with a source modifier.
+fn dpp_control(word: u32) -> Option<DppControl> {
+    let control = (word >> 8) & 0x1ff;
+    let by = control & 0xf;
+    if (word >> 20) & 0xf != 0 {
+        return None;
+    }
+    Some(match control {
+        0..=0xff => DppControl::QuadPermute([0, 1, 2, 3].map(|place| (control >> (2 * place)) & 3)),
+        0x101..=0x10f => DppControl::ShiftLeft(by),
+        0x111..=0x11f => DppControl::ShiftRight(by),
+        0x121..=0x12f => DppControl::RotateRight(by),
+        0x140 => DppControl::Mirror,
+        0x141 => DppControl::HalfMirror,
+        0x150..=0x15f => DppControl::Share(by),
+        0x160..=0x16f => DppControl::Xmask(by),
+        _ => return None,
+    })
+}
+
+/// Whether a DPP16 word enables every row (31:28) and every bank (27:24) of the wave.
+fn dpp_masks_full(word: u32) -> bool {
+    word >> 24 == 0xff
+}
+
+/// An instruction in its DPP16 form, `op_dpp d, v, .. row_shr:1` and the like: the instruction,
+/// with each lane's first source `v` taken from the lane of its row the control names (AMD's
+/// published RDNA instruction set, DPP16). A source lane the execution mask leaves out is not read
+/// unless `FETCH_INACTIVE` (18) is set, and one past the row's edge is never read; for either,
+/// under `BOUND_CTRL` (19) the source reads 0, and otherwise the lane is not written at all. Nor is
+/// a lane whose row (31:28) or bank of four (27:24) the word leaves out.
 ///
 /// The permuted source is staged in [`DPP_STAGING_REGISTER`] and the instruction translated as
-/// though it named that register; a lane the rule leaves unwritten then gets its destination back.
+/// though it named that register; a lane the rules leave unwritten then gets its destination back.
 /// An instruction that writes a lane mask, such as a carry, is refused.
 fn dpp_form<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     (name, word): (&str, u32),
 ) -> Result<(), TranslateError> {
-    let (Some(Operand::Vector(destination)), Some(_), Some(permute)) = (
+    let (Some(Operand::Vector(destination)), Some(_), Some(control)) = (
         instruction.operands.first(),
         instruction.operands.get(1),
-        dpp_quad_permute(word),
+        dpp_control(word),
     ) else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a DPP form other than a quad permute of a source into a vector register is not translated",
+            detail: "a DPP form other than a row control of a source into a vector register is not translated",
         });
     };
     if touches_mask(instruction, name) {
@@ -8532,22 +8966,44 @@ fn dpp_form<M: Model + ?Sized>(
     let destination = u32::from(*destination);
     let (fetch_inactive, bound_zero) = ((word >> 18) & 1 == 1, (word >> 19) & 1 == 1);
     let zero = model.constant(0);
+    // Every lane is written when every row and bank is, and no lane's source can be refused it: a
+    // zero stands in for any source, or every source lies in the row and is read whether it runs.
+    let always_written = dpp_masks_full(word)
+        && (bound_zero || (fetch_inactive && (0..16).all(|place| control.source(place).is_some())));
 
-    // The permuted source, staged; and, where a lane whose source did not run is left unwritten,
-    // each destination lane as it was.
-    let fetched = permuted_first_source(model, instruction, word, permute)?;
+    // The permuted source, staged; and, where a lane may be left unwritten, each destination lane
+    // as it was.
+    let fetched = permuted_first_source(model, instruction, word, control)?;
+    let (inactive_read, zero_bound) = (
+        model.constant(u32::from(fetch_inactive)),
+        model.constant(u32::from(bound_zero)),
+    );
     let mut kept = Vec::new();
-    for (lane, value, running) in fetched {
-        let running = model.compare(op::INOT_EQUAL, running, zero);
-        let value = if !fetch_inactive && bound_zero {
-            model.select(running, value, zero)
+    for Fetched {
+        lane,
+        value,
+        running,
+        within,
+        enabled,
+    } in fetched
+    {
+        // Read: the source lies in the row, and runs or is fetched regardless.
+        let readable = model.binary(op::BITWISE_OR, running, inactive_read);
+        let readable = model.binary(op::BITWISE_AND, within, readable);
+        let readable_bool = model.compare(op::INOT_EQUAL, readable, zero);
+        let value = if bound_zero {
+            model.select(readable_bool, value, zero)
         } else {
             value
         };
         model.write_vector_lane(DPP_STAGING_REGISTER, lane, value);
-        if !fetch_inactive && !bound_zero {
+        if !always_written {
+            // Written: the lane's row and bank are enabled, and its source read or bound to zero.
+            let written = model.binary(op::BITWISE_OR, readable, zero_bound);
+            let written = model.binary(op::BITWISE_AND, enabled, written);
+            let written = model.compare(op::INOT_EQUAL, written, zero);
             let before = model.read_source(instruction, &instruction.operands[0], lane)?;
-            kept.push((lane, before, running));
+            kept.push((lane, before, written));
         }
     }
 
@@ -8560,40 +9016,102 @@ fn dpp_form<M: Model + ?Sized>(
     plain.second_word = None;
     self::instruction(model, &plain)?;
 
-    for (lane, before, running) in kept {
+    for (lane, before, written) in kept {
         let now = model.read_source(&plain, &plain.operands[0], lane)?;
-        let value = model.select(running, now, before);
+        let value = model.select(written, now, before);
         model.write_vector_lane(destination, lane, value);
     }
     Ok(())
 }
 
-/// Each running lane's DPP first source - the source register at the lane of its quad the permute
+/// One lane's DPP first source, read before anything is written: its value, and as 0 or 1 whether
+/// the source lane runs, whether it lies within the row, and whether the lane's own row and bank
+/// are enabled.
+struct Fetched {
+    lane: u32,
+    value: Id,
+    running: Id,
+    within: Id,
+    enabled: Id,
+}
+
+/// One invocation per lane (D760): the lane it reads under `control`, chosen among its row's
+/// sixteen places at run time, whether that lane is in the wave's upper half, and as 0 or 1
+/// whether it lies within the row and whether `word`'s row and bank masks enable this lane.
+fn lane_source_at_run_time<M: Model + ?Sized>(
+    model: &mut M,
+    control: DppControl,
+    index: Id,
+    word: u32,
+) -> (Id, Id, Id, Id) {
+    let fifteen = model.constant(15);
+    let place = model.binary(op::BITWISE_AND, index, fifteen);
+    let base = model.binary(op::ISUB, index, place);
+    let (mut from_place, mut within) = (model.constant(0), model.constant(0));
+    for at in 0..16 {
+        let here = model.constant(at);
+        let here = model.compare(op::IEQUAL, place, here);
+        let (read, inside) = control.source(at).map_or((at, 0), |read| (read, 1));
+        let (read, inside) = (model.constant(read), model.constant(inside));
+        from_place = model.select(here, read, from_place);
+        within = model.select(here, inside, within);
+    }
+    let from = model.add(base, from_place);
+    let thirty_two = model.constant(32);
+    let upper = model.compare(op::UGREATER_THAN_EQUAL, from, thirty_two);
+    // Enabled: the row's bit of the row mask and the bank's of the bank mask.
+    let (four, two, three, one) = (
+        model.constant(4),
+        model.constant(2),
+        model.constant(3),
+        model.constant(1),
+    );
+    let row = model.binary(op::SHIFT_RIGHT_LOGICAL, index, four);
+    let row = model.binary(op::BITWISE_AND, row, three);
+    let bank = model.binary(op::SHIFT_RIGHT_LOGICAL, index, two);
+    let bank = model.binary(op::BITWISE_AND, bank, three);
+    let (rows, banks) = (
+        model.constant(word >> 28),
+        model.constant((word >> 24) & 0xf),
+    );
+    let row = model.binary(op::SHIFT_RIGHT_LOGICAL, rows, row);
+    let bank = model.binary(op::SHIFT_RIGHT_LOGICAL, banks, bank);
+    let enabled = model.binary(op::BITWISE_AND, row, bank);
+    let enabled = model.binary(op::BITWISE_AND, enabled, one);
+    (from, upper, within, enabled)
+}
+
+/// Each running lane's DPP first source - the source register at the lane of its row the control
 /// names - with that source lane's execution bit, before anything is written.
 ///
 /// In a fragment module one invocation is one pixel (D716), and the lanes of its quad are the
 /// host's own 2x2 quad, which the guest numbers as Vulkan does: top-left, top-right, bottom-left,
-/// bottom-right. There the neighbour's register and execution bit are read by quad broadcast.
-/// Elsewhere every lane is the module's, read by index.
+/// bottom-right. There the neighbour's register and execution bit are read by quad broadcast, so
+/// only a quad permute over every row and bank is translated. Elsewhere every lane is the
+/// module's, read by index.
 fn permuted_first_source<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     word: u32,
-    permute: [u32; 4],
-) -> Result<Vec<(u32, Id, Id)>, TranslateError> {
+    control: DppControl,
+) -> Result<Vec<Fetched>, TranslateError> {
     let source_register = word & 0xff;
     let source = Operand::Vector(source_register as u16);
     let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
     let (one, thirty_one) = (model.constant(1), model.constant(31));
+    let (rows, banks) = (word >> 28, (word >> 24) & 0xf);
     let unavailable = || TranslateError::Unsupported {
         offset: instruction.offset,
-        detail: "a quad permute needs every lane of the quad",
+        detail: "a DPP form here needs lanes beyond the pixel's quad",
     };
 
     // Every lane's value and its source's execution bit first: each reads the source before any
     // lane writes the destination.
     let mut fetched = Vec::new();
     if let Some(place) = model.quad_position() {
+        let (DppControl::QuadPermute(permute), true) = (control, dpp_masks_full(word)) else {
+            return Err(unavailable());
+        };
         let own = model.read_source(instruction, &source, 0)?;
         let own_running = model.binary(op::BITWISE_AND, running_low, one);
         let mut chosen = None;
@@ -8617,26 +9135,35 @@ fn permuted_first_source<M: Model + ?Sized>(
             });
         }
         let (value, running) = chosen.ok_or_else(unavailable)?;
-        fetched.push((0, value, running));
+        fetched.push(Fetched {
+            lane: 0,
+            value,
+            running,
+            within: one,
+            enabled: one,
+        });
     } else {
         for lane in running_lanes(model) {
-            let (from, half) = if let Some(index) = model.lane_index() {
-                // One invocation per lane (D760): its place in its quad, at run time.
-                let (three, two) = (model.constant(3), model.constant(2));
-                let place = model.binary(op::BITWISE_AND, index, three);
-                let shift = model.binary(op::IMUL, place, two);
-                let control = model.constant((word >> 8) & 0xff);
-                let select = model.binary(op::SHIFT_RIGHT_LOGICAL, control, shift);
-                let select = model.binary(op::BITWISE_AND, select, three);
-                let base = model.binary(op::ISUB, index, place);
-                let from = model.add(base, select);
-                let thirty_two = model.constant(32);
-                let upper = model.compare(op::UGREATER_THAN_EQUAL, from, thirty_two);
-                (from, model.select(upper, running_high, running_low))
+            let (from, half, within, enabled) = if let Some(index) = model.lane_index() {
+                let (from, upper, within, enabled) =
+                    lane_source_at_run_time(model, control, index, word);
+                (
+                    from,
+                    model.select(upper, running_high, running_low),
+                    within,
+                    enabled,
+                )
             } else {
-                let from = (lane & !3) | permute[(lane & 3) as usize];
-                let half = if lane < 32 { running_low } else { running_high };
-                (model.constant(from), half)
+                let read = control.source(lane & 15);
+                let from = (lane & !15) | read.unwrap_or(lane & 15);
+                let half = if from < 32 { running_low } else { running_high };
+                let enabled = (rows >> ((lane >> 4) & 3)) & (banks >> ((lane >> 2) & 3)) & 1;
+                (
+                    model.constant(from),
+                    half,
+                    model.constant(u32::from(read.is_some())),
+                    model.constant(enabled),
+                )
             };
             let value = model
                 .read_vector_at(source_register, from)
@@ -8644,7 +9171,13 @@ fn permuted_first_source<M: Model + ?Sized>(
             let bit = model.binary(op::BITWISE_AND, from, thirty_one);
             let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, half, bit);
             let running = model.binary(op::BITWISE_AND, shifted, one);
-            fetched.push((lane, value, running));
+            fetched.push(Fetched {
+                lane,
+                value,
+                running,
+                within,
+                enabled,
+            });
         }
     }
     Ok(fetched)
@@ -9661,15 +10194,23 @@ fn scalar_pack<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `s_bfm_b64`: `((1 << S0[5:0]) - 1) << S1[5:0]` across a register pair (AMD's published RDNA
-/// instruction set, `S_BFM_B64`). No condition code.
+/// `s_bfm_b64`: `((1 << S0[5:0]) - 1) << S1[5:0]` across a register pair or a lane mask (AMD's
+/// published RDNA instruction set, `S_BFM_B64`): `s_bfm_b64 exec, 32, 32` runs the upper half of
+/// the wave, as Grand Theft Auto V's compute program at `0x400003e16400` does. No condition code.
 fn scalar_bit_mask_64<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let (destination, width, offset) = three_operands(instruction)?;
-    let register = scalar_destination(instruction, destination)?;
-    if register + 2 > SCALAR_REGISTERS {
+    let mask = match destination {
+        Operand::Named(name) => lane_mask_name(name),
+        _ => None,
+    };
+    let register = match mask {
+        Some(_) => 0,
+        None => scalar_destination(instruction, destination)?,
+    };
+    if mask.is_none() && register + 2 > SCALAR_REGISTERS {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "s_bfm_b64 runs past the end of the register file",
@@ -9683,8 +10224,12 @@ fn scalar_bit_mask_64<M: Model + ?Sized>(
     // Bit `i` of the pair is set when `offset <= i < offset + width`, computed per half so no shift
     // reaches thirty-two.
     let (low, high) = ones_between(model, offset, width);
-    model.write_scalar(register, low);
-    model.write_scalar(register + 1, high);
+    if let Some(mask) = mask {
+        model.write_lane_mask(mask, low, high)?;
+    } else {
+        model.write_scalar(register, low);
+        model.write_scalar(register + 1, high);
+    }
     model.count();
     Ok(())
 }
@@ -9802,6 +10347,113 @@ fn multiply_add_constant<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The bit-field instructions of the long form, from their three sources:
+///
+/// - `V_BFE_U32`: the field `c` bits wide at bit `b` of `a`.
+/// - `V_BFE_I32`: the same, sign-extended; none wide is zero.
+/// - `V_ALIGNBYTE_B32`: `{a, b}` as one 64-bit value, `a` high, shifted right by `c[1:0]` bytes,
+///   its low 32 bits.
+///
+/// As AMD's published RDNA instruction set gives them.
+fn bit_field<M: Model + ?Sized>(model: &mut M, name: &str, [a, b, c]: [Id; 3]) -> Id {
+    match name {
+        "v_alignbyte_b32" => {
+            let three = model.constant(3);
+            let bytes = model.binary(op::BITWISE_AND, c, three);
+            let eight = model.constant(8);
+            let bits = model.binary(op::IMUL, bytes, eight);
+            let low = model.binary(op::SHIFT_RIGHT_LOGICAL, b, bits);
+            let thirty_two = model.constant(32);
+            let rest = model.binary(op::ISUB, thirty_two, bits);
+            let high = model.binary(op::SHIFT_LEFT_LOGICAL, a, rest);
+            let joined = model.binary(op::BITWISE_OR, low, high);
+            let zero = model.constant(0);
+            let whole = model.compare(op::IEQUAL, bits, zero);
+            model.select(whole, b, joined)
+        }
+        "v_bfe_i32" => {
+            let five = model.constant(31);
+            let offset = model.binary(op::BITWISE_AND, b, five);
+            let width = model.binary(op::BITWISE_AND, c, five);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, a, offset);
+            let thirty_two = model.constant(32);
+            let up = model.binary(op::ISUB, thirty_two, width);
+            let raised = model.binary(op::SHIFT_LEFT_LOGICAL, shifted, up);
+            let field = model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, up);
+            let zero = model.constant(0);
+            let none = model.compare(op::IEQUAL, width, zero);
+            model.select(none, zero, field)
+        }
+        _ => {
+            let five = model.constant(31);
+            let offset = model.binary(op::BITWISE_AND, b, five);
+            let width = model.binary(op::BITWISE_AND, c, five);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, a, offset);
+            let one = model.constant(1);
+            let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
+            let mask = model.binary(op::ISUB, bit, one);
+            model.binary(op::BITWISE_AND, shifted, mask)
+        }
+    }
+}
+
+/// The names [`integer_long_form`] translates.
+const LONG_FORMS: [&str; 15] = [
+    "v_mad_u32_u16",
+    "v_mad_i32_i24",
+    "v_mad_u32_u24",
+    "v_and_or_b32",
+    "v_or3_b32",
+    "v_mul_lo_u32",
+    "v_mul_hi_u32",
+    "v_mul_hi_i32",
+    "v_bfm_b32",
+    "v_bcnt_u32_b32",
+    "v_ldexp_f32",
+    "v_msad_u8",
+    "v_bfe_u32",
+    "v_bfe_i32",
+    "v_alignbyte_b32",
+];
+
+/// The two-source forms Grand Theft Auto V's compute programs add, as AMD's published RDNA
+/// instruction set gives them: `v_mul_hi_i32`, the signed product's high 32 bits; `v_bfm_b32`,
+/// `((1 << a[4:0]) - 1) << b[4:0]`; `v_bcnt_u32_b32`, `a`'s set bits plus `b`; and `v_ldexp_f32`,
+/// `a * 2^b` for an integer `b`.
+fn two_source_long_form<M: Model + ?Sized>(model: &mut M, name: &str, a: Id, b: Id) -> Id {
+    match name {
+        // The unsigned high product, less each source where the other is negative.
+        "v_mul_hi_i32" => {
+            let high = multiply_high(model, a, b);
+            let thirty_one = model.constant(31);
+            let a_negative = model.binary(op::SHIFT_RIGHT_ARITHMETIC, a, thirty_one);
+            let b_negative = model.binary(op::SHIFT_RIGHT_ARITHMETIC, b, thirty_one);
+            let less_b = model.binary(op::BITWISE_AND, a_negative, b);
+            let less_a = model.binary(op::BITWISE_AND, b_negative, a);
+            let high = model.binary(op::ISUB, high, less_b);
+            model.binary(op::ISUB, high, less_a)
+        }
+        "v_bfm_b32" => {
+            let five = model.constant(31);
+            let width = model.binary(op::BITWISE_AND, a, five);
+            let offset = model.binary(op::BITWISE_AND, b, five);
+            let one = model.constant(1);
+            let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
+            let ones = model.binary(op::ISUB, bit, one);
+            model.binary(op::SHIFT_LEFT_LOGICAL, ones, offset)
+        }
+        "v_bcnt_u32_b32" => {
+            let count = model.bit_count(a);
+            model.add(count, b)
+        }
+        _ => {
+            let exponent = model.signed_to_float_bits(b);
+            let scale = model.f32_ext_unary(GLSL_EXP2, exponent);
+            model.f32_binary(op::FMUL, a, scale)
+        }
+    }
+}
+
 /// The long-form integer arithmetic of a culling primitive shader (AMD's published RDNA instruction
 /// set), per lane, wrapping:
 ///
@@ -9822,7 +10474,15 @@ fn integer_long_form<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    let sources = if matches!(name, "v_mul_lo_u32" | "v_mul_hi_u32") {
+    let sources = if matches!(
+        name,
+        "v_mul_lo_u32"
+            | "v_mul_hi_u32"
+            | "v_mul_hi_i32"
+            | "v_bfm_b32"
+            | "v_bcnt_u32_b32"
+            | "v_ldexp_f32"
+    ) {
         2
     } else {
         3
@@ -9892,6 +10552,9 @@ fn integer_long_form<M: Model + ?Sized>(
                 model.add(product, c)
             }
             "v_mul_lo_u32" => model.binary(op::IMUL, a, b),
+            "v_mul_hi_i32" | "v_bfm_b32" | "v_bcnt_u32_b32" | "v_ldexp_f32" => {
+                two_source_long_form(model, name, a, b)
+            }
             "v_mul_hi_u32" => multiply_high(model, a, b),
             "v_and_or_b32" => {
                 let both = model.binary(op::BITWISE_AND, a, b);
@@ -9901,16 +10564,7 @@ fn integer_long_form<M: Model + ?Sized>(
                 let either = model.binary(op::BITWISE_OR, a, b);
                 model.binary(op::BITWISE_OR, either, c)
             }
-            "v_bfe_u32" => {
-                let five = model.constant(31);
-                let offset = model.binary(op::BITWISE_AND, b, five);
-                let width = model.binary(op::BITWISE_AND, c, five);
-                let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, a, offset);
-                let one = model.constant(1);
-                let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
-                let mask = model.binary(op::ISUB, bit, one);
-                model.binary(op::BITWISE_AND, shifted, mask)
-            }
+            "v_bfe_u32" | "v_bfe_i32" | "v_alignbyte_b32" => bit_field(model, name, [a, b, c]),
             // The hardware's second source is the reference whose zero bytes are skipped: ACO
             // hands NIR's `msad_4x8` reference over as `b` (`swap_srcs`,
             // aco_select_nir_alu.cpp:3303), and radeonsi's culling sums packed counts as
@@ -10108,16 +10762,111 @@ fn cube_face<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The names [`half_float_arithmetic`] translates.
+const HALF_FLOATS: [&str; 7] = [
+    "v_add_f16_e32",
+    "v_sub_f16_e32",
+    "v_subrev_f16_e32",
+    "v_mul_f16_e32",
+    "v_max_f16_e32",
+    "v_min_f16_e32",
+    "v_fmac_f16_e32",
+];
+
+/// The sixteen-bit float arithmetic of the short form: `v_add_f16`, `v_sub_f16`, `v_subrev_f16`,
+/// `v_mul_f16`, `v_max_f16`, `v_min_f16`, and `v_fmac_f16`, which adds the product to the
+/// destination's half. Each reads its sources' low halves, computes in single precision - a
+/// product of two halves is exact there - and rounds the result back to a half into the
+/// destination's low sixteen bits, the high sixteen kept: on GFX10 these are partial register
+/// writes (Mesa `aco_ir.cpp:683-742`, `instr_is_16bit`, and `:956`, which preserves the rest).
+fn half_float_arithmetic<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (destination, first, second) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit float instruction without a vector destination",
+        });
+    };
+    let register = u32::from(*register);
+    let low = model.constant(0xffff);
+    let high = model.constant(0xffff_0000);
+    for lane in running_lanes(model) {
+        let a = model.read_source(instruction, first, lane)?;
+        let b = model.read_source(instruction, second, lane)?;
+        let held = Operand::Vector(u16::try_from(register).unwrap_or(u16::MAX));
+        let old = model.read_source(instruction, &held, lane)?;
+        let widen = |model: &mut M, value: Id| {
+            let half = model.binary(op::BITWISE_AND, value, low);
+            model.half_to_float_bits(half)
+        };
+        let (x, y) = (widen(model, a), widen(model, b));
+        let result = match name {
+            "v_add_f16_e32" => model.f32_binary(op::FADD, x, y),
+            "v_sub_f16_e32" => model.f32_binary(op::FSUB, x, y),
+            "v_subrev_f16_e32" => model.f32_binary(op::FSUB, y, x),
+            "v_mul_f16_e32" => model.f32_binary(op::FMUL, x, y),
+            "v_max_f16_e32" => model.f32_ext_binary(GLSL_FMAX, x, y),
+            "v_min_f16_e32" => model.f32_ext_binary(GLSL_FMIN, x, y),
+            _ => {
+                let product = model.f32_binary(op::FMUL, x, y);
+                let accumulated = widen(model, old);
+                model.f32_binary(op::FADD, product, accumulated)
+            }
+        };
+        let half = model.float_bits_to_half(result);
+        let kept = model.binary(op::BITWISE_AND, old, high);
+        let written = model.binary(op::BITWISE_OR, kept, half);
+        model.write_vector_lane(register, lane, written);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_writelane_b32 v, s, lane`: `s` into `v` at the lane the second source names, its low six bits
+/// in a wave of sixty-four and five in one of thirty-two, every other lane kept (AMD's published RDNA
+/// instruction set). The hardware writes that lane whether it runs or not; here the write goes
+/// through the execution mask as every lane write does, so one aimed at a lane that does not run is
+/// not made (assumed: a program writes the lanes it then reads, which run).
+fn write_lane<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), value, lane] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_writelane_b32 does not name a vector register, a value and a lane",
+        });
+    };
+    let destination = u32::from(*destination);
+    let value = model.read_source(instruction, value, 0)?;
+    let chosen = model.read_source(instruction, lane, 0)?;
+    let low_bits = model.constant(model.lanes() - 1);
+    let chosen = model.binary(op::BITWISE_AND, chosen, low_bits);
+    for lane in running_lanes(model) {
+        let held = Operand::Vector(u16::try_from(destination).unwrap_or(u16::MAX));
+        let old = model.read_source(instruction, &held, lane)?;
+        let this = model.constant(lane);
+        let here = model.compare(op::IEQUAL, chosen, this);
+        let written = model.select(here, value, old);
+        model.write_vector_lane(destination, lane, written);
+    }
+    model.count();
+    Ok(())
+}
+
 /// `v_readlane_b32 s, v, lane`: the scalar takes `v` at the lane the second source names, its low
 /// six bits in a wave of sixty-four and five in one of thirty-two (AMD's published RDNA instruction
-/// set), whether that lane runs or not.
+/// set), whether that lane runs or not. The scalar may be a lane mask's half, as Grand Theft Auto
+/// V's `v_readlane_b32 vcc_lo, v17, 63` reads the last lane's sum.
 fn read_lane<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
-    let [Operand::Scalar(destination), Operand::Vector(source), lane] =
-        instruction.operands.as_slice()
-    else {
+    let [destination, Operand::Vector(source), lane] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "v_readlane_b32 does not name a scalar, a vector register and a lane",
@@ -10133,7 +10882,7 @@ fn read_lane<M: Model + ?Sized>(
                 offset: instruction.offset,
                 detail: "a lane read at a lane known only when the program runs needs every lane",
             })?;
-    model.write_scalar(u32::from(*destination), value);
+    write_scalar_operand(model, instruction, destination, value)?;
     model.count();
     Ok(())
 }
@@ -10504,9 +11253,11 @@ fn float_to_unsigned_saturated<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id
     let too_high = model.compare(op::FORD_GREATER_THAN_EQUAL, float, top);
     // Below zero, or a NaN: neither is ordered at or above zero.
     let in_range_low = model.compare(op::FORD_GREATER_THAN_EQUAL, float, zero);
-    // Clamped into range so the conversion is always defined.
-    let safe = model.select(in_range_low, float, zero);
-    let safe = model.select(too_high, zero, safe);
+    // Clamped into range so the conversion is always defined: chosen as bits, since a select is a
+    // word's, and only then read as a float.
+    let safe = model.select(in_range_low, bits, zero_bits);
+    let safe = model.select(too_high, zero_bits, safe);
+    let safe = model.as_float(safe);
     let u32_type = model.u32_type();
     let b = model.builder();
     let converted = b.id();
@@ -10533,12 +11284,14 @@ fn float_to_signed_saturated<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
         b.function(op::IS_NAN, &[bool_type.0, nan.0, float.0]);
         nan
     };
-    // In range, or clamped into range so the conversion is always defined.
-    let clamped_high = model.select(too_high, bottom, float);
-    let safe = model.select(too_low, bottom, clamped_high);
+    // In range, or clamped into range so the conversion is always defined: chosen as bits, since a
+    // select is a word's, and only then read as a float.
+    let bottom_bits = model.constant(0xcf00_0000);
+    let clamped_high = model.select(too_high, bottom_bits, bits);
+    let safe = model.select(too_low, bottom_bits, clamped_high);
     let zero_bits = model.constant(0);
-    let zero = model.as_float(zero_bits);
-    let safe = model.select(nan, zero, safe);
+    let safe = model.select(nan, zero_bits, safe);
+    let safe = model.as_float(safe);
     let u32_type = model.u32_type();
     let b = model.builder();
     let converted = b.id();
@@ -11291,9 +12044,10 @@ fn image_sample<M: Model + ?Sized>(
     let texture = model
         .sampled_image(descriptor, sampler, (instruction.offset, shape))
         .map_err(refuse)?;
-    if (cube || shape.volume()) && texture.saturate != [false; 2] {
+    if (cube || shape.volume()) && (texture.saturate != [false; 2] || texture.mirror != [false; 2])
+    {
         return Err(refuse(
-            "a cube or volume through a half-border clamp is not translated",
+            "a cube or volume through a half-border clamp or a mirror-once mode is not translated",
         ));
     }
 
@@ -11597,6 +12351,11 @@ fn compare_sample<M: Model + ?Sized>(
         });
     };
     let reference = address_element(model, instruction, (addresses, a16), 0, lane)?;
+    if let Some(compare) = texture.shader_compare {
+        let result = shader_compare(model, reference, (texture, coordinate, implicit), compare);
+        model.write_vector_lane(u32::from(*destination), lane, result);
+        return Ok(());
+    }
     let reference = model.as_float(reference);
     let zero = model.constant(0);
     let level = model.as_float(zero);
@@ -11629,6 +12388,144 @@ fn compare_sample<M: Model + ?Sized>(
     builder.function(op::BITCAST, &[u32_type.0, bits.0, compared.0]);
     model.write_vector_lane(u32::from(*destination), lane, bits);
     Ok(())
+}
+
+/// A compare the shader makes itself, of an image that is not a depth target, which no host
+/// compare sampler reads: the image's first channel compared with the reference by the sampler's
+/// `SQ_TEX_DEPTH_COMPARE` function - 1.0 where the reference passes, 0.0 where it does not - as a
+/// compare sampler compares a depth (`reference OP texel`, Vulkan's `Dref` order). A bilinear
+/// filter compares the four texels it would blend, gathered, and blends the answers with the
+/// filter's weights, as a filtered compare does; a point filter compares the one texel. Answers
+/// the result's bits.
+fn shader_compare<M: Model + ?Sized>(
+    model: &mut M,
+    reference: Id,
+    (texture, coordinate, implicit): (&Texture, Id, bool),
+    (function, linear): (u8, bool),
+) -> Id {
+    let (f32_type, u32_type) = (model.f32_type(), model.u32_type());
+    let (one, nothing) = (model.constant(1.0f32.to_bits()), model.constant(0));
+    let reference_f = model.as_float(reference);
+    let passes = |model: &mut M, texel_bits: Id| -> Id {
+        let opcode = match function {
+            1 => op::FORD_LESS_THAN,
+            2 => op::FORD_EQUAL,
+            3 => op::FORD_LESS_THAN_EQUAL,
+            4 => op::FORD_GREATER_THAN,
+            5 => op::FUNORD_NOT_EQUAL,
+            6 => op::FORD_GREATER_THAN_EQUAL,
+            // Never (0) and always (7) answer alike whatever the texel holds.
+            0 => return nothing,
+            _ => return one,
+        };
+        let texel = model.as_float(texel_bits);
+        let passed = model.compare(opcode, reference_f, texel);
+        model.select(passed, one, nothing)
+    };
+    let zero_level = model.constant(0);
+    let builder = model.builder();
+    let bound = builder.id();
+    builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+    // The texels, as bits, and how to blend their answers.
+    let channel = |model: &mut M, vector: Id, at: u32| -> Id {
+        let b = model.builder();
+        let float = b.id();
+        b.function(op::COMPOSITE_EXTRACT, &[f32_type.0, float.0, vector.0, at]);
+        let bits = b.id();
+        b.function(op::BITCAST, &[u32_type.0, bits.0, float.0]);
+        bits
+    };
+    if !linear {
+        let b = model.builder();
+        let sampled = b.id();
+        if implicit {
+            b.function(
+                op::IMAGE_SAMPLE_IMPLICIT_LOD,
+                &[texture.result.0, sampled.0, bound.0, coordinate.0],
+            );
+        } else {
+            let level = b.id();
+            b.function(op::BITCAST, &[f32_type.0, level.0, zero_level.0]);
+            b.function(
+                op::IMAGE_SAMPLE_EXPLICIT_LOD,
+                &[
+                    texture.result.0,
+                    sampled.0,
+                    bound.0,
+                    coordinate.0,
+                    image_operands::LOD,
+                    level.0,
+                ],
+            );
+        }
+        let texel = channel(model, sampled, 0);
+        return passes(model, texel);
+    }
+    // Four texels gathered from the first channel: (i0, j1), (i1, j1), (i1, j0), (i0, j0), in the
+    // order `OpImageGather` answers them.
+    let b = model.builder();
+    b.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
+    let gathered = b.id();
+    b.function(
+        op::IMAGE_GATHER,
+        &[
+            texture.result.0,
+            gathered.0,
+            bound.0,
+            coordinate.0,
+            zero_level.0,
+        ],
+    );
+    let image = b.id();
+    b.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let size = b.id();
+    b.function(
+        op::IMAGE_QUERY_SIZE_LOD,
+        &[texture.texel.0, size.0, image.0, zero_level.0],
+    );
+    let answers: Vec<Id> = (0..4)
+        .map(|at| {
+            let texel = channel(model, gathered, at);
+            passes(model, texel)
+        })
+        .collect();
+    let across = [0, 1].map(|axis| channel(model, coordinate, axis));
+    bilinear_blend(
+        model,
+        [answers[0], answers[1], answers[2], answers[3]],
+        (across, size),
+    )
+}
+
+/// Four answers gathered at `(i0, j1)`, `(i1, j1)`, `(i1, j0)`, `(i0, j0)` blended as a bilinear
+/// filter weighs them at `coordinate` (its two channels, as bits) over an image `size` texels
+/// across and down: by the fraction of the way past the texel centre below the coordinate.
+fn bilinear_blend<M: Model + ?Sized>(
+    model: &mut M,
+    answers: [Id; 4],
+    (coordinate, size): ([Id; 2], Id),
+) -> Id {
+    let u32_type = model.u32_type();
+    let half = model.constant(0.5f32.to_bits());
+    let mut fractions = [half; 2];
+    for (axis, fraction) in (0..2_u32).zip(&mut fractions) {
+        let b = model.builder();
+        let extent = b.id();
+        b.function(op::COMPOSITE_EXTRACT, &[u32_type.0, extent.0, size.0, axis]);
+        let extent = model.unsigned_to_float_bits(extent);
+        let scaled = model.f32_binary(op::FMUL, coordinate[axis as usize], extent);
+        let centred = model.f32_binary(op::FSUB, scaled, half);
+        let below = model.f32_ext_unary(GLSL_FLOOR, centred);
+        *fraction = model.f32_binary(op::FSUB, centred, below);
+    }
+    let blend = |model: &mut M, from: Id, to: Id, by: Id| -> Id {
+        let span = model.f32_binary(op::FSUB, to, from);
+        let part = model.f32_binary(op::FMUL, span, by);
+        model.f32_binary(op::FADD, from, part)
+    };
+    let below = blend(model, answers[3], answers[2], fractions[0]);
+    let above = blend(model, answers[0], answers[1], fractions[0]);
+    blend(model, below, above, fractions[1])
 }
 
 /// The coordinate a texture access reads at, built for one lane from its address registers. A
@@ -11664,18 +12561,26 @@ fn sample_coordinate<M: Model + ?Sized>(
     } else if fetches {
         vec![across, down]
     } else {
-        // A half-border clamp samples the coordinate saturated, a NaN to zero as Mesa's `fsat`
-        // (D743).
-        [(across, texture.saturate[0]), (down, texture.saturate[1])]
-            .map(|(at, saturated)| {
-                let at = if saturated {
-                    clamp_unit(model, at, true)
-                } else {
-                    at
-                };
-                model.as_float(at)
-            })
-            .to_vec()
+        // A mirror-once mode samples the coordinate's absolute value, its reflection about zero; a
+        // half-border clamp then samples it saturated, a NaN to zero as Mesa's `fsat` (D743).
+        [
+            (across, texture.saturate[0], texture.mirror[0]),
+            (down, texture.saturate[1], texture.mirror[1]),
+        ]
+        .map(|(at, saturated, mirrored)| {
+            let at = if mirrored {
+                model.f32_ext_unary(GLSL_FABS, at)
+            } else {
+                at
+            };
+            let at = if saturated {
+                clamp_unit(model, at, true)
+            } else {
+                at
+            };
+            model.as_float(at)
+        })
+        .to_vec()
     };
     let kind = if fetches {
         texture.texel

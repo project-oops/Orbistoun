@@ -444,6 +444,11 @@ name = "s_min_i32"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 8
+name = "s_max_i32"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 10
 name = "s_cselect_b32"
 
@@ -869,6 +874,11 @@ name = "v_bfrev_b32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 57
+name = "v_ffbh_u32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 67
 name = "v_movrels_b32_e32"
 
@@ -1139,6 +1149,16 @@ name = "v_bfe_u32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 329
+name = "v_bfe_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 335
+name = "v_alignbyte_b32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 330
 name = "v_bfi_b32"
 
@@ -1354,6 +1374,11 @@ name = "v_cmp_lg_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 8
+name = "v_cmp_u_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 6
 name = "v_cmp_ge_f32_e32"
 
@@ -1566,3 +1591,5035 @@ name = "v_cmpx_ne_u32_e32"
 family = "VOPC"
 opcode = 214
 name = "v_cmpx_ge_u32_e32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 29
+name = "s_bitset1_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 40
+name = "s_orn2_saveexec_b64"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 19
+name = "s_cmp_lg_u64"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 66
+name = "v_movreld_b32_e32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 888
+name = "v_permlanex16_b32"
+
+# Named by sweeping the reference disassembler (D947): every opcode of every family in
+# `encodings.toml`, built as words whose sources name plain registers or inline constants,
+# disassembled by LLVM 21 in `silkeh/clang:21` (`tools/shader-fixtures/sweep.py`). A name only, with
+# no operand fields: the operand layout of one a translation needs is solved from samples as every
+# other's is. FLAT is left out: its name depends on the segment field as well as the opcode, so one
+# swept word names a single segment's instruction for all three.
+
+[[mnemonic]]
+family = "DS"
+opcode = 0
+name = "ds_add_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 1
+name = "ds_sub_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 2
+name = "ds_rsub_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 3
+name = "ds_inc_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 4
+name = "ds_dec_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 5
+name = "ds_min_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 6
+name = "ds_max_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 9
+name = "ds_and_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 11
+name = "ds_xor_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 12
+name = "ds_mskor_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 15
+name = "ds_write2st64_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 16
+name = "ds_cmpst_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 17
+name = "ds_cmpst_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 20
+name = "ds_nop"
+
+[[mnemonic]]
+family = "DS"
+opcode = 21
+name = "ds_add_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 31
+name = "ds_write_b16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 33
+name = "ds_sub_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 34
+name = "ds_rsub_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 35
+name = "ds_inc_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 36
+name = "ds_dec_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 37
+name = "ds_min_rtn_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 38
+name = "ds_max_rtn_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 39
+name = "ds_min_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 40
+name = "ds_max_rtn_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 41
+name = "ds_and_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 42
+name = "ds_or_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 43
+name = "ds_xor_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 44
+name = "ds_mskor_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 45
+name = "ds_wrxchg_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 46
+name = "ds_wrxchg2_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 47
+name = "ds_wrxchg2st64_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 48
+name = "ds_cmpst_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 49
+name = "ds_cmpst_rtn_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 50
+name = "ds_min_rtn_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 51
+name = "ds_max_rtn_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 52
+name = "ds_wrap_rtn_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 53
+name = "ds_swizzle_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 54
+name = "ds_read_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 56
+name = "ds_read2st64_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 57
+name = "ds_read_i8"
+
+[[mnemonic]]
+family = "DS"
+opcode = 59
+name = "ds_read_i16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 60
+name = "ds_read_u16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 61
+name = "ds_consume"
+
+[[mnemonic]]
+family = "DS"
+opcode = 62
+name = "ds_append"
+
+[[mnemonic]]
+family = "DS"
+opcode = 64
+name = "ds_add_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 65
+name = "ds_sub_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 66
+name = "ds_rsub_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 67
+name = "ds_inc_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 68
+name = "ds_dec_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 69
+name = "ds_min_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 70
+name = "ds_max_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 71
+name = "ds_min_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 72
+name = "ds_max_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 73
+name = "ds_and_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 74
+name = "ds_or_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 75
+name = "ds_xor_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 76
+name = "ds_mskor_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 78
+name = "ds_write2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 79
+name = "ds_write2st64_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 80
+name = "ds_cmpst_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 81
+name = "ds_cmpst_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 82
+name = "ds_min_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 83
+name = "ds_max_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 85
+name = "ds_add_rtn_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 96
+name = "ds_add_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 97
+name = "ds_sub_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 98
+name = "ds_rsub_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 99
+name = "ds_inc_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 100
+name = "ds_dec_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 101
+name = "ds_min_rtn_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 102
+name = "ds_max_rtn_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 103
+name = "ds_min_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 104
+name = "ds_max_rtn_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 105
+name = "ds_and_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 106
+name = "ds_or_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 107
+name = "ds_xor_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 108
+name = "ds_mskor_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 109
+name = "ds_wrxchg_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 110
+name = "ds_wrxchg2_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 111
+name = "ds_wrxchg2st64_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 112
+name = "ds_cmpst_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 113
+name = "ds_cmpst_rtn_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 114
+name = "ds_min_rtn_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 115
+name = "ds_max_rtn_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 119
+name = "ds_read2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 120
+name = "ds_read2st64_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 126
+name = "ds_condxchg32_rtn_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 128
+name = "ds_add_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 129
+name = "ds_sub_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 130
+name = "ds_rsub_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 131
+name = "ds_inc_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 132
+name = "ds_dec_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 133
+name = "ds_min_src2_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 134
+name = "ds_max_src2_i32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 135
+name = "ds_min_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 136
+name = "ds_max_src2_u32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 137
+name = "ds_and_src2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 138
+name = "ds_or_src2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 139
+name = "ds_xor_src2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 141
+name = "ds_write_src2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 146
+name = "ds_min_src2_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 147
+name = "ds_max_src2_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 149
+name = "ds_add_src2_f32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 160
+name = "ds_write_b8_d16_hi"
+
+[[mnemonic]]
+family = "DS"
+opcode = 161
+name = "ds_write_b16_d16_hi"
+
+[[mnemonic]]
+family = "DS"
+opcode = 162
+name = "ds_read_u8_d16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 163
+name = "ds_read_u8_d16_hi"
+
+[[mnemonic]]
+family = "DS"
+opcode = 164
+name = "ds_read_i8_d16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 165
+name = "ds_read_i8_d16_hi"
+
+[[mnemonic]]
+family = "DS"
+opcode = 166
+name = "ds_read_u16_d16"
+
+[[mnemonic]]
+family = "DS"
+opcode = 167
+name = "ds_read_u16_d16_hi"
+
+[[mnemonic]]
+family = "DS"
+opcode = 176
+name = "ds_write_addtid_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 177
+name = "ds_read_addtid_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 178
+name = "ds_permute_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 179
+name = "ds_bpermute_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 192
+name = "ds_add_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 193
+name = "ds_sub_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 194
+name = "ds_rsub_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 195
+name = "ds_inc_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 196
+name = "ds_dec_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 197
+name = "ds_min_src2_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 198
+name = "ds_max_src2_i64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 199
+name = "ds_min_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 200
+name = "ds_max_src2_u64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 201
+name = "ds_and_src2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 202
+name = "ds_or_src2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 203
+name = "ds_xor_src2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 205
+name = "ds_write_src2_b64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 210
+name = "ds_min_src2_f64"
+
+[[mnemonic]]
+family = "DS"
+opcode = 211
+name = "ds_max_src2_f64"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 2
+name = "image_load_pck"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 3
+name = "image_load_pck_sgn"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 4
+name = "image_load_mip_pck"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 5
+name = "image_load_mip_pck_sgn"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 9
+name = "image_store_mip"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 10
+name = "image_store_pck"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 11
+name = "image_store_mip_pck"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 14
+name = "image_get_resinfo"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 15
+name = "image_atomic_swap"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 16
+name = "image_atomic_cmpswap"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 17
+name = "image_atomic_add"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 18
+name = "image_atomic_sub"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 20
+name = "image_atomic_smin"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 21
+name = "image_atomic_umin"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 22
+name = "image_atomic_smax"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 23
+name = "image_atomic_umax"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 24
+name = "image_atomic_and"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 25
+name = "image_atomic_or"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 26
+name = "image_atomic_xor"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 27
+name = "image_atomic_inc"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 28
+name = "image_atomic_dec"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 29
+name = "image_atomic_fcmpswap"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 30
+name = "image_atomic_fmin"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 31
+name = "image_atomic_fmax"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 33
+name = "image_sample_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 35
+name = "image_sample_d_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 37
+name = "image_sample_b"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 38
+name = "image_sample_b_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 40
+name = "image_sample_c"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 41
+name = "image_sample_c_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 42
+name = "image_sample_c_d"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 43
+name = "image_sample_c_d_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 44
+name = "image_sample_c_l"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 45
+name = "image_sample_c_b"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 46
+name = "image_sample_c_b_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 47
+name = "image_sample_c_lz"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 48
+name = "image_sample_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 49
+name = "image_sample_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 50
+name = "image_sample_d_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 51
+name = "image_sample_d_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 52
+name = "image_sample_l_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 53
+name = "image_sample_b_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 54
+name = "image_sample_b_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 55
+name = "image_sample_lz_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 56
+name = "image_sample_c_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 57
+name = "image_sample_c_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 58
+name = "image_sample_c_d_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 59
+name = "image_sample_c_d_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 60
+name = "image_sample_c_l_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 61
+name = "image_sample_c_b_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 62
+name = "image_sample_c_b_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 63
+name = "image_sample_c_lz_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 64
+name = "image_gather4"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 65
+name = "image_gather4_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 68
+name = "image_gather4_l"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 69
+name = "image_gather4_b"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 70
+name = "image_gather4_b_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 72
+name = "image_gather4_c"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 73
+name = "image_gather4_c_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 76
+name = "image_gather4_c_l"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 77
+name = "image_gather4_c_b"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 78
+name = "image_gather4_c_b_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 79
+name = "image_gather4_c_lz"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 80
+name = "image_gather4_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 81
+name = "image_gather4_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 84
+name = "image_gather4_l_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 85
+name = "image_gather4_b_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 86
+name = "image_gather4_b_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 87
+name = "image_gather4_lz_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 88
+name = "image_gather4_c_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 89
+name = "image_gather4_c_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 92
+name = "image_gather4_c_l_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 93
+name = "image_gather4_c_b_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 94
+name = "image_gather4_c_b_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 95
+name = "image_gather4_c_lz_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 96
+name = "image_get_lod"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 97
+name = "image_gather4h"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 104
+name = "image_sample_cd"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 105
+name = "image_sample_cd_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 106
+name = "image_sample_c_cd"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 107
+name = "image_sample_c_cd_cl"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 108
+name = "image_sample_cd_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 109
+name = "image_sample_cd_cl_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 110
+name = "image_sample_c_cd_o"
+
+[[mnemonic]]
+family = "MIMG"
+opcode = 111
+name = "image_sample_c_cd_cl_o"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 8
+name = "tbuffer_load_format_d16_x"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 9
+name = "tbuffer_load_format_d16_xy"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 10
+name = "tbuffer_load_format_d16_xyz"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 11
+name = "tbuffer_load_format_d16_xyzw"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 12
+name = "tbuffer_store_format_d16_x"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 13
+name = "tbuffer_store_format_d16_xy"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 14
+name = "tbuffer_store_format_d16_xyz"
+
+[[mnemonic]]
+family = "MTBUF"
+opcode = 15
+name = "tbuffer_store_format_d16_xyzw"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 8
+name = "buffer_load_ubyte"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 9
+name = "buffer_load_sbyte"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 11
+name = "buffer_load_sshort"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 24
+name = "buffer_store_byte"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 25
+name = "buffer_store_byte_d16_hi"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 26
+name = "buffer_store_short"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 27
+name = "buffer_store_short_d16_hi"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 32
+name = "buffer_load_ubyte_d16"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 33
+name = "buffer_load_ubyte_d16_hi"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 34
+name = "buffer_load_sbyte_d16"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 35
+name = "buffer_load_sbyte_d16_hi"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 36
+name = "buffer_load_short_d16"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 37
+name = "buffer_load_short_d16_hi"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 38
+name = "buffer_load_format_d16_hi_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 39
+name = "buffer_store_format_d16_hi_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 48
+name = "buffer_atomic_swap"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 49
+name = "buffer_atomic_cmpswap"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 51
+name = "buffer_atomic_sub"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 53
+name = "buffer_atomic_smin"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 54
+name = "buffer_atomic_umin"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 55
+name = "buffer_atomic_smax"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 56
+name = "buffer_atomic_umax"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 57
+name = "buffer_atomic_and"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 58
+name = "buffer_atomic_or"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 59
+name = "buffer_atomic_xor"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 60
+name = "buffer_atomic_inc"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 61
+name = "buffer_atomic_dec"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 62
+name = "buffer_atomic_fcmpswap"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 80
+name = "buffer_atomic_swap_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 81
+name = "buffer_atomic_cmpswap_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 82
+name = "buffer_atomic_add_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 83
+name = "buffer_atomic_sub_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 85
+name = "buffer_atomic_smin_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 86
+name = "buffer_atomic_umin_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 87
+name = "buffer_atomic_smax_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 88
+name = "buffer_atomic_umax_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 89
+name = "buffer_atomic_and_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 90
+name = "buffer_atomic_or_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 91
+name = "buffer_atomic_xor_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 92
+name = "buffer_atomic_inc_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 93
+name = "buffer_atomic_dec_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 94
+name = "buffer_atomic_fcmpswap_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 95
+name = "buffer_atomic_fmin_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 96
+name = "buffer_atomic_fmax_x2"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 113
+name = "buffer_gl0_inv"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 114
+name = "buffer_gl1_inv"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 128
+name = "buffer_load_format_d16_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 129
+name = "buffer_load_format_d16_xy"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 130
+name = "buffer_load_format_d16_xyz"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 131
+name = "buffer_load_format_d16_xyzw"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 132
+name = "buffer_store_format_d16_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 133
+name = "buffer_store_format_d16_xy"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 134
+name = "buffer_store_format_d16_xyz"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 135
+name = "buffer_store_format_d16_xyzw"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 3
+name = "s_load_dwordx8"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 5
+name = "s_scratch_load_dword"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 6
+name = "s_scratch_load_dwordx2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 7
+name = "s_scratch_load_dwordx4"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 16
+name = "s_store_dword"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 17
+name = "s_store_dwordx2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 18
+name = "s_store_dwordx4"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 21
+name = "s_scratch_store_dword"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 22
+name = "s_scratch_store_dwordx2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 23
+name = "s_scratch_store_dwordx4"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 24
+name = "s_buffer_store_dword"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 25
+name = "s_buffer_store_dwordx2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 26
+name = "s_buffer_store_dwordx4"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 31
+name = "s_gl1_inv"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 32
+name = "s_dcache_inv"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 33
+name = "s_dcache_wb"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 36
+name = "s_memtime"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 37
+name = "s_memrealtime"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 38
+name = "s_atc_probe"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 39
+name = "s_atc_probe_buffer"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 40
+name = "s_dcache_discard"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 41
+name = "s_dcache_discard_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 42
+name = "s_get_waveid_in_workgroup"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 64
+name = "s_buffer_atomic_swap"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 65
+name = "s_buffer_atomic_cmpswap"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 66
+name = "s_buffer_atomic_add"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 67
+name = "s_buffer_atomic_sub"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 68
+name = "s_buffer_atomic_smin"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 69
+name = "s_buffer_atomic_umin"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 70
+name = "s_buffer_atomic_smax"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 71
+name = "s_buffer_atomic_umax"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 72
+name = "s_buffer_atomic_and"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 73
+name = "s_buffer_atomic_or"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 74
+name = "s_buffer_atomic_xor"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 75
+name = "s_buffer_atomic_inc"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 76
+name = "s_buffer_atomic_dec"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 96
+name = "s_buffer_atomic_swap_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 97
+name = "s_buffer_atomic_cmpswap_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 98
+name = "s_buffer_atomic_add_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 99
+name = "s_buffer_atomic_sub_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 100
+name = "s_buffer_atomic_smin_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 101
+name = "s_buffer_atomic_umin_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 102
+name = "s_buffer_atomic_smax_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 103
+name = "s_buffer_atomic_umax_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 104
+name = "s_buffer_atomic_and_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 105
+name = "s_buffer_atomic_or_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 106
+name = "s_buffer_atomic_xor_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 107
+name = "s_buffer_atomic_inc_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 108
+name = "s_buffer_atomic_dec_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 128
+name = "s_atomic_swap"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 129
+name = "s_atomic_cmpswap"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 130
+name = "s_atomic_add"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 131
+name = "s_atomic_sub"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 132
+name = "s_atomic_smin"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 133
+name = "s_atomic_umin"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 134
+name = "s_atomic_smax"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 135
+name = "s_atomic_umax"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 136
+name = "s_atomic_and"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 137
+name = "s_atomic_or"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 138
+name = "s_atomic_xor"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 139
+name = "s_atomic_inc"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 140
+name = "s_atomic_dec"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 160
+name = "s_atomic_swap_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 161
+name = "s_atomic_cmpswap_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 162
+name = "s_atomic_add_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 163
+name = "s_atomic_sub_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 164
+name = "s_atomic_smin_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 165
+name = "s_atomic_umin_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 166
+name = "s_atomic_smax_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 167
+name = "s_atomic_umax_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 168
+name = "s_atomic_and_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 169
+name = "s_atomic_or_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 170
+name = "s_atomic_xor_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 171
+name = "s_atomic_inc_x2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 172
+name = "s_atomic_dec_x2"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 5
+name = "s_cmov_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 6
+name = "s_cmov_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 8
+name = "s_not_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 11
+name = "s_brev_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 12
+name = "s_brev_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 13
+name = "s_bcnt0_i32_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 14
+name = "s_bcnt0_i32_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 15
+name = "s_bcnt1_i32_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 17
+name = "s_ff0_i32_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 18
+name = "s_ff0_i32_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 19
+name = "s_ff1_i32_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 20
+name = "s_ff1_i32_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 21
+name = "s_flbit_i32_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 22
+name = "s_flbit_i32_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 23
+name = "s_flbit_i32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 24
+name = "s_flbit_i32_i64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 25
+name = "s_sext_i32_i8"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 26
+name = "s_sext_i32_i16"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 27
+name = "s_bitset0_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 28
+name = "s_bitset0_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 30
+name = "s_bitset1_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 31
+name = "s_getpc_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 32
+name = "s_setpc_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 33
+name = "s_swappc_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 34
+name = "s_rfe_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 37
+name = "s_or_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 38
+name = "s_xor_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 39
+name = "s_andn2_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 41
+name = "s_nand_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 42
+name = "s_nor_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 43
+name = "s_xnor_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 44
+name = "s_quadmask_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 46
+name = "s_movrels_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 47
+name = "s_movrels_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 48
+name = "s_movreld_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 49
+name = "s_movreld_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 52
+name = "s_abs_i32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 56
+name = "s_orn1_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 57
+name = "s_andn1_wrexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 58
+name = "s_andn2_wrexec_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 59
+name = "s_bitreplicate_b64_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 61
+name = "s_or_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 62
+name = "s_xor_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 63
+name = "s_andn2_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 64
+name = "s_orn2_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 65
+name = "s_nand_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 66
+name = "s_nor_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 67
+name = "s_xnor_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 68
+name = "s_andn1_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 69
+name = "s_orn1_saveexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 70
+name = "s_andn1_wrexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 71
+name = "s_andn2_wrexec_b32"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 73
+name = "s_movrelsd_2_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 3
+name = "s_sub_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 4
+name = "s_addc_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 5
+name = "s_subb_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 7
+name = "s_min_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 9
+name = "s_max_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 16
+name = "s_or_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 17
+name = "s_or_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 24
+name = "s_nand_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 25
+name = "s_nand_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 26
+name = "s_nor_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 28
+name = "s_xnor_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 29
+name = "s_xnor_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 34
+name = "s_ashr_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 35
+name = "s_ashr_i64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 40
+name = "s_bfe_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 42
+name = "s_bfe_i64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 44
+name = "s_absdiff_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 51
+name = "s_pack_lh_b32_b16"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 54
+name = "s_mul_hi_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 0
+name = "s_cmp_eq_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 1
+name = "s_cmp_lg_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 2
+name = "s_cmp_gt_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 3
+name = "s_cmp_ge_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 5
+name = "s_cmp_le_i32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 12
+name = "s_bitcmp0_b32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 14
+name = "s_bitcmp0_b64"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 15
+name = "s_bitcmp1_b64"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 18
+name = "s_cmp_eq_u64"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 1
+name = "s_version"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 2
+name = "s_cmovk_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 5
+name = "s_cmpk_gt_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 6
+name = "s_cmpk_ge_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 7
+name = "s_cmpk_lt_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 8
+name = "s_cmpk_le_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 9
+name = "s_cmpk_eq_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 10
+name = "s_cmpk_lg_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 11
+name = "s_cmpk_gt_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 12
+name = "s_cmpk_ge_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 13
+name = "s_cmpk_lt_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 14
+name = "s_cmpk_le_u32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 18
+name = "s_getreg_b32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 19
+name = "s_setreg_b32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 21
+name = "s_setreg_imm32_b32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 22
+name = "s_call_b64"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 24
+name = "s_waitcnt_vmcnt"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 25
+name = "s_waitcnt_expcnt"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 26
+name = "s_waitcnt_lgkmcnt"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 27
+name = "s_subvector_loop_begin"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 28
+name = "s_subvector_loop_end"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 3
+name = "s_wakeup"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 4
+name = "s_cbranch_scc0"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 7
+name = "s_cbranch_vccnz"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 8
+name = "s_cbranch_execz"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 11
+name = "s_setkill"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 13
+name = "s_sethalt"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 14
+name = "s_sleep"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 17
+name = "s_sendmsghalt"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 18
+name = "s_trap"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 19
+name = "s_icache_inv"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 20
+name = "s_incperflevel"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 21
+name = "s_decperflevel"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 22
+name = "s_ttracedata"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 23
+name = "s_cbranch_cdbgsys"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 24
+name = "s_cbranch_cdbguser"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 25
+name = "s_cbranch_cdbgsys_or_user"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 26
+name = "s_cbranch_cdbgsys_and_user"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 27
+name = "s_endpgm_saved"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 30
+name = "s_endpgm_ordered_ps_done"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 34
+name = "s_wait_idle"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 36
+name = "s_round_mode"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 37
+name = "s_denorm_mode"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 40
+name = "s_ttracedata_imm"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 3
+name = "v_cvt_i32_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 4
+name = "v_cvt_f64_i32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 11
+name = "v_cvt_f32_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 14
+name = "v_cvt_off_f32_i4_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 15
+name = "v_cvt_f32_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 16
+name = "v_cvt_f64_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 21
+name = "v_cvt_u32_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 22
+name = "v_cvt_f64_u32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 23
+name = "v_trunc_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 24
+name = "v_ceil_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 25
+name = "v_rndne_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 26
+name = "v_floor_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 27
+name = "v_pipeflush"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 34
+name = "v_ceil_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 47
+name = "v_rcp_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 49
+name = "v_rsq_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 52
+name = "v_sqrt_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 55
+name = "v_not_b32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 58
+name = "v_ffbl_b32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 59
+name = "v_ffbh_i32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 60
+name = "v_frexp_exp_i32_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 61
+name = "v_frexp_mant_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 62
+name = "v_fract_f64_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 63
+name = "v_frexp_exp_i32_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 64
+name = "v_frexp_mant_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 65
+name = "v_clrexcp"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 68
+name = "v_movrelsd_b32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 72
+name = "v_movrelsd_2_b32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 80
+name = "v_cvt_f16_u16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 81
+name = "v_cvt_f16_i16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 82
+name = "v_cvt_u16_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 83
+name = "v_cvt_i16_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 84
+name = "v_rcp_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 85
+name = "v_sqrt_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 86
+name = "v_rsq_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 87
+name = "v_log_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 88
+name = "v_exp_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 89
+name = "v_frexp_mant_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 90
+name = "v_frexp_exp_i16_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 91
+name = "v_floor_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 92
+name = "v_ceil_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 93
+name = "v_trunc_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 94
+name = "v_rndne_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 95
+name = "v_fract_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 96
+name = "v_sin_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 97
+name = "v_cos_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 98
+name = "v_sat_pk_u8_i16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 99
+name = "v_cvt_norm_i16_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 100
+name = "v_cvt_norm_u16_f16_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 101
+name = "v_swap_b32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 104
+name = "v_swaprel_b32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 0
+name = "v_illegal"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 6
+name = "v_mac_legacy_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 7
+name = "v_mul_legacy_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 9
+name = "v_mul_i32_i24_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 10
+name = "v_mul_hi_i32_i24_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 12
+name = "v_mul_hi_u32_u24_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 30
+name = "v_xnor_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 37
+name = "v_add_nc_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 38
+name = "v_sub_nc_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 41
+name = "v_sub_co_ci_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 42
+name = "v_subrev_co_ci_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 50
+name = "v_add_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 51
+name = "v_sub_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 52
+name = "v_subrev_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 53
+name = "v_mul_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 54
+name = "v_fmac_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 55
+name = "v_fmamk_f16"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 56
+name = "v_fmaak_f16"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 57
+name = "v_max_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 58
+name = "v_min_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 59
+name = "v_ldexp_f16_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 60
+name = "v_pk_fmac_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 0
+name = "v_cmp_f_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 7
+name = "v_cmp_o_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 8
+name = "v_cmp_u_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 15
+name = "v_cmp_tru_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 16
+name = "v_cmpx_f_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 17
+name = "v_cmpx_lt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 18
+name = "v_cmpx_eq_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 19
+name = "v_cmpx_le_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 20
+name = "v_cmpx_gt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 21
+name = "v_cmpx_lg_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 22
+name = "v_cmpx_ge_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 23
+name = "v_cmpx_o_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 24
+name = "v_cmpx_u_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 25
+name = "v_cmpx_nge_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 26
+name = "v_cmpx_nlg_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 27
+name = "v_cmpx_ngt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 28
+name = "v_cmpx_nle_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 29
+name = "v_cmpx_neq_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 30
+name = "v_cmpx_nlt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 31
+name = "v_cmpx_tru_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 32
+name = "v_cmp_f_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 33
+name = "v_cmp_lt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 34
+name = "v_cmp_eq_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 35
+name = "v_cmp_le_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 36
+name = "v_cmp_gt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 37
+name = "v_cmp_lg_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 38
+name = "v_cmp_ge_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 39
+name = "v_cmp_o_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 40
+name = "v_cmp_u_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 41
+name = "v_cmp_nge_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 42
+name = "v_cmp_nlg_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 43
+name = "v_cmp_ngt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 44
+name = "v_cmp_nle_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 45
+name = "v_cmp_neq_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 46
+name = "v_cmp_nlt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 47
+name = "v_cmp_tru_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 48
+name = "v_cmpx_f_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 49
+name = "v_cmpx_lt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 50
+name = "v_cmpx_eq_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 51
+name = "v_cmpx_le_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 52
+name = "v_cmpx_gt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 53
+name = "v_cmpx_lg_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 54
+name = "v_cmpx_ge_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 55
+name = "v_cmpx_o_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 56
+name = "v_cmpx_u_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 57
+name = "v_cmpx_nge_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 58
+name = "v_cmpx_nlg_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 59
+name = "v_cmpx_ngt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 60
+name = "v_cmpx_nle_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 61
+name = "v_cmpx_neq_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 62
+name = "v_cmpx_nlt_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 63
+name = "v_cmpx_tru_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 128
+name = "v_cmp_f_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 135
+name = "v_cmp_t_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 136
+name = "v_cmp_class_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 137
+name = "v_cmp_lt_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 138
+name = "v_cmp_eq_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 139
+name = "v_cmp_le_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 140
+name = "v_cmp_gt_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 141
+name = "v_cmp_ne_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 142
+name = "v_cmp_ge_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 143
+name = "v_cmp_class_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 144
+name = "v_cmpx_f_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 145
+name = "v_cmpx_lt_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 146
+name = "v_cmpx_eq_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 147
+name = "v_cmpx_le_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 148
+name = "v_cmpx_gt_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 149
+name = "v_cmpx_ne_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 150
+name = "v_cmpx_ge_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 151
+name = "v_cmpx_t_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 152
+name = "v_cmpx_class_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 153
+name = "v_cmpx_lt_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 154
+name = "v_cmpx_eq_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 155
+name = "v_cmpx_le_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 156
+name = "v_cmpx_gt_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 157
+name = "v_cmpx_ne_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 158
+name = "v_cmpx_ge_i16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 159
+name = "v_cmpx_class_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 160
+name = "v_cmp_f_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 161
+name = "v_cmp_lt_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 162
+name = "v_cmp_eq_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 163
+name = "v_cmp_le_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 164
+name = "v_cmp_gt_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 165
+name = "v_cmp_ne_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 166
+name = "v_cmp_ge_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 167
+name = "v_cmp_t_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 168
+name = "v_cmp_class_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 169
+name = "v_cmp_lt_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 170
+name = "v_cmp_eq_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 171
+name = "v_cmp_le_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 172
+name = "v_cmp_gt_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 173
+name = "v_cmp_ne_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 174
+name = "v_cmp_ge_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 176
+name = "v_cmpx_f_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 177
+name = "v_cmpx_lt_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 178
+name = "v_cmpx_eq_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 179
+name = "v_cmpx_le_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 180
+name = "v_cmpx_gt_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 181
+name = "v_cmpx_ne_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 182
+name = "v_cmpx_ge_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 183
+name = "v_cmpx_t_i64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 184
+name = "v_cmpx_class_f64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 185
+name = "v_cmpx_lt_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 186
+name = "v_cmpx_eq_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 187
+name = "v_cmpx_le_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 188
+name = "v_cmpx_gt_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 189
+name = "v_cmpx_ne_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 190
+name = "v_cmpx_ge_u16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 192
+name = "v_cmp_f_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 193
+name = "v_cmp_lt_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 194
+name = "v_cmp_eq_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 195
+name = "v_cmp_le_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 197
+name = "v_cmp_ne_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 198
+name = "v_cmp_ge_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 199
+name = "v_cmp_t_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 200
+name = "v_cmp_f_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 201
+name = "v_cmp_lt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 202
+name = "v_cmp_eq_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 203
+name = "v_cmp_le_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 204
+name = "v_cmp_gt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 205
+name = "v_cmp_lg_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 206
+name = "v_cmp_ge_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 207
+name = "v_cmp_o_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 208
+name = "v_cmpx_f_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 209
+name = "v_cmpx_lt_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 210
+name = "v_cmpx_eq_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 211
+name = "v_cmpx_le_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 212
+name = "v_cmpx_gt_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 213
+name = "v_cmpx_ne_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 214
+name = "v_cmpx_ge_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 215
+name = "v_cmpx_t_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 216
+name = "v_cmpx_f_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 217
+name = "v_cmpx_lt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 218
+name = "v_cmpx_eq_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 219
+name = "v_cmpx_le_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 220
+name = "v_cmpx_gt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 221
+name = "v_cmpx_lg_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 222
+name = "v_cmpx_ge_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 223
+name = "v_cmpx_o_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 224
+name = "v_cmp_f_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 225
+name = "v_cmp_lt_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 226
+name = "v_cmp_eq_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 227
+name = "v_cmp_le_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 228
+name = "v_cmp_gt_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 229
+name = "v_cmp_ne_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 230
+name = "v_cmp_ge_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 231
+name = "v_cmp_t_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 232
+name = "v_cmp_u_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 233
+name = "v_cmp_nge_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 234
+name = "v_cmp_nlg_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 235
+name = "v_cmp_ngt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 236
+name = "v_cmp_nle_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 237
+name = "v_cmp_neq_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 238
+name = "v_cmp_nlt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 239
+name = "v_cmp_tru_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 240
+name = "v_cmpx_f_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 241
+name = "v_cmpx_lt_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 242
+name = "v_cmpx_eq_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 243
+name = "v_cmpx_le_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 244
+name = "v_cmpx_gt_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 245
+name = "v_cmpx_ne_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 246
+name = "v_cmpx_ge_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 247
+name = "v_cmpx_t_u64_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 248
+name = "v_cmpx_u_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 249
+name = "v_cmpx_nge_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 250
+name = "v_cmpx_nlg_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 251
+name = "v_cmpx_ngt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 252
+name = "v_cmpx_nle_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 253
+name = "v_cmpx_neq_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 254
+name = "v_cmpx_nlt_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 255
+name = "v_cmpx_tru_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 259
+name = "v_add_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 260
+name = "v_sub_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 261
+name = "v_subrev_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 262
+name = "v_mac_legacy_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 263
+name = "v_mul_legacy_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 265
+name = "v_mul_i32_i24_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 266
+name = "v_mul_hi_i32_i24_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 267
+name = "v_mul_u32_u24_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 268
+name = "v_mul_hi_u32_u24_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 271
+name = "v_min_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 272
+name = "v_max_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 273
+name = "v_min_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 274
+name = "v_max_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 275
+name = "v_min_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 276
+name = "v_max_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 278
+name = "v_lshrrev_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 280
+name = "v_ashrrev_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 282
+name = "v_lshlrev_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 283
+name = "v_and_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 284
+name = "v_or_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 285
+name = "v_xor_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 286
+name = "v_xnor_b32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 287
+name = "v_mac_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 293
+name = "v_add_nc_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 294
+name = "v_sub_nc_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 295
+name = "v_subrev_nc_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 296
+name = "v_add_co_ci_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 297
+name = "v_sub_co_ci_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 298
+name = "v_subrev_co_ci_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 299
+name = "v_fmac_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 306
+name = "v_add_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 307
+name = "v_sub_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 308
+name = "v_subrev_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 309
+name = "v_mul_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 310
+name = "v_fmac_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 313
+name = "v_max_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 314
+name = "v_min_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 315
+name = "v_ldexp_f16_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 320
+name = "v_mad_legacy_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 324
+name = "v_cubeid_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 325
+name = "v_cubesc_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 326
+name = "v_cubetc_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 327
+name = "v_cubema_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 332
+name = "v_fma_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 333
+name = "v_lerp_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 334
+name = "v_alignbit_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 336
+name = "v_mullit_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 338
+name = "v_min3_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 339
+name = "v_min3_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 341
+name = "v_max3_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 342
+name = "v_max3_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 344
+name = "v_med3_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 345
+name = "v_med3_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 346
+name = "v_sad_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 347
+name = "v_sad_hi_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 348
+name = "v_sad_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 349
+name = "v_sad_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 350
+name = "v_cvt_pk_u8_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 352
+name = "v_div_fixup_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 356
+name = "v_add_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 357
+name = "v_mul_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 358
+name = "v_min_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 359
+name = "v_max_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 360
+name = "v_ldexp_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 362
+name = "v_mul_hi_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 363
+name = "v_mul_lo_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 364
+name = "v_mul_hi_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 366
+name = "v_div_scale_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 368
+name = "v_div_fmas_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 370
+name = "v_qsad_pk_u16_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 371
+name = "v_mqsad_pk_u16_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 372
+name = "v_trig_preop_f64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 373
+name = "v_mqsad_u32_u8"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 374
+name = "v_mad_u64_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 375
+name = "v_mad_i64_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 376
+name = "v_xor3_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 512
+name = "v_interp_p1_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 513
+name = "v_interp_p2_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 514
+name = "v_interp_mov_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 767
+name = "v_lshlrev_b64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 768
+name = "v_lshrrev_b64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 769
+name = "v_ashrrev_i64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 772
+name = "v_sub_nc_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 773
+name = "v_mul_lo_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 775
+name = "v_lshrrev_b16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 776
+name = "v_ashrrev_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 777
+name = "v_max_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 778
+name = "v_max_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 779
+name = "v_min_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 780
+name = "v_min_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 781
+name = "v_add_nc_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 782
+name = "v_sub_nc_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 783
+name = "v_add_co_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 784
+name = "v_sub_co_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 786
+name = "v_cvt_pknorm_i16_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 787
+name = "v_cvt_pknorm_u16_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 793
+name = "v_subrev_co_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 832
+name = "v_mad_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 834
+name = "v_interp_p1ll_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 835
+name = "v_interp_p1lv_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 837
+name = "v_xad_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 838
+name = "v_lshl_add_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 843
+name = "v_fma_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 849
+name = "v_min3_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 851
+name = "v_min3_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 852
+name = "v_max3_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 853
+name = "v_max3_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 854
+name = "v_max3_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 855
+name = "v_med3_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 856
+name = "v_med3_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 857
+name = "v_med3_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 858
+name = "v_interp_p2_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 862
+name = "v_mad_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 863
+name = "v_div_fixup_f16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 865
+name = "v_writelane_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 866
+name = "v_ldexp_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 867
+name = "v_bfm_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 868
+name = "v_bcnt_u32_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 869
+name = "v_mbcnt_lo_u32_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 870
+name = "v_mbcnt_hi_u32_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 885
+name = "v_mad_i32_i16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 886
+name = "v_sub_nc_i32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 895
+name = "v_add_nc_i32"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 0
+name = "v_pk_mad_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 1
+name = "v_pk_mul_lo_u16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 2
+name = "v_pk_add_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 3
+name = "v_pk_sub_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 5
+name = "v_pk_lshrrev_b16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 6
+name = "v_pk_ashrrev_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 7
+name = "v_pk_max_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 8
+name = "v_pk_min_i16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 12
+name = "v_pk_max_u16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 13
+name = "v_pk_min_u16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 14
+name = "v_pk_fma_f16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 15
+name = "v_pk_add_f16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 16
+name = "v_pk_mul_f16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 17
+name = "v_pk_min_f16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 18
+name = "v_pk_max_f16"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 0
+name = "v_cmp_f_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 7
+name = "v_cmp_o_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 15
+name = "v_cmp_tru_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 16
+name = "v_cmpx_f_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 23
+name = "v_cmpx_o_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 24
+name = "v_cmpx_u_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 31
+name = "v_cmpx_tru_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 32
+name = "v_cmp_f_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 33
+name = "v_cmp_lt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 34
+name = "v_cmp_eq_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 35
+name = "v_cmp_le_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 36
+name = "v_cmp_gt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 37
+name = "v_cmp_lg_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 38
+name = "v_cmp_ge_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 39
+name = "v_cmp_o_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 40
+name = "v_cmp_u_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 41
+name = "v_cmp_nge_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 42
+name = "v_cmp_nlg_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 43
+name = "v_cmp_ngt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 44
+name = "v_cmp_nle_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 45
+name = "v_cmp_neq_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 46
+name = "v_cmp_nlt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 47
+name = "v_cmp_tru_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 48
+name = "v_cmpx_f_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 49
+name = "v_cmpx_lt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 50
+name = "v_cmpx_eq_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 51
+name = "v_cmpx_le_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 52
+name = "v_cmpx_gt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 53
+name = "v_cmpx_lg_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 54
+name = "v_cmpx_ge_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 55
+name = "v_cmpx_o_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 56
+name = "v_cmpx_u_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 57
+name = "v_cmpx_nge_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 58
+name = "v_cmpx_nlg_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 59
+name = "v_cmpx_ngt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 60
+name = "v_cmpx_nle_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 61
+name = "v_cmpx_neq_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 62
+name = "v_cmpx_nlt_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 63
+name = "v_cmpx_tru_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 128
+name = "v_cmp_f_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 135
+name = "v_cmp_t_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 137
+name = "v_cmp_lt_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 138
+name = "v_cmp_eq_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 139
+name = "v_cmp_le_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 140
+name = "v_cmp_gt_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 141
+name = "v_cmp_ne_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 142
+name = "v_cmp_ge_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 143
+name = "v_cmp_class_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 144
+name = "v_cmpx_f_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 151
+name = "v_cmpx_t_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 152
+name = "v_cmpx_class_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 153
+name = "v_cmpx_lt_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 154
+name = "v_cmpx_eq_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 156
+name = "v_cmpx_gt_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 157
+name = "v_cmpx_ne_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 158
+name = "v_cmpx_ge_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 159
+name = "v_cmpx_class_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 160
+name = "v_cmp_f_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 161
+name = "v_cmp_lt_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 162
+name = "v_cmp_eq_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 163
+name = "v_cmp_le_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 164
+name = "v_cmp_gt_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 165
+name = "v_cmp_ne_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 166
+name = "v_cmp_ge_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 167
+name = "v_cmp_t_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 168
+name = "v_cmp_class_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 169
+name = "v_cmp_lt_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 170
+name = "v_cmp_eq_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 171
+name = "v_cmp_le_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 172
+name = "v_cmp_gt_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 173
+name = "v_cmp_ne_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 174
+name = "v_cmp_ge_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 176
+name = "v_cmpx_f_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 177
+name = "v_cmpx_lt_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 178
+name = "v_cmpx_eq_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 179
+name = "v_cmpx_le_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 180
+name = "v_cmpx_gt_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 181
+name = "v_cmpx_ne_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 182
+name = "v_cmpx_ge_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 183
+name = "v_cmpx_t_i64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 184
+name = "v_cmpx_class_f64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 185
+name = "v_cmpx_lt_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 186
+name = "v_cmpx_eq_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 187
+name = "v_cmpx_le_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 188
+name = "v_cmpx_gt_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 189
+name = "v_cmpx_ne_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 190
+name = "v_cmpx_ge_u16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 192
+name = "v_cmp_f_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 193
+name = "v_cmp_lt_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 194
+name = "v_cmp_eq_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 199
+name = "v_cmp_t_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 200
+name = "v_cmp_f_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 201
+name = "v_cmp_lt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 202
+name = "v_cmp_eq_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 203
+name = "v_cmp_le_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 204
+name = "v_cmp_gt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 205
+name = "v_cmp_lg_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 206
+name = "v_cmp_ge_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 207
+name = "v_cmp_o_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 208
+name = "v_cmpx_f_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 215
+name = "v_cmpx_t_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 216
+name = "v_cmpx_f_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 217
+name = "v_cmpx_lt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 218
+name = "v_cmpx_eq_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 219
+name = "v_cmpx_le_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 220
+name = "v_cmpx_gt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 221
+name = "v_cmpx_lg_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 222
+name = "v_cmpx_ge_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 223
+name = "v_cmpx_o_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 224
+name = "v_cmp_f_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 225
+name = "v_cmp_lt_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 226
+name = "v_cmp_eq_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 227
+name = "v_cmp_le_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 228
+name = "v_cmp_gt_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 229
+name = "v_cmp_ne_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 230
+name = "v_cmp_ge_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 231
+name = "v_cmp_t_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 232
+name = "v_cmp_u_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 233
+name = "v_cmp_nge_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 234
+name = "v_cmp_nlg_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 235
+name = "v_cmp_ngt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 236
+name = "v_cmp_nle_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 237
+name = "v_cmp_neq_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 238
+name = "v_cmp_nlt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 239
+name = "v_cmp_tru_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 240
+name = "v_cmpx_f_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 241
+name = "v_cmpx_lt_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 242
+name = "v_cmpx_eq_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 243
+name = "v_cmpx_le_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 244
+name = "v_cmpx_gt_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 245
+name = "v_cmpx_ne_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 246
+name = "v_cmpx_ge_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 247
+name = "v_cmpx_t_u64_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 248
+name = "v_cmpx_u_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 249
+name = "v_cmpx_nge_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 250
+name = "v_cmpx_nlg_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 251
+name = "v_cmpx_ngt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 252
+name = "v_cmpx_nle_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 253
+name = "v_cmpx_neq_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 254
+name = "v_cmpx_nlt_f16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 255
+name = "v_cmpx_tru_f16_e32"

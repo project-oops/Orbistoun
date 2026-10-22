@@ -48,7 +48,10 @@ pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Opti
     }
     let (answer, answered) = sync_channel::<Option<R>>(1);
     let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
-        let _ = answer.send(catch_unwind(AssertUnwindSafe(work)).ok());
+        let ran = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DeviceJob, || {
+            catch_unwind(AssertUnwindSafe(work)).ok()
+        });
+        let _ = answer.send(ran);
     });
     // SAFETY: only the lifetime changes, which does not affect a boxed trait object's layout. Every
     // borrow `job` holds outlives its use: this function returns only after the job has run and
@@ -59,7 +62,9 @@ pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Opti
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .send(job)
         .ok()?;
-    answered.recv().ok().flatten()
+    orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DeviceAnswerWait, || {
+        answered.recv().ok().flatten()
+    })
 }
 
 #[cfg(test)]

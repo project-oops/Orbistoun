@@ -451,3 +451,64 @@ fn two_exports_draw_two_attachments() {
         );
     }
 }
+
+/// A pixel shader's waterfall loop ends: Grand Theft Auto V's shadow pixel shaders save the mask,
+/// then repeat `v_readfirstlane_b32 s31, v38`, `v_cmpx_eq_u32 s31, v38`,
+/// `s_andn2_b64 s64, s64, exec`, `s_mov_b64 exec, s64` and `s_cbranch_scc1` back until every lane
+/// has had its turn. A module that models one lane, its pixel, runs one pass and goes on to export:
+/// were its mask the whole wave's, the lanes it does not model would never retire and the loop
+/// would never end, losing the device.
+#[test]
+fn a_pixel_shader_s_waterfall_loop_ends_and_exports() {
+    if !device_or_skip("a_pixel_shader_s_waterfall_loop_ends_and_exports") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    let (blue, red) = ([0.0f32, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let mut words: Vec<u32> = vec![
+        0x7E08_0283, // v_mov_b32 v4, 3
+        0xBEBA_047E, // s_mov_b64 s[58:59], exec
+        0xBEC0_047E, // s_mov_b64 s[64:65], exec
+        0x7E3E_0504, // v_readfirstlane_b32 s31, v4      <- the loop
+        0x7DA4_081F, // v_cmpx_eq_u32 s31, v4
+        0x8AC0_7E40, // s_andn2_b64 s[64:65], s[64:65], exec
+        0xBEFE_0440, // s_mov_b64 exec, s[64:65]
+        0xBF85_FFFB, // s_cbranch_scc1 back to the loop
+        0xBEFE_043A, // s_mov_b64 exec, s[58:59]
+    ];
+    for (register, component) in blue.iter().enumerate() {
+        words.push(0x7E00_0000 | ((register as u32) << 17) | (1 << 9) | 0xFF);
+        words.push(component.to_bits());
+    }
+    // `exp mrt0 v0, v1, v2, v3 done vm`, then `s_endpgm`.
+    words.extend([0xF800_180F, 0x0302_0100, 0xBF81_0000]);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .expect("the waterfall translated");
+    let drawn = draw_with(
+        &fullscreen_triangle_vertex_module(),
+        &module,
+        red,
+        width,
+        height,
+    )
+    .expect("the draw ran, its loop ended");
+    for y in 0..height {
+        for x in 0..width {
+            assert_eq!(
+                drawn.at(x, y),
+                Some([0, 0, 255, 255]),
+                "({x}, {y}) exported"
+            );
+        }
+    }
+}

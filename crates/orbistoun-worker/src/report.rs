@@ -1181,7 +1181,11 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // The lines above are written before this runs, because capturing a backtrace allocates, takes
     // locks and reads the symbol file. A guest faulting on its own pointer has a host stack of the
     // dispatch machinery, which is noise; a fault in orbistoun's code has one that is the answer.
-    if inside.is_some() {
+    // A fault in host code no import names - a graphics driver's, called from the device thread - is
+    // told by its place outside every region the guest was given, and its stack names the call.
+    let in_host_code = published_envelope()
+        .is_some_and(|(low, high)| instruction_pointer < low || instruction_pointer >= high);
+    if inside.is_some() || in_host_code {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let mut said = String::from("  the host stack that got there:");
         for one in backtrace.to_string().lines().take(40) {

@@ -133,6 +133,28 @@ const PRESENT_BASE: u64 = 1_000_000;
 /// that flips freely, and each frame is 8 MB detiled and written.
 const PRESENT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Says, for a submission that failed `elapsed` in, past [`HUNG_SUBMISSION`], what lost the device:
+/// the host driver's watchdog, for a draw that ran past its time limit - a translated shader whose
+/// loop never ends does that (Grand Theft Auto V's waterfall loops, while a pixel shader's mask
+/// held lanes it never ran).
+fn note_hung_submission(elapsed: std::time::Duration) {
+    if elapsed >= HUNG_SUBMISSION {
+        tracing::warn!(
+            concat!(
+                "the device was lost {} ms into the submission, past the host driver's time ",
+                "limit: the command named above most likely ran a shader whose loop never ",
+                "ends - its modules are in failed-module-*.spv",
+            ),
+            elapsed.as_millis()
+        );
+    }
+}
+
+/// How long a failed submission ran before its failure is taken for the host driver's watchdog: two
+/// seconds, Windows' default GPU timeout (`TdrDelay`), which a submission that fails for any other
+/// reason does not reach.
+const HUNG_SUBMISSION: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The scanout format the open-toolchain SDK registers (`agc_display.c`, "64-bit SDR format"),
 /// whose pixels its GL context writes as B, G, R, A (`gl_draw.c`).
 const SCANOUT_BGRA8: u64 = 0x8000_0000_0000_0000;
@@ -762,43 +784,6 @@ fn read_scanout(address: u64, width: u32, height: u32) -> Option<Vec<u32>> {
 /// How many drawn submissions a run dumps, in order.
 const DUMPED_SUBMISSIONS: u64 = 64;
 
-/// How many depth targets a run dumps the first drawing submission of.
-const DUMPED_DEPTH_TARGETS: usize = 48;
-
-/// The depth targets `commands` draw into, in the order they name them.
-fn depth_targets_drawn(
-    commands: &[orbistoun_gpu::RenderCommand],
-) -> Vec<orbistoun_gpu::ResourceId> {
-    let mut targets = Vec::new();
-    for command in commands {
-        if let orbistoun_gpu::RenderCommand::SetRenderTargets {
-            depth: Some(depth), ..
-        } = command
-            && !targets.contains(depth)
-        {
-            targets.push(*depth);
-        }
-    }
-    targets
-}
-
-/// Dumps the first submission that draws into each depth target, as `depth-<id>`, up to
-/// [`DUMPED_DEPTH_TARGETS`] of them: a depth target sampled and never drawn is found against the
-/// passes that drew its neighbours, wherever in the run they came.
-fn dump_first_into_depth_target(submission: &Submission) {
-    static SEEN: Mutex<Vec<orbistoun_gpu::ResourceId>> = Mutex::new(Vec::new());
-    let mut seen = SEEN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for target in depth_targets_drawn(&submission.commands) {
-        if seen.len() >= DUMPED_DEPTH_TARGETS || seen.contains(&target) {
-            continue;
-        }
-        seen.push(target);
-        write_submission(submission, &format!("depth-{:x}", target.0));
-    }
-}
-
 /// The file in the run's frames directory holding the latest frame drawn at submit.
 const LATEST_DRAWN_FRAME: &str = "latest-drawn-frame.rgba";
 
@@ -957,7 +942,14 @@ fn execute_dispatch_here(
             &buffers,
         )
     })
-    .map_err(|e| format!("the device refused it: {e:?}"))?;
+    // Named by its module and size, so the dispatch that loses the device is told apart from those
+    // refused after it.
+    .map_err(|e| {
+        format!(
+            "the device refused it: {e:?} (module {:016x}, {groups:?} groups)",
+            module.1
+        )
+    })?;
     write_depths(images, &done.stored)?;
     let buffers = done
         .buffers
@@ -994,43 +986,78 @@ fn with_depths(images: &orbistoun_gpu::pipeline::DispatchImages) -> Result<Bound
         .iter()
         .map(|image| image.texels.clone())
         .collect();
-    let stored_depth: Vec<(usize, orbistoun_gpu::ResourceId)> = images
+    // Each stored image the host holds: its index, its target, and whether it is the stencil plane.
+    let stored_depth: Vec<(usize, orbistoun_gpu::ResourceId, bool)> = images
         .stored
         .iter()
         .enumerate()
-        .filter_map(|(n, image)| image.depth.map(|target| (n, target)))
+        .filter_map(|(n, image)| {
+            (image.depth.map(|target| (n, target, false)))
+                .or_else(|| image.stencil.map(|target| (n, target, true)))
+        })
         .collect();
-    if images.fetched_depth.is_empty() && stored_depth.is_empty() {
+    if images.fetched_depth.is_empty()
+        && images.fetched_stencil.is_empty()
+        && stored_depth.is_empty()
+    {
         return Ok((fetched, more, stored));
     }
     let mut held = live_backend()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = held.get_or_insert_with(VulkanBackend::new);
-    let mut fill = |image: &mut orbistoun_gpu::pipeline::DispatchTexels, target| {
-        let (depths, _, extent) = backend
-            .depth_texels(target)
-            .map_err(|e| format!("its depth target could not be read: {e:?}"))?
-            .ok_or("it reaches a depth target no draw here drew")?;
+    // A target a dispatch stores to is made where no draw made it, as a draw would.
+    for &(n, target, _) in &stored_depth {
+        let image = &stored[n];
+        backend
+            .hold_depth_target(target, (image.width, image.height))
+            .map_err(|e| format!("its depth target could not be made: {e:?}"))?;
+    }
+    // A target's depths, or where `stencil` its stencil values, one widened to a word a texel
+    // (D927).
+    let mut fill = |image: &mut orbistoun_gpu::pipeline::DispatchTexels, target, stencil: bool| {
+        let plane = if stencil {
+            "stencil plane"
+        } else {
+            "depth target"
+        };
+        let read = if stencil {
+            backend.stencil_texels(target)
+        } else {
+            backend.depth_texels(target)
+        };
+        let (texels, _, extent) = read
+            .map_err(|e| format!("its {plane} could not be read: {e:?}"))?
+            .ok_or_else(|| format!("it reaches a {plane} no draw here drew"))?;
         if extent != (image.width, image.height) {
             return Err(format!(
-                "it reaches a {}x{} depth target as a {}x{} image",
+                "it reaches a {}x{} {plane} as a {}x{} image",
                 extent.0, extent.1, image.width, image.height
             ));
         }
-        image.texels = depths;
+        image.texels = texels;
         Ok::<(), String>(())
     };
-    for &(slot, target) in &images.fetched_depth {
+    let fetched_planes = (images
+        .fetched_depth
+        .iter()
+        .map(|&(slot, target)| (slot, target, false)))
+    .chain(
+        images
+            .fetched_stencil
+            .iter()
+            .map(|&(slot, target)| (slot, target, true)),
+    );
+    for (slot, target, stencil) in fetched_planes {
         let image = match slot {
             0 => fetched.as_mut(),
             n => more.get_mut(n as usize - 1),
         }
         .ok_or("a depth target's slot is past the images fetched")?;
-        fill(image, target)?;
+        fill(image, target, stencil)?;
     }
-    for (n, target) in stored_depth {
-        fill(&mut stored[n], target)?;
+    for (n, target, stencil) in stored_depth {
+        fill(&mut stored[n], target, stencil)?;
     }
     Ok((fetched, more, stored))
 }
@@ -1045,7 +1072,10 @@ fn write_depths(
         .stored
         .iter()
         .zip(stored)
-        .filter_map(|(image, texels)| image.depth.map(|target| (target, texels)))
+        .filter_map(|(image, texels)| {
+            (image.depth.map(|target| (target, texels, false)))
+                .or_else(|| image.stencil.map(|target| (target, texels, true)))
+        })
         .peekable();
     if targets.peek().is_none() {
         return Ok(());
@@ -1054,10 +1084,13 @@ fn write_depths(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = held.get_or_insert_with(VulkanBackend::new);
-    for (target, texels) in targets {
-        let written = backend
-            .write_depth_texels(target, texels)
-            .map_err(|e| format!("its depth target could not be written: {e:?}"))?;
+    for (target, texels, stencil) in targets {
+        let written = if stencil {
+            backend.write_stencil_texels(target, texels)
+        } else {
+            backend.write_depth_texels(target, texels)
+        }
+        .map_err(|e| format!("its depth target could not be written: {e:?}"))?;
         if !written {
             return Err("it stores to a depth target no draw here drew".to_owned());
         }
@@ -1148,7 +1181,6 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     if number < DUMPED_SUBMISSIONS {
         write_submission(submission, &format!("drawn-{number:02}"));
     }
-    dump_first_into_depth_target(submission);
     keep_submission_before_named_flip(submission);
     let Some((&target, extent)) = submission.targets.iter().next() else {
         tracing::warn!("a submission's draws name no colour target to draw into");
@@ -1197,6 +1229,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
                 "a submission's draws could not run at submit, in {} ms: {why}",
                 started.elapsed().as_millis()
             );
+            note_hung_submission(started.elapsed());
             write_failed_submission(submission);
             return None;
         }
@@ -1612,9 +1645,20 @@ fn keep_sampled(by: &orbistoun_gpu::agc_driver::DrawnBy) {
     }
 }
 
-/// Every buffer `commands` bind for their draws, whole: by command, stage, slot and guest address,
-/// four little-endian words a line after their offset.
+/// The most text a dump's buffer listing holds: past it, each buffer is named without its words. A
+/// world scene binds gigabytes across its draws, and its listing filled the disk on the device
+/// thread for minutes.
+const BUFFERS_LISTING_BYTES: usize = 64 << 20;
+
+/// Every buffer `commands` bind for their draws: by command, stage, slot and guest address, four
+/// little-endian words a line after their offset, whole until [`BUFFERS_LISTING_BYTES`] of text.
 fn buffers_listing(commands: &[orbistoun_gpu::RenderCommand]) -> String {
+    buffers_listing_within(commands, BUFFERS_LISTING_BYTES)
+}
+
+/// [`buffers_listing`] within `budget` bytes of text: a buffer reached past it is named, and its
+/// words are left out.
+fn buffers_listing_within(commands: &[orbistoun_gpu::RenderCommand], budget: usize) -> String {
     let mut listing = String::new();
     for (at, command) in commands.iter().enumerate() {
         let orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } = command else {
@@ -1627,6 +1671,10 @@ fn buffers_listing(commands: &[orbistoun_gpu::RenderCommand]) -> String {
                 buffer.bytes.len(),
                 buffer.base
             );
+            if listing.len() >= budget {
+                let _ = writeln!(listing, "  words left out, the listing being full");
+                continue;
+            }
             for (row, chunk) in buffer.bytes.chunks(16).enumerate() {
                 let words: Vec<String> = chunk
                     .chunks(4)
@@ -2841,6 +2889,20 @@ fn log_execution() {
     }
     report_stepped_aside();
     report_passed_refusals();
+    // Where each thread doing the run's work is, should one never have come back (a deadlock).
+    report_open_work();
+}
+
+/// Says where each thread doing the run's work still is at its end - the span and phase it is inside
+/// - so one that never came back out, a deadlock or a wait without end, is found where it waits.
+fn report_open_work() {
+    for (thread, span, phase) in perf::open_work() {
+        tracing::info!(
+            "at the end, thread {thread} was inside {}{}",
+            span.unwrap_or("no span"),
+            phase.map_or_else(String::new, |phase| format!(", in phase {phase}"))
+        );
+    }
 }
 
 /// Lists the dispatches and draws the run passed over at the host's refusal (D896), each reason
@@ -2976,27 +3038,6 @@ fn report_released_labels() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
-
-    /// A submission's depth targets are the ones its `SetRenderTargets` name, each once, in order:
-    /// what decides which submissions a run dumps by depth target.
-    #[test]
-    fn a_submission_s_depth_targets_are_named_once_in_order() {
-        use orbistoun_gpu::{RenderCommand, ResourceId};
-        let set = |depth| RenderCommand::SetRenderTargets {
-            colour: vec![ResourceId(1)],
-            depth,
-        };
-        let commands = [
-            set(Some(ResourceId(0x20))),
-            set(None),
-            set(Some(ResourceId(0x10))),
-            set(Some(ResourceId(0x20))),
-        ];
-        assert_eq!(
-            super::depth_targets_drawn(&commands),
-            [ResourceId(0x20), ResourceId(0x10)]
-        );
-    }
 
     /// The run's host time per flip is each phase's milliseconds over its flips, costliest first,
     /// with the flips and the rate they came at: what a frame-bound stretch spends where, read at the
@@ -3151,6 +3192,31 @@ mod tests {
                 "command 1, Fragment slot 0, 20 bytes at 0x74001000\n",
                 "  +0x0000  00000000 00000001 00000002 00000003\n",
                 "  +0x0010  00000004\n",
+            )
+        );
+    }
+
+    /// Past its budget a listing names each further buffer and leaves its words out, so a dump of a
+    /// scene binding gigabytes stays small.
+    #[test]
+    fn a_full_listing_names_buffers_without_their_words() {
+        use orbistoun_gpu::{DrawBuffer, RenderCommand, ShaderStage};
+        let bind = |base| RenderCommand::BindDrawBuffers {
+            stage: ShaderStage::Vertex,
+            buffers: vec![DrawBuffer {
+                bytes: vec![0; 16].into(),
+                hash: 0,
+                base,
+            }],
+        };
+        let listing = super::buffers_listing_within(&[bind(0x1000), bind(0x2000)], 1);
+        assert_eq!(
+            listing,
+            concat!(
+                "command 0, Vertex slot 0, 16 bytes at 0x1000\n",
+                "  words left out, the listing being full\n",
+                "command 1, Vertex slot 0, 16 bytes at 0x2000\n",
+                "  words left out, the listing being full\n",
             )
         );
     }

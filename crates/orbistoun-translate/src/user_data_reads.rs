@@ -389,10 +389,11 @@ mod tests {
         );
     }
 
-    /// An instruction the tables do not name may write anything: `s_cmov_b32 s6, s7`.
+    /// An instruction the tables do not name may write anything: SOP1's reserved opcode 1 over
+    /// `s6` and `s7`.
     #[test]
     fn an_unnamed_instruction_bounds_nothing() {
-        assert_eq!(mask(&[0xbe86_0507], 12, (0, 125)), None);
+        assert_eq!(mask(&[0xbe86_0107], 12, (0, 125)), None);
     }
 
     /// A scalar load's offset register, which no operand names, counts: `s_load_dwordx4 s[0:3],

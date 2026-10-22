@@ -164,9 +164,12 @@ pub fn scalar_prefix_explained(
     Ok(merged)
 }
 
-/// How many paths [`scalar_prefix`] follows to one access before it gives up: six branches on the
-/// execution mask or an unknown condition mask before it, each both ways, and one more.
-const MOST_PATHS: usize = 1 << 7;
+/// How many paths [`scalar_prefix`] follows to one access before it gives up: eleven branches on the
+/// execution mask or an unknown condition mask before it, each both ways, and one more. Each path is
+/// a scalar run of the prefix alone, so following them costs far less than the run of every wave a
+/// dispatch otherwise needs: Grand Theft Auto V's index-to-vertex program, past seven, spent 85 ms a
+/// group that way.
+const MOST_PATHS: usize = 1 << 12;
 
 /// Where one path through a prefix ended.
 enum Path {
@@ -517,7 +520,7 @@ fn step_prefix(
                 }
                 model.catch_up();
             }
-            _ => model.forget_vector_writes(instruction, name),
+            _ => model.step_vector(instruction, name),
         }
     }
     Ok(Step::Next)
@@ -941,6 +944,8 @@ fn spirv_float_compare(opcode: u16, a: f32, b: f32) -> Option<bool> {
         op::FORD_GREATER_THAN_EQUAL => holds(&[Greater, Equal]),
         op::FUNORD_EQUAL => unordered || holds(&[Equal]),
         op::FUNORD_NOT_EQUAL => unordered || holds(&[Less, Greater]),
+        op::ORDERED => !unordered,
+        op::UNORDERED => unordered,
         op::FUNORD_LESS_THAN => unordered || holds(&[Less]),
         op::FUNORD_GREATER_THAN => unordered || holds(&[Greater]),
         op::FUNORD_LESS_THAN_EQUAL => unordered || holds(&[Less, Equal]),
@@ -1643,6 +1648,10 @@ struct Concrete<'a> {
     modelled: u32,
     /// Where the program was loaded, for `s_getpc_b64` (D842).
     program_address: Option<u64>,
+    /// Scalars `v_writelane_b32` spilled into a vector register at a known lane, by register and
+    /// lane, [`None`] where the scalar was unknown: what a prefix, which keeps no vectors, reads
+    /// back with `v_readlane_b32`.
+    spills: std::collections::BTreeMap<(u32, u32), Option<u32>>,
     condition: Option<u32>,
     instructions: usize,
     types: [Id; 6],
@@ -1684,6 +1693,7 @@ impl<'a> Concrete<'a> {
             vertices: 0,
             modelled: 64,
             program_address: None,
+            spills: std::collections::BTreeMap::new(),
             condition: None,
             instructions,
             types,
@@ -1893,6 +1903,7 @@ impl<'a> Concrete<'a> {
             op::CONVERT_F_TO_S => Value::Word(u32::from_ne_bytes(
                 float_to_signed(float(0)?)?.to_ne_bytes(),
             )),
+            op::IS_NAN => Value::Bool(float(0)?.is_nan()),
             _ => Value::Bool(spirv_float_compare(opcode, float(0)?, float(1)?)?),
         })
     }
@@ -2230,6 +2241,82 @@ impl<'a> Concrete<'a> {
         }
     }
 
+    /// A prefix's step through an instruction that is not scalar work: a scalar spilled into a
+    /// lane and read back, as a compiler short of scalar registers keeps them, followed where the
+    /// lane is known though the prefix keeps no vectors; anything else forgets what it writes.
+    fn step_vector(&mut self, instruction: &Instruction, name: &str) {
+        match name {
+            "v_writelane_b32" => self.spill(instruction),
+            "v_readlane_b32" if self.reload(instruction) => {}
+            _ => {
+                self.overwrite_spills(instruction, name);
+                self.forget_vector_writes(instruction, name);
+            }
+        }
+    }
+
+    /// `v_writelane_b32 v, s, lane`: `s` kept as `v`'s value at `lane`, where the lane is known;
+    /// where it is not, every lane of `v` kept so far is forgotten.
+    fn spill(&mut self, instruction: &Instruction) {
+        let [Operand::Vector(register), value, lane] = instruction.operands.as_slice() else {
+            return;
+        };
+        let register = u32::from(*register);
+        let value = self.known(instruction, value);
+        match self.known(instruction, lane) {
+            Some(lane) => {
+                self.spills
+                    .insert((register, lane % self.width.max(1)), value);
+            }
+            None => self.spills.retain(|(spilled, _), _| *spilled != register),
+        }
+    }
+
+    /// `v_readlane_b32 s, v, lane` from a lane [`Concrete::spill`] kept: `s` takes what was
+    /// spilled there. False, and nothing written, where the lane or its spill is not known.
+    fn reload(&mut self, instruction: &Instruction) -> bool {
+        let [
+            Operand::Scalar(destination),
+            Operand::Vector(register),
+            lane,
+        ] = instruction.operands.as_slice()
+        else {
+            return false;
+        };
+        let Some(lane) = self.known(instruction, lane) else {
+            return false;
+        };
+        let at = (u32::from(*register), lane % self.width.max(1));
+        let Some(&value) = self.spills.get(&at) else {
+            return false;
+        };
+        match self.scalars.get_mut(usize::from(*destination)) {
+            Some(slot) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets the spills in the vector registers an instruction other than a lane write writes:
+    /// its destination, as wide as a pair or as many as a load fills.
+    fn overwrite_spills(&mut self, instruction: &Instruction, name: &str) {
+        let Some(Operand::Vector(first)) = instruction.operands.first() else {
+            return;
+        };
+        let first = u32::from(*first);
+        let written = first..first + written_vectors(name).max(2);
+        self.spills
+            .retain(|(register, _), _| !written.contains(register));
+    }
+
+    /// An operand's value where it is known.
+    fn known(&mut self, instruction: &Instruction, operand: &Operand) -> Option<u32> {
+        let id = self.read_source(instruction, operand, 0).ok()?;
+        self.word(id)
+    }
+
     fn forget_vector_writes(&mut self, instruction: &Instruction, name: &str) {
         if name.starts_with("v_cmp")
             && !name.starts_with("v_cmpx")
@@ -2240,7 +2327,12 @@ impl<'a> Concrete<'a> {
         // The destination, a scalar where the instruction reads a lane into one; and a second, a
         // carry-out or a pre-scale flag, only where the operand layout says the instruction has
         // one - otherwise the second operand is a source, read and not written.
-        let written = if model::has_scalar_destination(self.encodings, instruction) {
+        // A short compare names only its two sources: what it writes is the condition or execution
+        // mask, below, so its first operand - a scalar compared, as Grand Theft Auto V's
+        // `v_cmpx_gt_i32_e32 s26, v68` - is read, not written.
+        let written = if name.starts_with("v_cmp") && name.ends_with("_e32") {
+            0
+        } else if model::has_scalar_destination(self.encodings, instruction) {
             2
         } else {
             1
@@ -2328,6 +2420,24 @@ fn mask_code(name: &str) -> Option<usize> {
 }
 
 impl Model for Concrete<'_> {
+    // GLSL.std.450's FMin and FMax, which a three-way float min/max and its median are spelled in,
+    // computed here as the hardware answers them: the non-NaN operand where one is a NaN. Any other
+    // extended operation is unknown, as before.
+    fn f32_ext_binary(&mut self, instruction: u32, lhs: Id, rhs: Id) -> Id {
+        const FMIN: u32 = 37;
+        const FMAX: u32 = 40;
+        let pair = self
+            .word(lhs)
+            .zip(self.word(rhs))
+            .map(|(a, b)| (f32::from_bits(a), f32::from_bits(b)));
+        let value = pair.and_then(|(a, b)| match instruction {
+            FMIN => Some(a.min(b).to_bits()),
+            FMAX => Some(a.max(b).to_bits()),
+            _ => None,
+        });
+        self.hold(value)
+    }
+
     fn encodings(&self) -> &EncodingTable {
         self.encodings
     }
@@ -2616,6 +2726,90 @@ mod tests {
         assert_eq!(unknowns[5], None);
         assert_eq!(unknowns[6], None);
         assert_eq!(unknowns[9], None, "never set, by nothing");
+    }
+
+    /// A short compare reads the scalar it names: `v_cmpx_gt_i32_e32 s4, v0` before a load through
+    /// `s[4:7]` leaves `s4` as the user data put it, the execution mask alone written.
+    #[test]
+    fn a_short_compare_leaves_the_scalar_it_compares() {
+        use super::scalar_prefix_explained;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("v_cmpx_gt_i32_e32")
+            .expect("v_cmpx_gt_i32_e32");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // v_cmpx_gt_i32_e32 s4, v0; s_buffer_load_dword s0, s[4:7], 0x0; s_endpgm.
+        let words = [
+            encoding.value | (opcode << encoding.opcode.shift) | 4,
+            0xf420_0002,
+            0xfa00_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[1].offset;
+        let (scalars, _) = scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (4, &[1, 2, 3, 4]),
+            &[],
+            &mut |_| None,
+        )
+        .expect("evaluated")
+        .expect("reached");
+        assert_eq!(scalars[4], Some(1), "s4 read, not written");
+    }
+
+    /// A scalar spilled into a lane and read back keeps its value through a prefix: `v_writelane_b32
+    /// v0, s5, 16; v_readlane_b32 s4, v0, 16` before a load through `s[4:7]` gives `s4` what `s5`
+    /// held, as Grand Theft Auto V's vertex shader at `0x74005ab92800` rebuilds a vertex buffer's
+    /// descriptor from the lanes of `v19`.
+    #[test]
+    fn a_spilled_scalar_reads_back_through_a_prefix() {
+        use super::scalar_prefix_explained;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let head = |name: &str| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift)
+        };
+        let sixteen = 128 + 16;
+        // v_writelane_b32 v0, s5, 16; v_readlane_b32 s4, v0, 16; s_buffer_load_dword s0, s[4:7],
+        // 0x0; s_endpgm.
+        let words = [
+            head("v_writelane_b32"),
+            5 | (sixteen << 9),
+            head("v_readlane_b32") | 4,
+            256 | (sixteen << 9),
+            0xf420_0002,
+            0xfa00_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[2].offset;
+        let (scalars, _) = scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (4, &[1, 2, 3, 4]),
+            &[],
+            &mut |_| None,
+        )
+        .expect("evaluated")
+        .expect("reached");
+        assert_eq!(scalars[4], Some(2), "s5's value, through lane 16 of v0");
     }
 
     /// Every opcode a program holds that the tables give no name, once each with where it first

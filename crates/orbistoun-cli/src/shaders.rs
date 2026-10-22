@@ -128,11 +128,57 @@ fn translates(
     Err(refused)
 }
 
+/// Prints where a pixel shader's translation found each texture's image and sampler - a table offset
+/// or a user-data word, and the table - as a draw then binds from: the place to look when a draw's
+/// sampler is not named. Translated with all 32 user-data words a pixel shader can be seeded with,
+/// and `DX10_CLAMP` set.
+fn print_texture_sources(
+    name: &str,
+    decoded: &orbistoun_shader::Decode,
+    encodings: &orbistoun_shader::EncodingTable,
+) {
+    use orbistoun_translate::Width;
+    use orbistoun_translate::wavefront::{
+        MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+    };
+    // With the clamp mode a draw sets, as every one of Grand Theft Auto V's does: where the sources
+    // are, not how a NaN clamps, is the question.
+    let user_data = UserData {
+        count: 32,
+        dx10_clamp: Some(true),
+        ..UserData::default()
+    };
+    match translate_with_user_data(
+        decoded,
+        encodings,
+        Width::Wave64,
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        user_data,
+    ) {
+        Ok((_, _, (textures, _))) => {
+            for source in textures {
+                println!(
+                    "{name}: slot {} image table offset {:?} user data {:?}; sampler table offset {:?} user data {:?}; table {:?}; compare {}",
+                    source.slot,
+                    source.table_offset,
+                    source.user_data,
+                    source.sampler_offset,
+                    source.sampler_user_data,
+                    source.table,
+                    source.compare
+                );
+            }
+        }
+        Err(why) => println!("{name}: not translated as a pixel shader: {why}"),
+    }
+}
+
 /// Analyses every shader binary in a directory.
 ///
 /// A shim over `orbistoun_shader::report`, so this command and the run report cannot disagree
 /// (D034).
-pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<()> {
+pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>, sources: bool) -> Result<()> {
     use orbistoun_shader::corpus::is_shader;
     use orbistoun_shader::{
         CorpusCoverage, EncodingTable, MnemonicTable, OperandTable, decode, report,
@@ -193,6 +239,9 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>) -> Result<
                 })
         };
         let decoded = decode(&bytes, &encodings, &operands);
+        if sources {
+            print_texture_sources(name, &decoded, &encodings);
+        }
         let verdict = translates(&decoded, &encodings);
         if let Err(reasons) = &verdict {
             refusals.push((name.to_owned(), reasons.clone()));

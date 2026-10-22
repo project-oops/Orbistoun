@@ -153,6 +153,12 @@ pub trait CpMemory {
     fn run_dispatch(&mut self, _dispatch: &Dispatch<'_>) -> bool {
         false
     }
+    /// Where the dispatch [`Self::run_dispatch`] last refused is polled, taken once: what it reads
+    /// may be written after it was read, so the queue polls the dispatch as it polls a memory wait,
+    /// for a while (D945). `None` for a refusal that stands.
+    fn unready_dispatch(&mut self) -> Option<u64> {
+        None
+    }
     /// The samples the draws carried out so far passed while they counted them (D827): what the
     /// depth block's z-pass counters stand at for a `ZPASS_DONE` to write. `None` when nothing
     /// counts them exactly, which leaves the event as a stop.
@@ -224,6 +230,14 @@ fn dispatch_direct(
         initiator,
     };
     if !memory.run_dispatch(&dispatch) {
+        // Perhaps read before what it reads was written: tried again as the queue polls (D945).
+        if let Some(address) = memory.unready_dispatch() {
+            return Err(Stop::Wait {
+                address,
+                reference: 1,
+                observed: 0,
+            });
+        }
         return Err(Stop::NeedsGpu);
     }
     result.dispatches += 1;

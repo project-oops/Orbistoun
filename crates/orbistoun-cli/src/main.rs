@@ -791,6 +791,10 @@ enum Command {
         /// Show only the top N blockers. Omit for the whole list.
         #[arg(long)]
         top: Option<usize>,
+        /// Also list, for each shader that translates as a pixel shader, where the translation
+        /// found each texture's image and sampler: what a draw then binds from.
+        #[arg(long)]
+        sources: bool,
     },
     /// Count the library's guest compute programs by what keeps one invocation per lane from
     /// running them exactly: a whole lane mask, another lane's value, the local data share, a
@@ -1202,7 +1206,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::Exports { path, matching } => {
             cmd_exports(service, &path, matching.as_deref())?;
         }
-        Command::Shaders { path, top } => cmd_shaders(&path, top)?,
+        Command::Shaders { path, top, sources } => cmd_shaders(&path, top, sources)?,
         Command::Lanes => cmd_lanes()?,
         Command::Verify { path } => cmd_verify(service, &path)?,
         Command::Report { path } => cmd_report(service, &path)?,

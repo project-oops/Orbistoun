@@ -155,6 +155,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "the scalar unsigned orderings, which no compiled fixture produces",
     ),
     (
+        "scalar-bits",
+        "a scalar bit set, a signed scalar maximum and a vector leading-zero count",
+    ),
+    (
         "vector-add3",
         "the three-source unsigned add a streamout pass addresses its store with",
     ),

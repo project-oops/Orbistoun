@@ -54,6 +54,22 @@ pub fn descriptor_extent_to(
     if descriptor.unsupported {
         return Err("a buffer descriptor asking for swizzled or thread-indexed addressing (D733)");
     }
+    // Which descriptor leaves its reads unbounded, said once for each, so its mode is read rather
+    // than guessed.
+    let unbounded = || {
+        static SAID: std::sync::Mutex<Vec<[u32; 4]>> = std::sync::Mutex::new(Vec::new());
+        if let Ok(mut said) = SAID.lock()
+            && said.len() < 16
+            && !said.contains(&words)
+        {
+            said.push(words);
+            tracing::info!(
+                "a buffer descriptor leaves its reads unbounded: words {words:#010x?}, out-of-bounds mode {}, {reads:?}",
+                (words[3] >> 28) & 3
+            );
+        }
+        UNBOUNDED
+    };
     let (stride, records) = (u64::from(descriptor.stride), u64::from(descriptor.records));
     // A scalar buffer load reads each word within the record count, which is in bytes with no
     // stride and in strides with one (the translator's `scalar_buffer_load`; radeonsi
@@ -88,15 +104,17 @@ pub fn descriptor_extent_to(
         // table the descriptor names, which the program is taken to read within (assumed).
         1 if records == 0 => 0,
         1 if stride == 0 => reach.map_or(records, |reach| reach.min(records)),
-        1 => last_record + reach.ok_or(UNBOUNDED)?,
+        // With a stride and no reach known for the offset, the program is taken to read within its
+        // record, as a vertex fetch does: through the last record's stride (D946, assumed).
+        1 => last_record + reach.unwrap_or(stride),
         // Raw: the offset and the access's width within the record count in bytes, the index
         // unchecked.
-        3 if reads.indexed && stride != 0 => return Err(UNBOUNDED),
+        3 if reads.indexed && stride != 0 => return Err(unbounded()),
         3 => reach.map_or(records, |reach| reach.min(records)),
         // Only a record count of zero is out of bounds.
         _ if records == 0 => 0,
-        _ if reads.indexed && stride != 0 => return Err(UNBOUNDED),
-        _ => reach.ok_or(UNBOUNDED)?,
+        _ if reads.indexed && stride != 0 => return Err(unbounded()),
+        _ => reach.ok_or_else(unbounded)?,
     };
     Ok(scalar.max(vector))
 }
@@ -1912,12 +1930,16 @@ mod tests {
             descriptor_extent(words(STRUCTURED_WITH_OFFSET), vector(Some(12), true)),
             Ok(9 * 24 + 12)
         );
-        // An offset in a register is bounded by the stride only where the mode checks it.
+        // An offset in a register is bounded by the stride where the mode checks it, and taken to
+        // lie within its record where it does not (D946).
         assert_eq!(
             descriptor_extent(words(STRUCTURED_WITH_OFFSET), vector(None, true)),
             Ok(9 * 24 + 23 + 16)
         );
-        assert!(descriptor_extent(words(STRUCTURED), vector(None, true)).is_err());
+        assert_eq!(
+            descriptor_extent(words(STRUCTURED), vector(None, true)),
+            Ok(10 * 24)
+        );
     }
 
     /// An indexed fetch the draw's ids bound reaches through their last record, and no further

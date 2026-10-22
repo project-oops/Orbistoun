@@ -897,6 +897,8 @@ mod tests {
                     position_vectors: None,
                     point_size: None,
                     saturated: [[false; 2]; crate::wavefront::MAX_TEXTURES],
+                    mirrored: [[false; 2]; crate::wavefront::MAX_TEXTURES],
+                    compared: [0; crate::wavefront::MAX_TEXTURES],
                     local_words: None,
                     program_address: None,
                     integer_targets: 0,
@@ -1532,12 +1534,13 @@ mod tests {
         assert!(translated.is_ok(), "{:?}", translated.err());
     }
 
-    /// A pixel shader reading up to sixteen textures from its descriptor table translates, each at
-    /// its own slot and offset (D690): PPSA02664's samples three, PPSA03416's more than four. A
-    /// seventeenth is refused by name, since sixteen bindings exist. Each descriptor is loaded into
+    /// A pixel shader reading up to thirty-two textures from its descriptor table translates, each
+    /// at its own slot and offset (D690): PPSA02664's samples three, PPSA03416's more than four,
+    /// Grand Theft Auto V's shadow shaders more than sixteen. A thirty-third is refused by name,
+    /// since thirty-two bindings exist. Each descriptor is loaded into
     /// the same registers just before its sample, as ACO reuses them.
     #[test]
-    fn up_to_sixteen_textures_from_the_table_translate_and_a_seventeenth_is_refused() {
+    fn up_to_thirty_two_textures_from_the_table_translate_and_a_thirty_third_is_refused() {
         use crate::wavefront::{MeshPrimitive, Stage, UserData};
         let (table, operands) = tables();
         let fragment = |count: u32| {
@@ -1564,8 +1567,8 @@ mod tests {
                 UserData::default(),
             )
         };
-        for count in [3, 4, 16] {
-            let translated = fragment(count).expect("up to sixteen textures translate");
+        for count in [3, 4, 16, 17, 32] {
+            let translated = fragment(count).expect("up to thirty-two textures translate");
             assert_eq!(
                 translated
                     .textures
@@ -1575,8 +1578,11 @@ mod tests {
                 (0..count).map(|n| (n, Some(0x40 * n))).collect::<Vec<_>>()
             );
         }
-        let refused = fragment(17).expect_err("refused").to_string();
-        assert!(refused.contains("more than sixteen textures"), "{refused}");
+        let refused = fragment(33).expect_err("refused").to_string();
+        assert!(
+            refused.contains("more than thirty-two textures"),
+            "{refused}"
+        );
     }
 
     /// GTA V's intro video shader (`0x740043183c00`), as the title ships it.
@@ -1838,6 +1844,215 @@ mod tests {
         );
     }
 
+    /// A compare sample whose image is still in the user data and whose sampler was loaded from a
+    /// table the user data names finds its sampler there: Grand Theft Auto V's shadow-sampling
+    /// pixel shaders take the image from `s[16:23]` and load the sampler with `s_load_dwordx4 s80,
+    /// s[28:29], 0x0`.
+    #[test]
+    fn a_user_data_image_finds_its_table_sampler() {
+        use crate::wavefront::{MeshPrimitive, Stage, TableBase, TableWord, UserData};
+        let (table, operands) = tables();
+        let words = [
+            0xf408_140e, // s_load_dwordx4 s[80:83], s[28:29], 0x0
+            0xfa00_0000,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            // image_sample_c_lz v28, v[33:35], s[16:23], s[80:83] dmask:0x1
+            0xf0bc_010a,
+            0x0284_1c21,
+            0xbf81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 30,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let sampled = translated.textures.first().copied().expect("a texture");
+        assert_eq!(
+            (
+                sampled.user_data,
+                sampled.sampler_offset,
+                sampled.table,
+                sampled.compare
+            ),
+            (
+                Some(16),
+                Some(0),
+                TableBase {
+                    low: TableWord::UserData(28),
+                    high: TableWord::UserData(29),
+                },
+                true
+            )
+        );
+    }
+
+    /// A sampler register used for another descriptor first and loaded again as the sampler before
+    /// the sample is the sampler that load put there: Grand Theft Auto V's shadow-sampling pixel
+    /// shaders load a constant buffer into `s[88:91]` from the table's 0x60, read it, then load the
+    /// sampler into the same registers from its 0x0.
+    #[test]
+    fn a_reloaded_sampler_register_is_the_last_load() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let words = [
+            0xf408_160e, // s_load_dwordx4 s[88:91], s[28:29], 0x60
+            0xfa00_0060,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xf420_002c, // s_buffer_load_dword s0, s[88:91], 0x0
+            0xfa00_0000,
+            0xf408_160e, // s_load_dwordx4 s[88:91], s[28:29], 0x0
+            0xfa00_0000,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            // image_sample_c_lz v27, v[14:16], s[16:23], s[88:91] dmask:0x1
+            0xf0bc_010a,
+            0x02c4_1b0e,
+            0xbf81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 30,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let sampled = translated.textures.first().copied().expect("a texture");
+        assert_eq!(
+            (sampled.user_data, sampled.sampler_offset),
+            (Some(16), Some(0))
+        );
+    }
+
+    /// A sampler whose registers held other values first, loaded across a loop from the sample and
+    /// overwritten after it, is still the load that reached the sample: Grand Theft Auto V's shadow
+    /// shader at `0x74005ad10e00` fills `s[32:47]` from a buffer, loads its sampler into `s[40:43]`
+    /// from the table's 0x60 and its image into `s[56:63]` from 0x0, loops, compares, and loads over
+    /// `s[32:47]` again.
+    #[test]
+    fn a_sampler_loaded_over_values_across_a_loop_is_traced() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let words = [
+            0xf408_050e, // s_load_dwordx4 s[20:23], s[28:29], 0x40
+            0xfa00_0040,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xf430_080a, // s_buffer_load_dwordx16 s[32:47], s[20:23], 0x0
+            0xfa00_0000,
+            0xf408_0a0e, // s_load_dwordx4 s[40:43], s[28:29], 0x60
+            0xfa00_0060,
+            0xf40c_0e0e, // s_load_dwordx8 s[56:63], s[28:29], 0x0
+            0xfa00_0000,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0x8000_8100, // s_add_u32 s0, s0, 1
+            0xbf0a_8400, // s_cmp_lt_u32 s0, 4
+            0xbf85_fffd, // s_cbranch_scc1 back to the add
+            // image_sample_c_lz v52, [v12, v13, v14], s[56:63], s[40:43] dmask:0x1, its third
+            // word the non-sequential addresses
+            0xf0bc_010a,
+            0x014e_340c,
+            0x0000_0e0d,
+            0xf408_0e0e, // s_load_dwordx4 s[56:59], s[28:29], 0xa0
+            0xfa00_00a0,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xf430_081c, // s_buffer_load_dwordx16 s[32:47], s[56:59], 0x2b0
+            0xfa00_02b0,
+            0xbf81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Lane,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 30,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let sampled = translated.textures.first().copied().expect("a texture");
+        assert_eq!(
+            (sampled.table_offset, sampled.sampler_offset),
+            (Some(0), Some(0x60))
+        );
+    }
+
+    /// A sampler loaded more than once is still traced across a loop between its last load and the
+    /// sample, where the loop's body leaves its registers alone: Grand Theft Auto V's shadow pixel
+    /// shaders reload their compare sampler, then run a waterfall loop over a vector of
+    /// descriptors before sampling.
+    #[test]
+    fn a_reloaded_sampler_is_traced_across_a_loop_that_leaves_it() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let words = [
+            0xf408_0a0e, // s_load_dwordx4 s[40:43], s[28:29], 0x20
+            0xfa00_0020,
+            0xf40c_0e0e, // s_load_dwordx8 s[56:63], s[28:29], 0x0
+            0xfa00_0000,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xf408_0a0e, // s_load_dwordx4 s[40:43], s[28:29], 0x60
+            0xfa00_0060,
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0x8000_8100, // s_add_u32 s0, s0, 1
+            0xbf0a_8400, // s_cmp_lt_u32 s0, 4
+            0xbf85_fffd, // s_cbranch_scc1 back to the add
+            // image_sample_c_lz v52, [v12, v13, v14], s[56:63], s[40:43] dmask:0x1
+            0xf0bc_010a,
+            0x014e_340c,
+            0x0000_0e0d,
+            0xbf81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Lane,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 30,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let offsets: Vec<_> = translated
+            .textures
+            .iter()
+            .map(|t| (t.table_offset, t.sampler_offset))
+            .collect();
+        assert!(
+            offsets.contains(&(Some(0), Some(0x60))),
+            "the sample after the loop reads the sampler last loaded: {offsets:?}"
+        );
+    }
+
     /// A descriptor the program copied out of its user data before sampling is still read from
     /// there: PPSA28061's notice-screen pixel shader moves its image descriptor from `s[6:13]` to
     /// `s[20:27]` and its sampler from `s[14:17]` to `s[8:11]` with `s_mov_b64`, then samples.
@@ -1943,7 +2158,8 @@ mod tests {
             assert!(decoded.is_trustworthy());
             translate(&decoded, &table, Strategy::default()).map_err(|e| e.to_string())
         };
-        let dpp = outcome([0x7e00_02fa, 0x0000_00ff]).expect_err("DPP refused");
+        // A DPP word whose control, 0x100, the instruction set leaves reserved.
+        let dpp = outcome([0x7e00_02fa, 0xff01_00ff]).expect_err("DPP refused");
         assert!(dpp.contains("SDWA or DPP"), "{dpp}");
         let byte = outcome([0x1000_00f9, 0x0006_0600]).expect_err("a byte of a float refused");
         assert!(byte.contains("selects part of a register"), "{byte}");

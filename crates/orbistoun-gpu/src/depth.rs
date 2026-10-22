@@ -160,6 +160,43 @@ pub fn depth_bases_at(writes: &[RegisterWrite]) -> DepthBases {
     }
 }
 
+/// `DB_DEPTH_SIZE_XY`, byte `0x2801C` (`gfx10.json`): `X_MAX` in bits 13:0 and `Y_MAX` in 29:16,
+/// each the surface's side less one (`ac_descriptors.c:1049`).
+const DB_DEPTH_SIZE_XY: u32 = 0xA007;
+
+/// Whether a draw writes no colour (D941): no colour buffer bound (`CB_COLOR0_INFO`
+/// `COLOR_INVALID`, D779), its target mask clear (`CB_TARGET_MASK`'s `TARGET0_ENABLE`), or the
+/// colour block off (`CB_COLOR_CONTROL.MODE` `CB_DISABLE`, bits 6:4 zero, `gfx10.json`). A shadow
+/// pass leaves an earlier pass's buffer programmed and turns its writes off one of these ways.
+pub(crate) fn writes_no_colour(mut latest: impl FnMut(u32) -> Option<u32>) -> bool {
+    let unbound = latest(crate::registers::CB_COLOR0_INFO)
+        .is_none_or(|info| crate::registers::decode_colour_target_format(info).is_unbound());
+    let masked =
+        latest(crate::registers::CB_TARGET_MASK).is_some_and(|mask| mask.trailing_zeros() >= 4);
+    let disabled = latest(crate::registers::CB_COLOR_CONTROL)
+        .is_some_and(|control| (control >> 4).trailing_zeros() >= 3);
+    unbound || masked || disabled
+}
+
+/// The extent a depth-only draw renders at (D941): the depth surface's, `DB_DEPTH_SIZE_XY`, where
+/// the draw writes no colour (`writes_no_colour`) and the stream wrote the size. [`None`]
+/// otherwise: a draw that writes colour is sized to its colour buffer, as before.
+#[must_use]
+pub fn depth_only_extent(writes: &[RegisterWrite]) -> Option<ColourTargetExtent> {
+    let latest = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    let size = latest(DB_DEPTH_SIZE_XY).filter(|_| writes_no_colour(latest))?;
+    Some(ColourTargetExtent {
+        width: (size & 0x3FFF) + 1,
+        height: (size >> 16 & 0x3FFF) + 1,
+    })
+}
+
 /// The depth target a stream binds, from the latest writes to its registers.
 ///
 /// [`None`] when the stream never sets `DB_Z_INFO`, or sets it to `Z_INVALID`: no depth target is
@@ -212,8 +249,7 @@ pub const fn depth_target_id(target: &DepthTarget) -> ResourceId {
 #[must_use]
 pub fn depth_layer_slices(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<(u32, u32)> {
     let out_cntl = latest(crate::registers::PA_CL_VS_OUT_CNTL)?;
-    let unbound = latest(crate::registers::CB_COLOR0_INFO)
-        .is_none_or(|info| crate::registers::decode_colour_target_format(info).is_unbound());
+    let unbound = writes_no_colour(&mut latest);
     if out_cntl & crate::registers::USE_VTX_RENDER_TARGET_INDX == 0 || !unbound {
         return None;
     }
@@ -791,6 +827,47 @@ mod tests {
             register,
             value,
         }
+    }
+
+    /// A depth-only draw renders at `DB_DEPTH_SIZE_XY`'s extent, each side the field plus one
+    /// (`ac_descriptors.c:1049`); with a colour buffer bound, or the register unwritten, it has none
+    /// of its own (D941).
+    #[test]
+    fn a_depth_only_draw_is_sized_by_its_depth_surface() {
+        use super::depth_only_extent;
+        let size = write(0xA007, 255 | 511 << 16);
+        assert_eq!(
+            depth_only_extent(&[size]),
+            Some(ColourTargetExtent {
+                width: 256,
+                height: 512
+            })
+        );
+        let invalid = write(crate::registers::CB_COLOR0_INFO, 0);
+        assert!(
+            depth_only_extent(&[invalid, size]).is_some(),
+            "COLOR_INVALID"
+        );
+        let bound = write(crate::registers::CB_COLOR0_INFO, 0xA << 2);
+        assert_eq!(
+            depth_only_extent(&[bound, size]),
+            None,
+            "a colour buffer bound"
+        );
+        // GTA V's shadow passes: a 60x67 buffer left bound, its writes switched off.
+        let masked = write(crate::registers::CB_TARGET_MASK, 0);
+        assert!(
+            depth_only_extent(&[bound, masked, size]).is_some(),
+            "mask clear"
+        );
+        let disabled = write(crate::registers::CB_COLOR_CONTROL, 0);
+        assert!(
+            depth_only_extent(&[bound, disabled, size]).is_some(),
+            "CB_DISABLE"
+        );
+        let normal = write(crate::registers::CB_COLOR_CONTROL, 1 << 4);
+        assert_eq!(depth_only_extent(&[bound, normal, size]), None, "CB_NORMAL");
+        assert_eq!(depth_only_extent(&[invalid]), None, "no size written");
     }
 
     /// `DB_Z_INFO`'s `FORMAT` is bits 0:1 of the `ZFormat` enum; the swizzle mode above it does

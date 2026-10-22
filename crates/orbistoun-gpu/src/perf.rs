@@ -41,6 +41,13 @@ macro_rules! span_labels {
             Span::PrepareAgain => $as!("prepare again"),
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
+            Span::LivePipelineWait => $as!("live pipeline: wait"),
+            Span::DrawExecute => $as!("draw: execute"),
+            Span::DrawPendingFrame => $as!("draw: settle pending frame"),
+            Span::FrameFenceWait => $as!("frame: fence wait"),
+            Span::DrawDepthOnly => $as!("draw: depth only"),
+            Span::DeviceAnswerWait => $as!("device: answer wait"),
+            Span::DeviceJob => $as!("device: job"),
             Span::ReadTargetBefore => $as!("run draws: read target"),
             Span::ReadTargetCompare => $as!("read target: compare"),
             Span::ReadTargetEarlier => $as!("read target: earlier"),
@@ -276,10 +283,85 @@ static COUNTED: [AtomicU64; COUNTS] = [const { AtomicU64::new(0) }; COUNTS];
 pub fn measure<T>(phase: Phase, work: impl FnOnce() -> T) -> T {
     #[cfg(feature = "tracy")]
     let _zone = zone(phase.zone());
+    let was = enter(PHASE_SHIFT, phase as u32);
     let started = std::time::Instant::now();
     let out = work();
     add(phase, started.elapsed());
+    leave(PHASE_SHIFT, was);
     out
+}
+
+/// Where in a thread's slot the innermost open span sits (its index plus one, 0 for none), and the
+/// innermost open phase above it.
+const SPAN_SHIFT: u32 = 0;
+const PHASE_SHIFT: u32 = 16;
+
+/// Each thread that has opened a span or a phase, by name, with its slot: what [`open_work`] reads.
+/// A thread registers once; entering and leaving is two stores to its own slot, so a thread that
+/// never comes back out is seen where it is (a deadlock, or a wait that never ends).
+fn open_slots() -> &'static std::sync::Mutex<Vec<(String, std::sync::Arc<AtomicU64>)>> {
+    static SLOTS: std::sync::Mutex<Vec<(String, std::sync::Arc<AtomicU64>)>> =
+        std::sync::Mutex::new(Vec::new());
+    &SLOTS
+}
+
+thread_local! {
+    static SLOT: std::sync::Arc<AtomicU64> = {
+        let slot = std::sync::Arc::new(AtomicU64::new(0));
+        let name = std::thread::current()
+            .name()
+            .map_or_else(|| format!("{:?}", std::thread::current().id()), str::to_owned);
+        if let Ok(mut slots) = open_slots().lock() {
+            slots.push((name, std::sync::Arc::clone(&slot)));
+        }
+        slot
+    };
+}
+
+/// Marks `index` open in this thread's slot at `shift`, answering what was open there before.
+fn enter(shift: u32, index: u32) -> u64 {
+    SLOT.with(|slot| {
+        let held = slot.load(Ordering::Relaxed);
+        let mask = 0xFFFF_u64 << shift;
+        let next = (held & !mask) | (u64::from(index + 1) << shift);
+        slot.store(next, Ordering::Relaxed);
+        held & mask
+    })
+}
+
+/// Puts back what [`enter`] answered at `shift`.
+fn leave(shift: u32, was: u64) {
+    SLOT.with(|slot| {
+        let mask = 0xFFFF_u64 << shift;
+        let held = slot.load(Ordering::Relaxed);
+        slot.store((held & !mask) | was, Ordering::Relaxed);
+    });
+}
+
+/// Each thread inside a span or a phase now, by name, with the innermost of each: where a thread
+/// that never returns is, read at the end of a run.
+#[must_use]
+pub fn open_work() -> Vec<(String, Option<&'static str>, Option<&'static str>)> {
+    let Ok(slots) = open_slots().lock() else {
+        return Vec::new();
+    };
+    slots
+        .iter()
+        .filter_map(|(name, slot)| {
+            let held = slot.load(Ordering::Relaxed);
+            let span = ((held >> SPAN_SHIFT) & 0xFFFF) as usize;
+            let phase = ((held >> PHASE_SHIFT) & 0xFFFF) as usize;
+            let span = span
+                .checked_sub(1)
+                .and_then(|at| Span::ALL.get(at))
+                .map(|span| span.label());
+            let phase = phase
+                .checked_sub(1)
+                .and_then(|at| Phase::ALL.get(at))
+                .map(|phase| phase.label());
+            (span.is_some() || phase.is_some()).then(|| (name.clone(), span, phase))
+        })
+        .collect()
 }
 
 /// Adds `spent` to `phase`.
@@ -400,6 +482,22 @@ pub enum Span {
     CommandProcessor,
     /// Carrying out a submission's draws into its target.
     RunDraws,
+    /// Waiting for the live pipeline, which one thread at a time prepares through: where a thread
+    /// that never gets it is seen waiting.
+    LivePipelineWait,
+    /// Within [`Self::RunDraws`]: the device drawing a run and the frame read back.
+    DrawExecute,
+    /// Within [`Self::RunDraws`]: a frame pending for another target let go of, or written back,
+    /// before a run is drawn.
+    DrawPendingFrame,
+    /// Waiting for the device to finish the work a frame slot holds.
+    FrameFenceWait,
+    /// Within [`Self::RunDraws`]: a run of draws that writes depth alone, a shadow pass.
+    DrawDepthOnly,
+    /// A thread waiting for the device thread to run what it handed over and answer.
+    DeviceAnswerWait,
+    /// The device thread running what another thread handed it.
+    DeviceJob,
     /// Within [`Self::RunDraws`]: what the colour target holds before a run of draws, read or
     /// found unchanged.
     ReadTargetBefore,
@@ -668,7 +766,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 122] = [
+    pub const ALL: [Self; 129] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -676,6 +774,13 @@ impl Span {
         Self::PrepareAgain,
         Self::CommandProcessor,
         Self::RunDraws,
+        Self::LivePipelineWait,
+        Self::DrawExecute,
+        Self::DrawPendingFrame,
+        Self::FrameFenceWait,
+        Self::DrawDepthOnly,
+        Self::DeviceAnswerWait,
+        Self::DeviceJob,
         Self::ReadTargetBefore,
         Self::ReadTargetCompare,
         Self::ReadTargetEarlier,
@@ -870,6 +975,8 @@ pub fn detail() -> bool {
 pub struct SpanGuard {
     span: Span,
     started: Option<std::time::Instant>,
+    /// What was open in this thread's slot before, put back when the guard drops.
+    was: u64,
     /// Its Tracy zone, in a profiler build (D829), ended with the guard.
     #[cfg(feature = "tracy")]
     _zone: Option<tracy_client::Span>,
@@ -890,6 +997,7 @@ impl SpanGuard {
         Self {
             span,
             started: detail().then(std::time::Instant::now),
+            was: enter(SPAN_SHIFT, span as u32),
             #[cfg(feature = "tracy")]
             _zone: zone(span.zone()),
         }
@@ -898,6 +1006,7 @@ impl SpanGuard {
 
 impl Drop for SpanGuard {
     fn drop(&mut self) {
+        leave(SPAN_SHIFT, self.was);
         if let Some(started) = self.started {
             let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
             SPAN_SPENT[self.span as usize].fetch_add(nanos, Ordering::Relaxed);
@@ -910,14 +1019,18 @@ impl Drop for SpanGuard {
 pub fn span<T>(span: Span, work: impl FnOnce() -> T) -> T {
     #[cfg(feature = "tracy")]
     let _zone = zone(span.zone());
+    let was = enter(SPAN_SHIFT, span as u32);
     if !detail() {
-        return work();
+        let out = work();
+        leave(SPAN_SHIFT, was);
+        return out;
     }
     let started = std::time::Instant::now();
     let out = work();
     let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
     SPAN_SPENT[span as usize].fetch_add(nanos, Ordering::Relaxed);
     SPAN_COUNTED[span as usize].fetch_add(1, Ordering::Relaxed);
+    leave(SPAN_SHIFT, was);
     out
 }
 
@@ -935,6 +1048,49 @@ pub fn take_spans() -> [(u64, u64); SPANS] {
 #[cfg(test)]
 mod tests {
     use super::{Count, Phase, Span};
+
+    /// A thread inside a span is seen there by name, with its phase, and leaves no mark once out:
+    /// what a run's end reads of a thread that never came back.
+    #[test]
+    fn a_thread_inside_a_span_is_seen_there() {
+        let (inside, release) = (
+            std::sync::Arc::new(std::sync::Barrier::new(2)),
+            std::sync::Arc::new(std::sync::Barrier::new(2)),
+        );
+        let (seen, done) = (
+            std::sync::Arc::clone(&inside),
+            std::sync::Arc::clone(&release),
+        );
+        let thread = std::thread::Builder::new()
+            .name("open-span-probe".to_owned())
+            .spawn(move || {
+                super::measure(Phase::Submit, || {
+                    super::span(Span::QueueFull, || {
+                        seen.wait();
+                        done.wait();
+                    });
+                });
+            })
+            .expect("spawned");
+        inside.wait();
+        let open = super::open_work();
+        assert!(
+            open.contains(&(
+                "open-span-probe".to_owned(),
+                Some(Span::QueueFull.label()),
+                Some(Phase::Submit.label())
+            )),
+            "{open:?}"
+        );
+        release.wait();
+        thread.join().expect("joined");
+        assert!(
+            !super::open_work()
+                .iter()
+                .any(|(name, _, _)| name == "open-span-probe"),
+            "nothing open once out"
+        );
+    }
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
     /// The tests that [`super::take`] share its global totals, which a take resets, so they run

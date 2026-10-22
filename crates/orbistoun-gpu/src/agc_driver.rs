@@ -598,6 +598,18 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
                 .map_or_else(String::new, |access| format!(": {access}"))
         ));
     }
+    // A draw that would run the shader bound before it first: what its textures fail to bind is
+    // that other shader's, and says nothing of its own.
+    if report.unshaded_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) have a stage whose shader was not prepared, and would run the ",
+                "shader bound before them{}"
+            ),
+            report.unshaded_draws,
+            shader_failures(submission)
+        ));
+    }
     if report.unbound_textures > 0 {
         return Some(format!(
             concat!(
@@ -611,16 +623,6 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
                 .map_or_else(String::new, |first| format!(" - {first}"))
         ));
     }
-    if report.unshaded_draws > 0 {
-        return Some(format!(
-            concat!(
-                "{} draw(s) have a stage whose shader was not prepared, and would run the ",
-                "shader bound before them{}"
-            ),
-            report.unshaded_draws,
-            shader_failures(submission)
-        ));
-    }
     if let (refused @ 1.., why) = &report.unbound_buffers {
         return Some(format!(
             "{refused} draw(s) read through a buffer that could not be bound: {}",
@@ -628,6 +630,20 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
         ));
     }
     None
+}
+
+/// Why a submission's colour target is compressed in a way not modelled, or `None`.
+fn unmodelled_dcc(submission: &Submission) -> Option<String> {
+    let dcc = submission.colour_target_dcc?;
+    let why = crate::dcc::unsupported(
+        submission.colour_target_tiling,
+        dcc.two_dimensional,
+        dcc.single_sample,
+    )?;
+    Some(format!(
+        "its colour target uses {why}, which is not modelled: slice {} of 0..={}, {}x{}, {} level(s), keys at {:#x}",
+        dcc.slices.0, dcc.slices.1, dcc.extent.width, dcc.extent.height, dcc.levels, dcc.dcc.base
+    ))
 }
 
 /// The first draw segment a run refused, as prepared, so the worker can list its commands beside
@@ -723,9 +739,11 @@ impl GuestCp<'_> {
     ) -> Result<Vec<(u32, u32)>, String> {
         let walked = crate::packet::walk(segment.stream);
         let writes = {
-            let live = live_pipeline()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
+                live_pipeline()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
             let pipeline = live.as_ref().ok_or("no pipeline is live")?;
             pipeline
                 .writes_as_submitted(
@@ -761,9 +779,11 @@ impl GuestCp<'_> {
     ) -> Result<(), String> {
         let bytes = segment_stream(segment);
         let prepared = {
-            let mut live = live_pipeline()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
+                live_pipeline()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
             // The registers as submitted: the tables read then, not what the guest has since
             // written to them.
@@ -840,6 +860,22 @@ impl GuestCp<'_> {
         let fill = match crate::dcc::classify(&keys) {
             crate::dcc::Keys::Uncompressed => return Ok(()),
             crate::dcc::Keys::Clear0000 => Some(0),
+            // Every block its first texel: expanded in place, block by block.
+            crate::dcc::Keys::ClearSingle => {
+                let span = usize::try_from(layout.chain_bytes(extent.width, extent.height, levels))
+                    .map_err(|_| "its surface is larger than this host addresses".to_owned())?;
+                let mut blocks = cp::CpMemory::read(self, surface, span)
+                    .ok_or("its DCC blocks are not readable guest memory")?;
+                crate::dcc::expand_cleared_to_single(&mut blocks, 1 << layout.texel_log2());
+                let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
+                return if cp::CpMemory::write(self, surface, &blocks)
+                    && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
+                {
+                    Ok(())
+                } else {
+                    Err("its DCC blocks cleared to single values could not be expanded".to_owned())
+                };
+            }
             crate::dcc::Keys::Other => {
                 crate::dcc::cleared_fill(&keys, clear, 1 << layout.texel_log2())
             }
@@ -969,7 +1005,9 @@ impl GuestCp<'_> {
             return Err("no device is installed to draw with".to_owned());
         };
         if draws_depth_only(submission) {
-            return self.draw_depth_only(submission, *execute);
+            return crate::perf::span(crate::perf::Span::DrawDepthOnly, || {
+                self.draw_depth_only(submission, *execute)
+            });
         }
         let (target, swap) = writable_target(submission).map_err(|why| {
             format!("its colour target is not one a frame can be written back to exactly: {why}")
@@ -977,28 +1015,16 @@ impl GuestCp<'_> {
         if let Some(why) = unmodelled_draws(submission) {
             return Err(why);
         }
-        if let Some(dcc) = submission.colour_target_dcc
-            && let Some(why) = crate::dcc::unsupported(
-                submission.colour_target_tiling,
-                dcc.two_dimensional,
-                dcc.single_sample,
-            )
-        {
-            return Err(format!(
-                "its colour target uses {why}, which is not modelled: slice {} of 0..={}, {}x{}, {} level(s), keys at {:#x}",
-                dcc.slices.0,
-                dcc.slices.1,
-                dcc.extent.width,
-                dcc.extent.height,
-                dcc.levels,
-                dcc.dcc.base
-            ));
+        if let Some(why) = unmodelled_dcc(submission) {
+            return Err(why);
         }
         // The executor holds one frame per extent, so a frame still pending for another target is
         // let go of before this one is drawn over it (D714): kept on the device as a flip keeps
         // one, written back when something first touches it (D719, D885), or now where it cannot
         // wait.
-        if pending_target().is_some_and(|(pending, _)| pending != target) && !hold_pending(self) {
+        if pending_target().is_some_and(|(pending, _)| pending != target)
+            && !crate::perf::span(crate::perf::Span::DrawPendingFrame, || hold_pending(self))
+        {
             return Err(
                 "the frame pending for another target could not be written back".to_owned(),
             );
@@ -1016,9 +1042,11 @@ impl GuestCp<'_> {
         let folded_here = if fold_band() {
             banded_here
         } else {
-            let _ = write_back_pending(&mut GuestCp {
-                memory: MappedRegions::current(),
-                submission: None,
+            let _ = crate::perf::span(crate::perf::Span::DrawPendingFrame, || {
+                write_back_pending(&mut GuestCp {
+                    memory: MappedRegions::current(),
+                    submission: None,
+                })
             });
             false
         };
@@ -1054,7 +1082,9 @@ impl GuestCp<'_> {
                 target.words() * 4
             )
         })?;
-        if !execute(submission, before.before()) {
+        if !crate::perf::span(crate::perf::Span::DrawExecute, || {
+            execute(submission, before.before())
+        }) {
             forget_written();
             set_pending(None);
             return Err(format!(
@@ -1209,12 +1239,58 @@ impl GuestCp<'_> {
     }
 }
 
-/// Whether a submission's colour target zero is unbound - `COLOR_INVALID` - so its draws write
-/// depth alone (D779).
+/// The dispatch last refused while it is polled, by its byte offset, until the command processor
+/// takes it to poll (D945).
+fn unready_dispatch() -> &'static Mutex<Option<u64>> {
+    static UNREADY: Mutex<Option<u64>> = Mutex::new(None);
+    &UNREADY
+}
+
+/// How long a refused dispatch is polled before its refusal stands (D945): far longer than a title
+/// takes to fill a table it reads, and short enough that a refusal for any other reason costs the
+/// run little.
+const DISPATCH_POLL_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The dispatch being polled, by byte offset, and when its polling began (D945).
+fn dispatch_poll() -> &'static Mutex<Option<(u32, std::time::Instant)>> {
+    static POLL: Mutex<Option<(u32, std::time::Instant)>> = Mutex::new(None);
+    &POLL
+}
+
+/// Whether the refused dispatch at `offset` is still polled: its first refusal, or one within
+/// [`DISPATCH_POLL_LIMIT`] of it.
+fn still_polling(offset: u32) -> bool {
+    let mut poll = dispatch_poll()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    let began = match *poll {
+        Some((polled, began)) if polled == offset => began,
+        _ => {
+            *poll = Some((offset, now));
+            now
+        }
+    };
+    now.duration_since(began) < DISPATCH_POLL_LIMIT
+}
+
+/// Ends the polling of a dispatch, run or refused for good.
+fn end_dispatch_poll() {
+    if let Ok(mut poll) = dispatch_poll().lock() {
+        *poll = None;
+    }
+}
+
+/// How long a dispatch's preparation takes before the run names it.
+const SLOW_DISPATCH_PREPARE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a submission's draws write depth alone: colour target zero unbound - `COLOR_INVALID`
+/// (D779) - or its writes switched off by the target mask or `CB_DISABLE` (D941).
 fn draws_depth_only(submission: &Submission) -> bool {
-    submission
-        .colour_target_format
-        .is_some_and(|format| format.is_unbound())
+    submission.writes_no_colour
+        || submission
+            .colour_target_format
+            .is_some_and(|format| format.is_unbound())
 }
 
 /// Runs a guest compute dispatch's module over its window, images and buffers: the module with its
@@ -1942,6 +2018,25 @@ fn uniform_buffers(
         .collect()
 }
 
+/// The longest whole-word prefix of `span` bytes that `readable` says can be read, found by halving:
+/// a mapping ends at a page, so every prefix shorter than a readable one is readable.
+fn readable_words(span: usize, readable: impl Fn(usize) -> bool) -> usize {
+    if readable(span) {
+        return span;
+    }
+    // `low` is readable (or nothing), `high` is not.
+    let (mut low, mut high) = (0, span / 4);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if readable(middle * 4) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low * 4
+}
+
 impl GuestCp<'_> {
     /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746) -
     /// except one the program only stores to, which is not read (D809).
@@ -1967,11 +2062,21 @@ impl GuestCp<'_> {
                 if span == 0 {
                     return Ok(crate::dispatch::BufferBefore::Words(Vec::new()));
                 }
-                let read = cp::CpMemory::read(self, address, span).ok_or_else(|| {
-                    format!(
-                        "buffer {slot}, {span:#x} bytes at {address:#x}, is not readable guest memory"
-                    )
-                })?;
+                // A range whose end runs past what is mapped binds what is, the rest zeros: the
+                // reach a program's accesses are bounded by can overrun a buffer's last record,
+                // and the program reads no further than the buffer (assumed).
+                let readable = readable_words(span, |bytes| {
+                    cp::CpMemory::read(self, address, bytes).is_some()
+                });
+                let mut read = (readable > 0)
+                    .then(|| cp::CpMemory::read(self, address, readable))
+                    .flatten()
+                    .ok_or_else(|| {
+                        format!(
+                            "buffer {slot}, {span:#x} bytes at {address:#x}, is not readable guest memory"
+                        )
+                    })?;
+                read.resize(span, 0);
                 Ok(crate::dispatch::BufferBefore::Words(
                     read.chunks_exact(4)
                         .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
@@ -2000,7 +2105,25 @@ impl GuestCp<'_> {
                 )
                 .map_err(str::to_owned)
             })?;
-            self.prepare_state(&state)
+            let started = std::time::Instant::now();
+            let prepared = self.prepare_state(&state);
+            // A preparation slow enough to hold a frame by itself is named, with its grid, so the
+            // program whose translation or tracing costs it is found.
+            let took = started.elapsed();
+            if took >= SLOW_DISPATCH_PREPARE {
+                tracing::info!(
+                    "a dispatch's preparation took {} ms: the program at {:#x}, {:?} groups, {}",
+                    took.as_millis(),
+                    state.program,
+                    state.groups,
+                    if prepared.is_ok() {
+                        "prepared"
+                    } else {
+                        "refused"
+                    },
+                );
+            }
+            prepared
         })
     }
 
@@ -4695,8 +4818,28 @@ impl cp::CpMemory for GuestCp<'_> {
 
     fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {
         match self.dispatch_into_memory(dispatch) {
-            Ok(()) => true,
+            Ok(()) => {
+                end_dispatch_poll();
+                true
+            }
+            // Refused perhaps for a table read before the title filled it: polled a while, as a
+            // memory wait is, before the refusal stands (D945).
+            // Not where a run asked for refusals to be passed over (D896): that one moves on now.
+            Err(why)
+                if !PASS_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+                    && still_polling(dispatch.offset) =>
+            {
+                if let Ok(mut unready) = unready_dispatch().lock() {
+                    *unready = Some(u64::from(dispatch.offset));
+                }
+                note_dispatch_refusal(format!(
+                    "the compute dispatch at byte {:#x}, polled while what it reads may still be written: {why}",
+                    dispatch.offset
+                ));
+                false
+            }
             Err(why) => {
+                end_dispatch_poll();
                 note_dispatch_refusal(format!(
                     "the compute dispatch at byte {:#x}: {why}",
                     dispatch.offset
@@ -4704,6 +4847,10 @@ impl cp::CpMemory for GuestCp<'_> {
                 pass_over("compute dispatch", &why)
             }
         }
+    }
+
+    fn unready_dispatch(&mut self) -> Option<u64> {
+        unready_dispatch().lock().ok()?.take()
     }
 
     fn holds(&self, address: u64, expected: &[u8]) -> bool {
@@ -4766,15 +4913,30 @@ impl cp::CpMemory for GuestCp<'_> {
             return false;
         }
         unprotect_overlapping(address, length);
-        // SAFETY: a protected target's pages here were given their protection back above, and the
-        // installed lookup vouched that `[address, address + 4 * count)` lies inside
-        // identity-mapped guest mappings whose protection allows writes: `count` writable,
-        // word-aligned `u32`s of this process (host and guest are both little-endian). The owning
-        // guest thread is blocked in this submit while `edit` runs.
+        // The deferred copies held while the words are edited: one deferred onto these pages meanwhile
+        // - by an asynchronous compute queue carried out on another thread - would guard them with
+        // no access under the write. One already there is refused rather than written through.
+        let Ok(list) = deferred().lock() else {
+            return false;
+        };
+        let pages = page_span(address, length);
+        if list
+            .iter()
+            .any(|copy| ranges_overlap((copy.pages.0, copy.pages.1), pages))
+        {
+            return false;
+        }
+        // SAFETY: a protected target's pages here were given their protection back above, no
+        // deferred copy guards them while `list` is held, and the installed lookup vouched that
+        // `[address, address + 4 * count)` lies inside identity-mapped guest mappings whose
+        // protection allows writes: `count` writable, word-aligned `u32`s of this process (host and
+        // guest are both little-endian). The owning guest thread is blocked in this submit while
+        // `edit` runs.
         let words = unsafe {
             std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u32>(at), count)
         };
         edit(words);
+        drop(list);
         true
     }
 
@@ -4932,8 +5094,77 @@ fn waited_words() -> Vec<u64> {
     waited
 }
 
+/// [`waited_words`] where neither the stall slot nor the stepped-aside streams are held, and none
+/// otherwise: a stream is carried out with the stall slot taken, so a note made while carrying one
+/// out reads it only where nothing holds it, and never waits for it.
+fn waited_words_if_free() -> Vec<u64> {
+    let mut waited = Vec::new();
+    let Ok(stall) = queue_stall().try_lock() else {
+        return waited;
+    };
+    if let Some(cp::Stopped::WaitNeverSatisfied { address, .. }) =
+        stall.map(|stalled| stalled.stopped)
+    {
+        waited.push(address);
+    }
+    drop(stall);
+    let Ok(streams) = aside().try_lock() else {
+        return waited;
+    };
+    waited.extend(streams.iter().filter_map(|aside| match aside.stopped {
+        Some(cp::Stopped::WaitNeverSatisfied { address, .. }) => Some(address),
+        _ => None,
+    }));
+    waited
+}
+
 /// How many fillers are kept.
 const FILLERS_MOST: usize = 16;
+
+/// Says, once for each word and packet kind, where a stream carried out names a word a queue waits
+/// on - its address as a low then a high dword in a packet's body - whatever the packet is. A wait
+/// nothing tracked fills is then traced to the packet that would fill it, though that packet's
+/// write is one the command processor does not model.
+fn note_named_waits(bytes: &[u8], ring: Ring) {
+    static SAID: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+    let waited = waited_words_if_free();
+    if waited.is_empty() {
+        return;
+    }
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    for packet in crate::packet::walk(bytes).packets {
+        let first = (packet.offset / 4) as usize;
+        let last = (first + (packet.length / 4) as usize).min(words.len());
+        let Some(body) = words.get(first..last) else {
+            continue;
+        };
+        for &address in &waited {
+            let (low, high) = (address as u32, (address >> 32) as u32);
+            let named = body
+                .windows(2)
+                .any(|pair| pair[0] & !3 == low & !3 && pair[1] == high);
+            if !named {
+                continue;
+            }
+            let mut said = SAID
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if said.contains(&(address, packet.header)) || said.len() >= FILLERS_MOST {
+                continue;
+            }
+            said.push((address, packet.header));
+            tracing::info!(
+                "a {ring:?} stream names the waited word {address:#x} in a packet at byte {:#x}, header {:#010x}: {:x?}",
+                packet.offset,
+                packet.header,
+                &body[..body.len().min(8)],
+            );
+        }
+    }
+}
 
 /// Writes submissions held behind the stopped queue would make to a word a queue waits on, each as
 /// (address, packet, byte offset, which held submission - the first held is 0).
@@ -5467,6 +5698,7 @@ fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions, ring: Ring)
     {
         rewinds.insert(rewind);
     }
+    note_named_waits(&bytes, ring);
     // Asynchronously, a preparation that read what a queued submission writes is made again once
     // the queue has drained, the live pipeline free meanwhile for the command processor (D876);
     // one that read only what a queued submission draws is drawn again as it is carried out (D882).
@@ -5494,9 +5726,11 @@ fn carry_out_stream(bytes: &[u8], base: u64, memory: &MappedRegions, ring: Ring)
 /// carrying it out writes once it is queued ([`queued_writes`]); nothing, run synchronously.
 fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrites) {
     // One pipeline for the run, not one per submission: the pipeline caches translated shaders.
-    let mut live = live_pipeline()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
+        live_pipeline()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
     if live.is_none() {
         *live = Pipeline::new(Strategy::Predicated {
             fidelity: Fidelity::Lane,
@@ -5692,7 +5926,23 @@ mod command_processor {
                                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                             };
                             let (bytes, submission) = *work;
-                            run_submission(&bytes, submission);
+                            // A panic carrying one submission out is that submission's refusal,
+                            // named: it would otherwise end this thread, and every later
+                            // submission would be carried out on the guest's thread instead.
+                            let carried = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| run_submission(&bytes, submission)),
+                            );
+                            if let Err(panic) = carried {
+                                let why = panic
+                                    .downcast_ref::<&str>()
+                                    .map(|why| (*why).to_owned())
+                                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                                    .unwrap_or_else(|| "a panic with no message".to_owned());
+                                tracing::warn!(
+                                    "the command processor panicked carrying out a submission of {} bytes, which is lost: {why}",
+                                    bytes.len()
+                                );
+                            }
                             let (queued, fell) = &IN_FLIGHT;
                             queued
                                 .lock()
@@ -5732,6 +5982,12 @@ mod command_processor {
                 .send(Box::new((bytes, submission)))
         });
         if let Err(std::sync::mpsc::SendError(work)) = sent {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                tracing::warn!(
+                    "the command processor's thread has ended; submissions are carried out on the guest's own threads from here"
+                );
+            });
             IN_FLIGHT
                 .0
                 .lock()
@@ -6432,6 +6688,33 @@ fn first_unwritable(
 
 #[cfg(test)]
 mod tests {
+    /// A segment with a draw whose pixel shader could not be prepared is refused for that, not for
+    /// the textures the shader bound before it then fails to find: Grand Theft Auto V's pixel shader
+    /// reading more than sixteen textures left its draws to the previous module, and the refusal
+    /// named that module's half-border clamp.
+    #[test]
+    fn an_unshaded_draw_is_named_before_the_textures_it_misses() {
+        let mut submission = crate::pipeline::Submission::default();
+        submission.report.unbound_textures = 2;
+        submission.report.unshaded_draws = 1;
+        let why = super::unmodelled_draws(&submission).expect("refused");
+        assert!(
+            why.starts_with("1 draw(s) have a stage whose shader was not prepared"),
+            "{why}"
+        );
+    }
+
+    /// A buffer range whose end runs onto a page nothing maps reads as far as its last readable
+    /// word: Grand Theft Auto V binds 0xc4 bytes at 0x10a956ff4c, sixteen of them past the page
+    /// that ends at 0x10a9570000.
+    #[test]
+    fn a_range_running_off_a_mapping_reads_its_readable_words() {
+        let mapped = |bytes: usize| bytes <= 0xb4;
+        assert_eq!(super::readable_words(0xc4, mapped), 0xb4);
+        assert_eq!(super::readable_words(0xb4, mapped), 0xb4);
+        assert_eq!(super::readable_words(0xc4, |_| false), 0);
+        assert_eq!(super::readable_words(0xc4, |bytes| bytes == 0), 0);
+    }
 
     /// A dispatch's refused write-back names the first write refused: a run, a buffer's word or a
     /// fill, by its address and length - GTA V's dispatch at byte 0x12570 said only that it wrote
@@ -7305,6 +7588,7 @@ mod tests {
                 order: None,
                 surface: Some((surface, vec![0; surface.bytes()])),
                 depth: None,
+                stencil: None,
                 keys_to_expand: Some(KeysToExpand {
                     keys: (0x9000, 3),
                     surface: (BASE, 0x3_0000),
@@ -7370,6 +7654,7 @@ mod tests {
                 surface: Some((surface, spanned.clone())),
                 keys_to_expand: None,
                 depth: None,
+                stencil: None,
             }],
             ..DispatchImages::default()
         };

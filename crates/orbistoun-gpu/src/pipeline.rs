@@ -99,8 +99,44 @@ struct ForDraw {
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
     flat_twins: Option<FlatTwins>,
     saturated: [[bool; 2]; MAX_TEXTURES],
+    mirrored: [[bool; 2]; MAX_TEXTURES],
+    compared: [u8; MAX_TEXTURES],
     /// The colour targets that hold integers, bit `K` for `mrtK` (D851).
     integer_targets: u8,
+}
+
+/// A pixel shader's address and the coordinates a module of it saturates and mirrors once, by slot.
+type PreparedClamps = (u64, [[bool; 2]; MAX_TEXTURES], [[bool; 2]; MAX_TEXTURES]);
+
+/// Says, once for each pixel shader and each way its coordinates are clamped, that a module was
+/// prepared so (D743): where a draw is then refused for a half-border clamp its module does not
+/// honour, the lines say which modules that shader was ever given.
+fn note_prepared_clamps(candidate: Candidate, for_draw: &ForDraw) {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<PreparedClamps>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if candidate.stage != ShaderStage::Fragment {
+        return;
+    }
+    let clamps = (candidate.address, for_draw.saturated, for_draw.mirrored);
+    if SAID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(clamps)
+    {
+        let slots = |of: &[[bool; 2]; MAX_TEXTURES]| -> Vec<usize> {
+            of.iter()
+                .enumerate()
+                .filter(|(_, axes)| axes.contains(&true))
+                .map(|(slot, _)| slot)
+                .collect()
+        };
+        tracing::info!(
+            "pixel shader {:#x} prepared saturating slots {:?}, mirroring slots {:?}",
+            candidate.address,
+            slots(&for_draw.saturated),
+            slots(&for_draw.mirrored)
+        );
+    }
 }
 
 /// No texture slot's coordinates saturated.
@@ -624,6 +660,9 @@ fn probed_range(
         }
         Err(refused) => refused,
     };
+    // Running every wave costs each group a host run: say once per program why the replay by group
+    // ids, which costs none of that, could not answer.
+    note_wave_by_wave(state.program, &by_group);
     let run = |sample| {
         crate::draw_buffers::dispatch_computed_descriptors(
             (computed, state.program, sample),
@@ -661,6 +700,43 @@ fn probed_range(
             "{why}; replayed group by group: {by_group}; run wave by wave: {probe}{}",
             sampled_note(run(Some(SAMPLED_GROUPS)))
         )),
+    }
+}
+
+/// Says, once for each program, where a dispatch's buffer that is not guest memory came from: the
+/// traced source, its user-data words and loads, and the range it resolved to.
+fn note_unreadable_source(
+    program: u64,
+    (address, bytes): (u64, u64),
+    source: &orbistoun_translate::draw_buffers::BufferSource,
+) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(program));
+    if first {
+        tracing::info!(
+            "the dispatch program at {program:#x} binds {bytes:#x} bytes at {address:#x}, not guest memory, from {source:?}"
+        );
+    }
+}
+
+/// Says, once for each program, why a dispatch's computed buffer was found by running every wave
+/// rather than by replaying its group ids (D914): the second costs each group nothing, the first a
+/// host run each.
+fn note_wave_by_wave(program: u64, why: &impl std::fmt::Display) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(program));
+    if first {
+        tracing::info!(
+            "the dispatch program at {program:#x} runs every wave to find a buffer: replayed group by group, {why}"
+        );
     }
 }
 
@@ -706,7 +782,7 @@ fn sampled_note(
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
 /// position space (D731), in the cache key.
-fn for_draw_salt(for_draw: ForDraw) -> u64 {
+fn for_draw_salt(for_draw: &ForDraw) -> u64 {
     let geometry = for_draw.geometry.map_or(0, |g| {
         0x4745_4f4d_0000_0000
             ^ (u64::from(g.vertices) << 32)
@@ -760,6 +836,22 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
         0
     } else {
         0x5341_5455_0000_0000 ^ saturated
+    };
+    let mirrored = for_draw
+        .mirrored
+        .as_flattened()
+        .iter()
+        .enumerate()
+        .fold(0, |bits, (at, &on)| bits | u64::from(on) << at);
+    let saturated = if mirrored == 0 {
+        saturated
+    } else {
+        saturated ^ 0x4d49_5252_0000_0000 ^ mirrored
+    };
+    let saturated = if for_draw.compared == [0; MAX_TEXTURES] {
+        saturated
+    } else {
+        saturated ^ 0x434d_5052_0000_0000 ^ crate::content_hash(&for_draw.compared.map(u32::from))
     };
     let integer = if for_draw.integer_targets == 0 {
         0
@@ -1065,6 +1157,9 @@ struct Candidate {
 }
 
 /// One submission, prepared for a backend.
+// Each bool is a separate fact about the stream that a later step branches on; the "too many
+// bools" lint does not fit a record of what was found.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct Submission {
     /// What the backend should do, in order.
@@ -1096,6 +1191,9 @@ pub struct Submission {
     /// Colour target zero's element layout (`CB_COLOR0_INFO`), the byte order a frame written back
     /// into it must use. `None` when the stream set none.
     pub colour_target_format: Option<ColourTargetFormat>,
+    /// Whether the draws write no colour, colour target zero unbound or its writes switched off
+    /// (`depth::writes_no_colour`, D941): they write depth alone.
+    pub writes_no_colour: bool,
     /// Colour target zero's delta colour compression (`CB_COLOR0_INFO.DCC_ENABLE`), `None` when
     /// the target has none.
     pub colour_target_dcc: Option<crate::registers::ColourTargetDcc>,
@@ -1181,6 +1279,13 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
     submission.colour_target = colour_target_at(writes);
     submission.colour_target_tiling = colour_swizzle_mode_at(writes);
     submission.colour_target_format = colour_target_format_at(writes);
+    submission.writes_no_colour = crate::depth::writes_no_colour(|register| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    });
     submission.colour_target_dcc = colour_target_dcc_at(writes);
     let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
     submission.colour_target_bases = colour_target_bases_in(writes, &draw_offsets);
@@ -1319,6 +1424,36 @@ fn more_colour_targets(writes: &[RegisterWrite], buffers: &[u32]) -> Vec<MoreCol
         .collect()
 }
 
+/// Says, the first time each depth target is bound, the extent it is drawn at and the registers that
+/// chose it: the depth surface's size (D941) and the first colour buffer's format, so a target
+/// drawn at another size than it is sampled at is traced to its pass.
+fn note_depth_target_sizing(id: ResourceId, extent: ColourTargetExtent, writes: &[RegisterWrite]) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<ResourceId>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(id));
+    if !first {
+        return;
+    }
+    let latest = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    tracing::info!(
+        "depth target {:x} drawn at {}x{}: DB_DEPTH_SIZE_XY {:x?}, CB_COLOR0_INFO {:x?}",
+        id.0,
+        extent.width,
+        extent.height,
+        latest(0xA007),
+        latest(crate::registers::CB_COLOR0_INFO),
+    );
+}
+
 /// A depth target with the id it is bound by and the colour extent it is sized to.
 type SizedDepthTarget = (ResourceId, crate::depth::DepthTarget, ColourTargetExtent);
 
@@ -1332,20 +1467,34 @@ fn set_render_targets(
 ) -> (Option<SizedDepthTarget>, Vec<u32>) {
     let buffers = attachment_buffers(writes);
     let first = crate::colour_slots::colour_buffer_writes(writes, buffers[0]);
-    let depth_target = colour_target_extent_at(&first).and_then(|extent| {
+    // A depth-only draw renders at its depth surface's extent, not a colour target's left from an
+    // earlier pass (D941).
+    let depth_target = (crate::depth::depth_target_at(writes)
+        .and(crate::depth::depth_only_extent(writes)))
+    .or_else(|| colour_target_extent_at(&first))
+    .and_then(|extent| {
         let target = crate::depth::depth_target_at(writes)?;
-        Some((crate::depth::depth_target_id(&target), target, extent))
+        let id = crate::depth::depth_target_id(&target);
+        note_depth_target_sizing(id, extent, writes);
+        Some((id, target, extent))
     });
     submission.depth_bases = depth_target
         .as_ref()
         .map(|_| crate::depth::depth_bases_at(writes));
-    if let Some(extent) = colour_target_extent_at(&first) {
+    let extent = depth_target
+        .as_ref()
+        .map(|&(_, _, extent)| extent)
+        .or_else(|| colour_target_extent_at(&first));
+    if let Some(extent) = extent {
         let base = colour_target_at(&first).map(|target| target.base);
         let target = colour_target_id(extent, base);
         submission.targets.insert(target, extent);
         submission.more_colour_targets = more_colour_targets(writes, &buffers[1..]);
         let mut colour = vec![target];
         colour.extend(submission.more_colour_targets.iter().map(|more| more.id));
+        if let Some((id, _, _)) = depth_target {
+            note_targeted_depth(id);
+        }
         submission.commands.push(RenderCommand::SetRenderTargets {
             colour,
             depth: depth_target.map(|(id, _, _)| id),
@@ -1536,6 +1685,10 @@ struct ByGeometry {
     flat_twins: Option<FlatTwins>,
     /// The coordinates the draw being bound has its pixel shader's samples saturate (D743).
     saturated: [[bool; 2]; MAX_TEXTURES],
+    /// The coordinates the draw being bound has its pixel shader's samples mirror once.
+    mirrored: [[bool; 2]; MAX_TEXTURES],
+    /// The compares the draw being bound has its pixel shader make itself (`UserData::compared`).
+    compared: [u8; MAX_TEXTURES],
     /// The colour targets of the segment being bound that hold integers (D851).
     integer_targets: u8,
 }
@@ -1586,6 +1739,27 @@ const DI_PT_QUADLIST: u32 = 19;
 const PA_SU_SC_MODE_CNTL: u32 = 0xA205;
 /// See [`PA_SU_SC_MODE_CNTL`].
 const PROVOKING_VTX_LAST: u32 = 1 << 19;
+/// The stages whose registration a submission's draws keep, binding no shader of their own there:
+/// each registered stage among `candidates` but the pixel shader's. A registered pixel shader is bound
+/// per draw all the same: what a draw gives it - the half-border clamps, mirrors and compares of the
+/// samplers it binds (D743), its flat twins (D742) - is the draw's, and the registration knows none
+/// of it. Where the draw gives it nothing, its module is the one bound up front.
+fn kept_registrations(
+    candidates: &[Candidate],
+    registered: &[RegisteredShader],
+) -> Vec<ShaderStage> {
+    candidates
+        .iter()
+        .filter(|c| {
+            c.stage != ShaderStage::Fragment
+                && registered
+                    .iter()
+                    .any(|r| r.address == c.address && r.stage == c.stage)
+        })
+        .map(|c| c.stage)
+        .collect()
+}
+
 /// The shaders a draw runs, from the candidates its registers name: those its queue permits and
 /// no registration already gave, the vertex program the primitive shader's or - where `legacy` -
 /// the legacy vertex shader's (D881).
@@ -2458,7 +2632,7 @@ impl Pipeline {
             *word = value.unwrap_or(0);
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
-        let mut aliases = Vec::with_capacity(traced.sources.len());
+        let mut aliases: Vec<Option<usize>> = Vec::with_capacity(traced.sources.len());
         let mut global_base = None;
         for source in &traced.sources {
             // The global loads' buffer is what every wave of the dispatch reads (D883).
@@ -2481,15 +2655,14 @@ impl Pipeline {
                     crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)
                         .or_else(|why| probed_range(why, source, (&words, state), memory))?
                 };
+            note_if_unreadable(memory, state.program, range, source);
             // Two copies of one byte disagree only where the dispatch writes one of them: read-only
             // copies of the same bytes agree (D746).
             let slot = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
             let written = |slot: u32| traced.stored.contains(&slot);
-            // A slot bound to exactly an earlier slot's range is that buffer again: the device
-            // binds one buffer at both, and no two copies of a byte exist (D937).
-            if let Some(earlier) = ranges.iter().position(|&held| held == range) {
+            if let Some(earlier) = alias_earlier(&mut ranges, &aliases, range) {
                 aliases.push(Some(earlier));
-                ranges.push(range);
+                ranges.push(ranges[earlier]);
                 continue;
             }
             aliases.push(None);
@@ -2592,6 +2765,8 @@ impl Pipeline {
             position_vectors: None,
             point_size: None,
             saturated: UNSATURATED,
+            mirrored: UNSATURATED,
+            compared: [0; MAX_TEXTURES],
             local_words: state.local_words,
             program_address,
             integer_targets: 0,
@@ -3067,6 +3242,9 @@ pub struct DispatchImages {
     /// The texture slots whose image is a depth target the host holds, each with its id: their
     /// texels are the host's depths, read on the device before the dispatch runs (D894).
     pub fetched_depth: Vec<(u32, ResourceId)>,
+    /// The texture slots whose image is the stencil plane of a depth target the host holds, each
+    /// with that target's id: their texels are the host's stencil values, read as its depths are.
+    pub fetched_stencil: Vec<(u32, ResourceId)>,
 }
 
 /// One image a dispatch stores to: as it was before the dispatch, and where it lies.
@@ -3083,6 +3261,10 @@ pub struct StoredImage {
     /// The depth target it is, which the host holds: its texels before are the host's depths, and
     /// what the dispatch writes replaces them (D894).
     pub depth: Option<ResourceId>,
+    /// The depth target whose stencil plane it is, which the host holds in that target's
+    /// attachment: its texels before are the host's stencil values, and what the dispatch writes
+    /// replaces them.
+    pub stencil: Option<ResourceId>,
     /// Its compression keys, when they were all cleared: it was read as the zeros they mean, and
     /// once every texel is written back they are marked uncompressed - expanded, a state the
     /// hardware's own writes leave.
@@ -3605,18 +3787,27 @@ fn dispatch_images(
     for (slot, source) in textures.iter().enumerate() {
         let words = dispatch_descriptor_words(state, source, memory)
             .map_err(|e| format!("fetched image {slot}: {e}"))?;
-        let (texels, span) = match dispatch_depth_target(words, source) {
-            // Its texels come from the host's depths; none are read here (D894).
-            Some((id, extent)) => {
-                images
-                    .fetched_depth
-                    .push((u32::try_from(slot).unwrap_or(u32::MAX), id));
+        let at = u32::try_from(slot).unwrap_or(u32::MAX);
+        let (texels, span) = match (
+            dispatch_depth_target(words, source),
+            dispatch_stencil_target(words, source),
+        ) {
+            // Its texels come from the host's depths, or its stencil; none are read here (D894).
+            (Some((id, extent)), _) => {
+                images.fetched_depth.push((at, id));
                 (
-                    host_depths(extent, source.layered),
+                    host_depths(extent, source.layered, words),
                     (decode_image_descriptor(words).base, 0),
                 )
             }
-            None => fetched_image(state, source, memory, detiled)?,
+            (None, Some((id, extent))) => {
+                images.fetched_stencil.push((at, id));
+                (
+                    host_depths(extent, source.layered, words),
+                    (decode_image_descriptor(words).base, 0),
+                )
+            }
+            (None, None) => fetched_image(state, source, memory, detiled)?,
         };
         if slot == 0 {
             images.fetched = Some(texels);
@@ -3625,6 +3816,7 @@ fn dispatch_images(
             images.more_fetched.push((texels, span));
         }
     }
+    pair_stored_stencil(state, storage, memory);
     for (n, source) in storage.iter().enumerate() {
         let stored = stored_image(state, source, memory, detiled)
             .map_err(|e| format!("stored image {n}: {e}"))?;
@@ -3633,12 +3825,59 @@ fn dispatch_images(
     Ok(images)
 }
 
+/// Notes a stencil plane no draw has used as the plane of the depth target the same dispatch
+/// stores to at its extent: a program writing a depth and stencil pair, as Grand Theft Auto V's
+/// copies its 3840 x 2160 depth buffer and stencil into a fresh pair, writes both halves of one
+/// target. Nothing is noted where no single depth target matches.
+fn pair_stored_stencil(
+    state: &crate::dispatch::DispatchState,
+    storage: &[TextureSource],
+    memory: &impl GuestMemory,
+) {
+    let described: Vec<([u32; 8], &TextureSource)> = storage
+        .iter()
+        .filter_map(|source| {
+            dispatch_descriptor_words(state, source, memory)
+                .ok()
+                .map(|words| (words, source))
+        })
+        .collect();
+    let depths: Vec<(ResourceId, (u32, u32))> = described
+        .iter()
+        .filter_map(|&(words, source)| dispatch_depth_target(words, source))
+        .collect();
+    for &(words, _) in &described {
+        let Some(base) = unnamed_stencil_plane(words) else {
+            continue;
+        };
+        let descriptor = decode_image_descriptor(words);
+        let mut matching = depths
+            .iter()
+            .filter(|(_, extent)| *extent == (descriptor.width, descriptor.height));
+        if let (Some(&(target, _)), None) = (matching.next(), matching.next()) {
+            note_stencil_plane(&StencilPlane {
+                bases: [base, 0],
+                target,
+            });
+        }
+    }
+}
+
 /// The placeholder texels of a depth target the host holds, `extent` across and down: the host's
 /// depths fill them on the device (D894). One `layered` program reads as an array of one (D906).
-fn host_depths((width, height): (u32, u32), layered: bool) -> DispatchTexels {
+/// A `32_UINT` view (`words`) reads each depth's bits as an integer, the host's words as they are,
+/// and an `8_UINT` stencil plane each stencil value widened to a word.
+fn host_depths((width, height): (u32, u32), layered: bool, words: [u32; 8]) -> DispatchTexels {
     DispatchTexels {
         texels: Vec::new().into(),
-        format: TexelFormat::R32Float,
+        format: if matches!(
+            decode_image_descriptor(words).format,
+            FORMAT_32_UINT | FORMAT_8_UINT
+        ) {
+            TexelFormat::R32Uint
+        } else {
+            TexelFormat::R32Float
+        },
         width,
         height,
         depth: None,
@@ -3646,6 +3885,38 @@ fn host_depths((width, height): (u32, u32), layered: bool) -> DispatchTexels {
         sampling: None,
         cube: false,
     }
+}
+
+/// An image a dispatch stores to that the host holds, rather than guest memory: a depth target, whose
+/// texels before are the host's and which is written back there (D894), or a depth target's stencil
+/// plane the same way. A stencil plane the host cannot place is refused. `None` for any other.
+fn host_stored_image(
+    words: [u32; 8],
+    source: &TextureSource,
+) -> Option<Result<StoredImage, String>> {
+    let held = |depth, stencil, extent| StoredImage {
+        texels: host_depths(extent, source.layered, words),
+        order: None,
+        surface: None,
+        keys_to_expand: None,
+        depth,
+        stencil,
+    };
+    if let Some((id, extent)) = dispatch_depth_target(words, source) {
+        return Some(Ok(held(Some(id), None, extent)));
+    }
+    if let Some((id, extent)) = dispatch_stencil_target(words, source) {
+        return Some(Ok(held(None, Some(id), extent)));
+    }
+    let base = unnamed_stencil_plane(words)?;
+    Some(Err(format!(
+        concat!(
+            "a store to a stencil plane at {:#x} that no draw's stencil tests have used, so ",
+            "which depth target holds it is not known: format {}"
+        ),
+        base,
+        describe_dispatch_image(&decode_image_descriptor(words), words)
+    )))
 }
 
 /// One image a dispatch stores to, as it was before the dispatch and where it lies.
@@ -3656,16 +3927,8 @@ fn stored_image(
     detiled: &mut DetiledImages,
 ) -> Result<StoredImage, String> {
     let words = dispatch_descriptor_words(state, source, memory)?;
-    // A depth target the host holds: its texels before are the host's, and it is written
-    // back there (D894).
-    if let Some((id, extent)) = dispatch_depth_target(words, source) {
-        return Ok(StoredImage {
-            texels: host_depths(extent, source.layered),
-            order: None,
-            surface: None,
-            keys_to_expand: None,
-            depth: Some(id),
-        });
+    if let Some(held) = host_stored_image(words, source) {
+        return held;
     }
     if source.layered
         && words[4] & BASE_ARRAY_FIELD != 0
@@ -3710,7 +3973,7 @@ fn stored_image(
                 });
             vec![0; surface.texels() * format.words() as usize].into()
         }
-        crate::dcc::Keys::Other => {
+        crate::dcc::Keys::Other | crate::dcc::Keys::ClearSingle => {
             return Err(format!(
                 "the stored image's compression keys need per-block addressing, which is not modelled ({})",
                 key_census(&descriptor, format, memory)
@@ -3743,6 +4006,7 @@ fn stored_image(
         surface: Some((surface, spanned)),
         keys_to_expand,
         depth: None,
+        stencil: None,
     })
 }
 
@@ -3816,7 +4080,7 @@ fn fetched_image(
             }
         }
         crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize].into(),
-        crate::dcc::Keys::Other => {
+        crate::dcc::Keys::Other | crate::dcc::Keys::ClearSingle => {
             return Err(format!(
                 "the fetched image's compression keys need per-block addressing, which is not modelled ({:?} at {} bytes a texel, format {}, levels {}-{}, {}x{}, {} level(s), type {}, word 4 {:#x}, layered {}, volume {}; {})",
                 descriptor.tiling,
@@ -3991,7 +4255,9 @@ fn viewed_level(word3: u32, level: u32) -> Result<u32, String> {
 }
 
 /// The depth target a dispatch's fetched image is, by its descriptor's eight words, with its extent:
-/// a single-level two-dimensional `32_FLOAT` image in a depth swizzle. The host holds such a target
+/// a single-level two-dimensional `32_FLOAT` image in a depth swizzle, or a `32_UINT` view of one's
+/// bits (`GFX10_FORMAT_32_UINT`, `gfx10-rsrc.json`), as Grand Theft Auto V's compute program reads
+/// its 3840 x 2160 depth buffer. The host holds such a target
 /// as its own depth attachment and never writes it to guest memory (D817), so a dispatch reading it
 /// reads the host's depths (D894). `None` for any other image.
 fn dispatch_depth_target(
@@ -4014,7 +4280,7 @@ fn dispatch_depth_target(
     };
     let slice = one_layer?;
     (depth_tiled
-        && descriptor.format == FORMAT_32_FLOAT
+        && matches!(descriptor.format, FORMAT_32_FLOAT | FORMAT_32_UINT)
         && !source.volume
         && descriptor.base_level == 0
         && descriptor.last_level == 0)
@@ -4591,9 +4857,19 @@ fn surface_keys(
     };
     if descriptor.tiling != SwizzleMode::Tiled64KbRX {
         return Err(format!(
-            "a compressed image in {:?} at {} bytes a texel, a layout other than 64KB_R_X",
+            concat!(
+                "a compressed image in {:?} at {} bytes a texel, a layout other than 64KB_R_X: ",
+                "format {}, {}x{}, levels {} to {} of {}, at {:#x}"
+            ),
             descriptor.tiling,
-            format.bytes()
+            format.bytes(),
+            descriptor.format,
+            descriptor.width,
+            descriptor.height,
+            descriptor.base_level,
+            descriptor.last_level,
+            descriptor.levels,
+            descriptor.base
         ));
     }
     let bytes = surface_key_bytes(descriptor, format)
@@ -4702,7 +4978,7 @@ impl Pipeline {
     /// Prepares the reconciled candidates and binds them, then finds the shader each draw ran: the
     /// program addresses in force at its packet, translated where the first pass did not, so a
     /// stream that swaps a stage's program between draws binds each draw's own. A registered stage
-    /// keeps its registration. Returns each draw's shaders, in draw order, and the chunks of each
+    /// keeps its registration, but for the pixel shader ([`kept_registrations`]). Returns each draw's shaders, in draw order, and the chunks of each
     /// draw too large for one wave (D741), empty for one drawn whole.
     fn bind_shaders(
         &mut self,
@@ -4714,15 +4990,7 @@ impl Pipeline {
     ) -> (Vec<DrawShaders>, Vec<Vec<Chunk>>) {
         let mut by_geometry = self.bind_up_front(candidates, memory, submission);
         by_geometry.integer_targets = integer_targets_of(writes);
-        let registered_stages: Vec<ShaderStage> = candidates
-            .iter()
-            .filter(|c| {
-                registered
-                    .iter()
-                    .any(|r| r.address == c.address && r.stage == c.stage)
-            })
-            .map(|c| c.stage)
-            .collect();
+        let registered_stages = kept_registrations(candidates, registered);
 
         let mut per_draw = Vec::new();
         let mut per_draw_chunks = Vec::new();
@@ -5083,8 +5351,11 @@ impl Pipeline {
         submission: &mut Submission,
     ) -> bool {
         by_geometry.flat_twins = self.draw_flat_twins(candidates);
-        by_geometry.saturated =
-            self.draw_saturated(candidates, (words, memory), by_geometry, submission);
+        (
+            by_geometry.saturated,
+            by_geometry.mirrored,
+            by_geometry.compared,
+        ) = self.draw_saturated(candidates, (words, memory), by_geometry, submission);
         self.samples_through_samplers()
     }
 
@@ -5098,10 +5369,18 @@ impl Pipeline {
         (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
-    ) -> [[bool; 2]; MAX_TEXTURES] {
-        let mut saturated = UNSATURATED;
+    ) -> (
+        [[bool; 2]; MAX_TEXTURES],
+        [[bool; 2]; MAX_TEXTURES],
+        [u8; MAX_TEXTURES],
+    ) {
+        // Each shader slot whose sampler could not be read, said once.
+        static UNREAD: std::sync::Mutex<std::collections::BTreeSet<(u64, u32)>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        let (mut saturated, mut mirrored) = (UNSATURATED, UNSATURATED);
+        let mut compared = [0u8; MAX_TEXTURES];
         let Some(&fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
-            return saturated;
+            return (saturated, mirrored, compared);
         };
         let plain = self.plain_key(ShaderStage::Fragment, fragment.address, WindowSpace::Clip);
         if let std::collections::btree_map::Entry::Vacant(entry) = by_geometry.plain.entry(plain) {
@@ -5110,28 +5389,91 @@ impl Pipeline {
                     .ok(),
             );
         }
-        let Some(sources) = by_geometry
-            .plain
-            .get(&plain)
-            .copied()
-            .flatten()
-            .and_then(|resource| self.texture_sources.get(&resource))
+        // A pixel shader that cannot be prepared for no draw in particular - one whose attributes
+        // need flat twins (D742), or whose targets hold integers (D851) - is prepared with those of
+        // this draw: where it samples does not depend on them, and without it every sampler it
+        // names would go unread here and its half-border clamps unhonoured.
+        let resource = if let Some(resource) = by_geometry.plain.get(&plain).copied().flatten() {
+            Some(resource)
+        } else {
+            let for_draw = ForDraw {
+                flat_twins: by_geometry.flat_twins,
+                integer_targets: by_geometry.integer_targets,
+                ..ForDraw::default()
+            };
+            self.prepare_candidate(fragment, (memory, for_draw), submission)
+                .ok()
+        };
+        let Some(sources) = resource.and_then(|resource| self.texture_sources.get(&resource))
         else {
-            return saturated;
+            // Said once a shader: its draws then bind as if no sampler clamps to a half border.
+            static SAID: std::sync::Mutex<std::collections::BTreeSet<u64>> =
+                std::sync::Mutex::new(std::collections::BTreeSet::new());
+            if SAID
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(fragment.address)
+            {
+                tracing::info!(
+                    concat!(
+                        "pixel shader {:#x}: where it samples is not known for its draw ({}), so its ",
+                        "samplers' half-border clamps are not honoured (D743)",
+                    ),
+                    fragment.address,
+                    if resource.is_none() {
+                        "it cannot be prepared"
+                    } else {
+                        "its module recorded no texture sources"
+                    }
+                );
+            }
+            return (saturated, mirrored, compared);
         };
         for source in sources {
-            let (Some(slot), Some(offset)) = (
+            let (Some(slot), Some(once)) = (
                 saturated.get_mut(source.slot as usize),
-                source.sampler_offset,
+                mirrored.get_mut(source.slot as usize),
             ) else {
                 continue;
             };
-            let at = table_address(source.table, words) + u64::from(offset);
-            if let Some(sampling) = read_sampler(at, memory) {
+            // A sampler in a table where the draw's user data names it, or still in the user
+            // data itself.
+            let sampling = match (source.sampler_offset, source.sampler_user_data) {
+                (Some(offset), _) => read_sampler(
+                    table_address(source.table, words) + u64::from(offset),
+                    memory,
+                ),
+                (None, Some(first)) => user_words(words, first)
+                    .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok()),
+                (None, None) => None,
+            };
+            if let Some(sampling) = sampling {
                 *slot = sampling.saturated();
+                *once = sampling.mirrored();
+                if source.compare
+                    && let Some(how) = compared.get_mut(source.slot as usize)
+                {
+                    *how = shader_compare_of(source, sampling, (words, memory));
+                }
+            } else if (source.sampler_offset.is_some() || source.sampler_user_data.is_some())
+                && UNREAD
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert((fragment.address, source.slot))
+            {
+                tracing::info!(
+                    concat!(
+                        "pixel shader {:#x} slot {}: its sampler (table offset {:?}, user data {:?}) ",
+                        "could not be read for its draw, so its clamps are not honoured (D743)",
+                    ),
+                    fragment.address,
+                    source.slot,
+                    source.sampler_offset,
+                    source.sampler_user_data
+                );
             }
         }
-        saturated
+        (saturated, mirrored, compared)
     }
 
     /// [`Self::bind_for_draw`] for a draw that may be split into chunks (D741): a primitive shader
@@ -5472,7 +5814,10 @@ impl Pipeline {
         // A draw that gives attributes flat twins prepares both stages for them (D742), and one
         // whose samplers clamp to half a border its pixel shader (D743).
         let saturates = candidate.stage == ShaderStage::Fragment
-            && (by_geometry.saturated != UNSATURATED || by_geometry.integer_targets != 0);
+            && (by_geometry.saturated != UNSATURATED
+                || by_geometry.mirrored != UNSATURATED
+                || by_geometry.compared != [0; MAX_TEXTURES]
+                || by_geometry.integer_targets != 0);
         if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() && !saturates {
             let plain = self.plain_key(candidate.stage, candidate.address, window_space);
             if let Some(known) = by_geometry.plain.get(&plain) {
@@ -5484,8 +5829,11 @@ impl Pipeline {
                 buffer_formats: None,
                 flat_twins: None,
                 saturated: UNSATURATED,
+                mirrored: UNSATURATED,
+                compared: [0; MAX_TEXTURES],
                 integer_targets: 0,
             };
+            note_prepared_clamps(candidate, &for_draw);
             match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
                     by_geometry.plain.insert(plain, Some(resource));
@@ -5663,23 +6011,32 @@ impl Pipeline {
             }
             None => return None,
         };
-        let (saturated, integer_targets) = if candidate.stage == ShaderStage::Fragment {
-            (by_geometry.saturated, by_geometry.integer_targets)
-        } else {
-            (UNSATURATED, 0)
-        };
+        let (saturated, mirrored, compared, integer_targets) =
+            if candidate.stage == ShaderStage::Fragment {
+                (
+                    by_geometry.saturated,
+                    by_geometry.mirrored,
+                    by_geometry.compared,
+                    by_geometry.integer_targets,
+                )
+            } else {
+                (UNSATURATED, UNSATURATED, [0; MAX_TEXTURES], 0)
+            };
         let for_draw = ForDraw {
             geometry,
             window_space,
             buffer_formats,
             flat_twins,
             saturated,
+            mirrored,
+            compared,
             integer_targets,
         };
         let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
             return *known;
         }
+        note_prepared_clamps(candidate, &for_draw);
         let made = match self.prepare_candidate(candidate, (memory, for_draw), submission) {
             Ok(resource) => Some(resource),
             Err(Unprepared::NeedsGeometry(reason)) => {
@@ -5963,6 +6320,8 @@ impl Pipeline {
             ShaderStage::Fragment => UserData {
                 flat_twins: for_draw.flat_twins,
                 saturated: for_draw.saturated,
+                mirrored: for_draw.mirrored,
+                compared: for_draw.compared,
                 integer_targets: for_draw.integer_targets,
                 ..self.user_data[1]
             },
@@ -5984,7 +6343,7 @@ impl Pipeline {
             ^ width_salt
             ^ layout_salt(&user_data)
             ^ crate::pixel_inputs::salt(&user_data)
-            ^ for_draw_salt(for_draw)
+            ^ for_draw_salt(&for_draw)
             ^ flag_salts(&user_data)
             ^ per_lane_salt(user_data.per_invocation);
         if let Some(&cached) = self.cache.get(&key) {
@@ -6179,11 +6538,16 @@ pub(crate) fn instruction_text(
         .iter()
         .map(ToString::to_string)
         .collect();
-    // A two-word instruction's second word too: its modifiers or wider operands.
-    let second = instruction
-        .second_word
-        .map(|word| format!(" {word:#010x}"))
-        .unwrap_or_default();
+    // Every word after the first too - a second word's modifiers or wider operands, a literal, an
+    // image access's further address registers - so a listing holds the program exactly.
+    let second: String = instruction
+        .words
+        .iter()
+        .skip(1)
+        .fold(String::new(), |mut words, word| {
+            let _ = std::fmt::Write::write_fmt(&mut words, format_args!(" {word:#010x}"));
+            words
+        });
     Some(format!(
         "`{name} {}`, word {:#010x}{second}",
         operands.join(", "),
@@ -6530,9 +6894,11 @@ fn push_slice_passes(
         })
         .unwrap_or_default();
     for slice in first..=last {
+        let sibling = crate::depth::depth_target_sibling(depth, slice);
+        note_targeted_depth(sibling);
         commands.push(RenderCommand::SetRenderTargets {
             colour: colour.clone(),
-            depth: Some(crate::depth::depth_target_sibling(depth, slice)),
+            depth: Some(sibling),
         });
         commands.push(RenderCommand::SetDrawLayer(Some(slice - first)));
         push_draw(commands, drawn, bound);
@@ -6753,6 +7119,37 @@ fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::
     crate::registers::decode_sampler_descriptor(words).ok()
 }
 
+/// A range that is not guest memory came through a descriptor the host read wrong, or read before
+/// what fills it: says once for each program where it came from.
+fn note_if_unreadable(
+    memory: &impl GuestMemory,
+    program: u64,
+    range: (u64, u64),
+    source: &orbistoun_translate::draw_buffers::BufferSource,
+) {
+    if range.1 > 0
+        && usize::try_from(range.1).is_ok_and(|bytes| memory.read(range.0, bytes).is_none())
+    {
+        note_unreadable_source(program, range, source);
+    }
+}
+
+/// The earlier slot a range at its base is that buffer again, its range made the longer of the two:
+/// the device binds one buffer, and no two copies of a byte exist (D937). Two loads of other widths
+/// through one descriptor reach such ranges.
+fn alias_earlier(
+    ranges: &mut [(u64, u64)],
+    aliases: &[Option<usize>],
+    range: (u64, u64),
+) -> Option<usize> {
+    let earlier = ranges
+        .iter()
+        .zip(aliases)
+        .position(|(&(base, _), alias)| base == range.0 && alias.is_none())?;
+    ranges[earlier] = (range.0, range.1.max(ranges[earlier].1));
+    Some(earlier)
+}
+
 /// The accesses a dispatch's own buffers take, by instruction offset, each buffer's guest range as
 /// `(address, bytes)`, by slot (D746), and each buffer's descriptor format word, by slot, for a
 /// program converting by it (D738).
@@ -6913,7 +7310,29 @@ const FORMAT_2_10_10_10_UNORM: u32 = 50;
 
 /// What each texture a submission binds became, by its descriptor's address, slot, sampler address
 /// and the coordinates the module saturates: read once per submission.
-type TexturesRead = BTreeMap<(u64, u32, Option<u64>, [bool; 2]), Option<RenderCommand>>;
+/// Textures read once a submission, by descriptor address, slot, sampler address, and how the
+/// module reads them: saturated, mirrored once, compared in the shader.
+type TexturesRead =
+    BTreeMap<(u64, u32, Option<u64>, [bool; 2], [bool; 2], bool), Option<RenderCommand>>;
+
+/// What a source whose descriptor is still in the user data from word `first` binds: the stencil
+/// plane where it names one, else the texture [`user_data_texture`] reads, once a submission, where
+/// it is shaped as the module samples it.
+fn user_data_bound(
+    source: &TextureSource,
+    (first, user, stencil): (u32, &[u32], Option<StencilPlane>),
+    (memory, texels): (&impl GuestMemory, &mut TexelCache),
+    read_from_user: &mut BTreeMap<UserTextureKey, Option<RenderCommand>>,
+) -> Option<RenderCommand> {
+    let plane = stencil.and_then(|plane| stencil_texture(source, user_words(user, first)?, plane));
+    plane.or_else(|| {
+        read_from_user
+            .entry(user_texture_key(source, first, user))
+            .or_insert_with(|| user_data_texture(source, first, user, memory, texels))
+            .clone()
+            .filter(|bound| shaped_for(bound, source))
+    })
+}
 
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
 /// table names a texture read exactly, so the draws that follow sample the guest's own texels; and
@@ -6973,18 +7392,12 @@ fn bind_textures(
                     // A descriptor still in the user data the stage was seeded with is read from
                     // those words, with a sampler beside it there.
                     if let Some(first) = source.user_data {
-                        let plane = stencil.and_then(|plane| {
-                            stencil_texture(source, user_words(user, first)?, plane)
-                        });
-                        let bound = plane.or_else(|| {
-                            read_from_user
-                                .entry(user_texture_key(source, first, user))
-                                .or_insert_with(|| {
-                                    user_data_texture(source, first, user, memory, texels)
-                                })
-                                .clone()
-                                .filter(|bound| shaped_for(bound, source))
-                        });
+                        let bound = user_data_bound(
+                            source,
+                            (first, user, stencil),
+                            (memory, texels),
+                            &mut read_from_user,
+                        );
                         named.note(bound.as_ref(), || user_words(user, first));
                         if bound.is_none() {
                             *unbound += 1;
@@ -7010,8 +7423,14 @@ fn bind_textures(
                         .sampler_offset
                         .map(|offset| table + u64::from(offset));
                     // Named once a submission, as it is first read: not again for each draw.
-                    let fresh =
-                        !read.contains_key(&(at, source.slot, sampler_at, source.saturated));
+                    let fresh = !read.contains_key(&(
+                        at,
+                        source.slot,
+                        sampler_at,
+                        source.saturated,
+                        source.mirrored,
+                        source.shader_compare,
+                    ));
                     let bound = table_bound(
                         source,
                         (at, sampler_at),
@@ -7090,9 +7509,16 @@ fn table_bound(
     let plane =
         stencil.and_then(|plane| stencil_texture(source, read_descriptor(at, memory)?, plane));
     plane.or_else(|| {
-        read.entry((at, source.slot, sampler_at, source.saturated))
-            .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
-            .clone()
+        read.entry((
+            at,
+            source.slot,
+            sampler_at,
+            source.saturated,
+            source.mirrored,
+            source.shader_compare,
+        ))
+        .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
+        .clone()
     })
 }
 
@@ -7132,7 +7558,8 @@ struct StencilPlane {
     target: ResourceId,
 }
 
-/// The stencil plane of the depth target a submission's commands bind, where its bases are known.
+/// The stencil plane of the depth target a submission's commands bind, where its bases are known;
+/// noted for a later dispatch that loads it ([`dispatch_stencil_target`]).
 fn stencil_plane(
     commands: &[RenderCommand],
     bases: Option<crate::depth::DepthBases>,
@@ -7142,10 +7569,66 @@ fn stencil_plane(
         RenderCommand::SetRenderTargets { depth, .. } => *depth,
         _ => None,
     })?;
-    Some(StencilPlane {
+    let plane = StencilPlane {
         bases: [bases.stencil_read, bases.stencil_write],
         target,
-    })
+    };
+    note_stencil_plane(&plane);
+    Some(plane)
+}
+
+/// The depth target each stencil base a draw's stencil tests read or wrote belongs to, over the
+/// run: a dispatch carries no stencil registers of its own to name it by.
+fn stencil_planes() -> &'static std::sync::Mutex<std::collections::HashMap<u64, ResourceId>> {
+    static PLANES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, ResourceId>>,
+    > = std::sync::OnceLock::new();
+    PLANES.get_or_init(std::sync::Mutex::default)
+}
+
+/// Records which depth target `plane`'s bases belong to.
+fn note_stencil_plane(plane: &StencilPlane) {
+    if let Ok(mut planes) = stencil_planes().lock() {
+        for base in plane.bases.into_iter().filter(|&base| base != 0) {
+            planes.insert(base, plane.target);
+        }
+    }
+}
+
+/// The depth target whose stencil plane a dispatch's fetched image is, by its descriptor's eight
+/// words, with its extent: a single-level two-dimensional `8_UINT` image under a depth swizzle, at
+/// a base a draw's stencil tests read or wrote (D927), as Grand Theft Auto V's compute program
+/// reads its 3840 x 2160 stencil beside the depths. The host holds the plane in that target's
+/// attachment and never writes it to guest memory. `None` for any other image.
+fn dispatch_stencil_target(
+    words: [u32; 8],
+    source: &TextureSource,
+) -> Option<(ResourceId, (u32, u32))> {
+    let descriptor = decode_image_descriptor(words);
+    if descriptor.format != FORMAT_8_UINT
+        || !is_depth_swizzle(descriptor.tiling)
+        || words[3] >> 28 != IMAGE_TYPE_2D
+        || descriptor.base_level != 0
+        || descriptor.last_level != 0
+        || source.volume
+        || source.layered
+    {
+        return None;
+    }
+    let target = *stencil_planes().lock().ok()?.get(&descriptor.base)?;
+    Some((target, (descriptor.width, descriptor.height)))
+}
+
+/// The base of the `8_UINT` plane under a depth swizzle `words` describe, where no draw's stencil
+/// tests have used it: a stencil plane the host cannot place.
+fn unnamed_stencil_plane(words: [u32; 8]) -> Option<u64> {
+    let descriptor = decode_image_descriptor(words);
+    (descriptor.format == FORMAT_8_UINT
+        && is_depth_swizzle(descriptor.tiling)
+        && stencil_planes()
+            .lock()
+            .is_ok_and(|planes| !planes.contains_key(&descriptor.base)))
+    .then_some(descriptor.base)
 }
 
 /// The stencil plane `words` describe, loaded by `source` (D927): an `8_UINT` image under a depth
@@ -7172,6 +7655,7 @@ fn stencil_texture(
             cube: false,
             layered: false,
             stencil: true,
+            memory: None,
         })
 }
 
@@ -7200,12 +7684,18 @@ impl NamedTextures {
 /// Everything [`user_data_texture`] reads for a source: the source's slot, shape and saturation, the
 /// descriptor's words, the sampler's words where the user data holds them, and the address of the
 /// sampler where the table does. Equal keys bind the same texture in one submission.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a cache key, each flag one thing the binding read"
+)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct UserTextureKey {
     slot: u32,
     cube: bool,
     compare: bool,
     saturated: [bool; 2],
+    mirrored: [bool; 2],
+    shader_compare: bool,
     descriptor: Option<[u32; 8]>,
     /// Whether the sampler is in the user data, and its words there where they all are.
     sampler_in_user: bool,
@@ -7220,6 +7710,8 @@ fn user_texture_key(source: &TextureSource, first: u32, user: &[u32]) -> UserTex
         cube: source.cube,
         compare: source.compare,
         saturated: source.saturated,
+        mirrored: source.mirrored,
+        shader_compare: source.shader_compare,
         descriptor: user_words(user, first),
         sampler_in_user: source.sampler_user_data.is_some(),
         sampler_words: source
@@ -7255,8 +7747,9 @@ fn table_texture(
     if let Some(depth) = depth_texture(at, source, sampler_at, memory) {
         return Some(depth);
     }
-    // A compare of anything else: a linear depth texture the guest uploaded, or nothing.
-    if source.compare {
+    // A compare of anything else: a linear depth texture the guest uploaded, or nothing - unless the
+    // module compares it itself, which reads the image as it is.
+    if source.compare && !source.shader_compare {
         let words = read_descriptor(at, memory)?;
         let sampling = match sampler_at {
             Some(at) => Some(read_sampler(at, memory)?),
@@ -7269,7 +7762,7 @@ fn table_texture(
         let decoded = read_sampler(sampler_at, memory)?;
         // A half-border clamp is honoured only by a module that saturates the coordinates it
         // names (D743).
-        if decoded.saturated() != source.saturated {
+        if decoded.saturated() != source.saturated || decoded.mirrored() != source.mirrored {
             return None;
         }
         if let RenderCommand::BindTexture { sampling, .. }
@@ -7292,11 +7785,14 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
             *cube == source.cube && *layered == source.layered && !source.volume
         }
         // A flat image's or a cube's texels, or a linear depth texture's depths compared.
+        // A slot whose module compares it itself binds the image as it is.
         RenderCommand::BindTexture {
             faces, encoding, ..
         } => {
             let compared = *encoding == crate::backend::TextureEncoding::DepthCompare;
-            (*faces == CUBE_FACES) == source.cube && !source.volume && compared == source.compare
+            (*faces == CUBE_FACES) == source.cube
+                && !source.volume
+                && compared == (source.compare && !source.shader_compare)
         }
         // A volume's slices only under a module that samples three coordinates (D823).
         RenderCommand::BindVolumeTexture { .. } => source.volume && !source.compare,
@@ -7357,7 +7853,10 @@ fn unbound_reason(
                 shape_sampled(source),
                 if source.compare { " compared" } else { "" },
                 match sampler {
-                    NamedSampler::Read(decoded) if decoded.saturated() != source.saturated => {
+                    NamedSampler::Read(decoded)
+                        if (decoded.saturated() != source.saturated
+                            || decoded.mirrored() != source.mirrored) =>
+                    {
                         "clamping to a half border the module does not saturate for (D743)"
                     }
                     NamedSampler::Read(_) => "read",
@@ -7383,19 +7882,48 @@ fn unbound_reason(
             ),
             _ => String::new(),
         };
+        // Where the module's loads put the image and the sampler, so a sampler that was never
+        // named is traced to what the translation recorded.
+        let named = if source.compare {
+            format!(
+                " [image from table offset {:?} or user data {:?}; sampler from table offset {:?} or user data {:?}; table {:?}]",
+                source.table_offset,
+                source.user_data,
+                source.sampler_offset,
+                source.sampler_user_data,
+                source.table
+            )
+        } else {
+            String::new()
+        };
         return format!(
-            "it reads as {}, where the module samples {}{compares}",
+            "it reads as {}, where the module samples {}{compares}{named}",
             shape_read(&bound),
             shape_sampled(source)
         );
     }
     match sampler {
         NamedSampler::Unreadable => "its sampler could not be read".to_owned(),
-        NamedSampler::Read(decoded) if decoded.saturated() != source.saturated => concat!(
-            "its sampler clamps to a half border, which only a module that saturates its ",
-            "coordinates honours (D743)"
-        )
-        .to_owned(),
+        NamedSampler::Read(decoded)
+            if (decoded.saturated() != source.saturated
+                || decoded.mirrored() != source.mirrored) =>
+        {
+            // Both sides, so a module keyed for another sampler than the one bound is seen.
+            format!(
+                concat!(
+                    "its sampler clamps to a half border, which only a module that saturates its ",
+                    "coordinates honours (D743): the sampler saturates {:?} and mirrors {:?}, the ",
+                    "module was built saturating {:?} and mirroring {:?} [sampler from table ",
+                    "offset {:?} or user data {:?}]"
+                ),
+                decoded.saturated(),
+                decoded.mirrored(),
+                source.saturated,
+                source.mirrored,
+                source.sampler_offset,
+                source.sampler_user_data
+            )
+        }
         _ => "it reads, and neither its shape, its sampler nor its clamp refuses it".to_owned(),
     }
 }
@@ -7451,12 +7979,48 @@ fn unbound_in_user_data(
     let at = usize::try_from(first).unwrap_or(usize::MAX);
     let words = user.get(at..).map_or(&[][..], |w| &w[..w.len().min(8)]);
     let sampler = user_data_sampler(source, user, memory);
-    let why = unbound_reason(user_words(user, first), source, sampler, memory, texels);
+    let mut why = unbound_reason(user_words(user, first), source, sampler, memory, texels);
+    if matches!(sampler, NamedSampler::Unreadable) {
+        let place = source.sampler_user_data.map_or_else(
+            || {
+                let at = source.sampler_offset.map_or(0, |offset| {
+                    table_address(source.table, user) + u64::from(offset)
+                });
+                (format!("at {at:#x}"), sampler_words(at, memory))
+            },
+            |word| (format!("in user data {word}"), user_words(user, word)),
+        );
+        why.push_str(&sampler_refusal(place));
+    }
     format!(
         "slot {}, from user data {first}: {} - {why}",
         source.slot,
         hex_words(words)
     )
+}
+
+/// The four words of the sampler descriptor at `at`, where guest memory holds them.
+fn sampler_words(at: u64, memory: &impl GuestMemory) -> Option<[u32; 4]> {
+    let bytes = memory.read(at, 16)?;
+    let mut words = [0u32; 4];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Some(words)
+}
+
+/// Why a sampler named at `place` reads as nothing: its words, unreadable, or what refused them.
+fn sampler_refusal((place, words): (String, Option<[u32; 4]>)) -> String {
+    match words {
+        None => format!(" (the sampler {place} is not readable guest memory)"),
+        Some(words) => format!(
+            " (the sampler {place}, {}: {})",
+            hex_words(&words),
+            crate::registers::decode_sampler_descriptor(words)
+                .err()
+                .unwrap_or("decoded")
+        ),
+    }
 }
 
 /// An unbound slot whose descriptor is at `at` in guest memory, its sampler at `sampler_at`,
@@ -7467,6 +8031,7 @@ fn unbound_in_table(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> String {
+    use std::fmt::Write as _;
     let words: Vec<u32> = memory.read(at, 32).map_or_else(Vec::new, |bytes| {
         bytes
             .chunks_exact(4)
@@ -7476,7 +8041,20 @@ fn unbound_in_table(
     let sampler = sampler_at.map_or(NamedSampler::NoneNamed, |at| {
         NamedSampler::read(read_sampler(at, memory))
     });
-    let why = unbound_reason(read_descriptor(at, memory), source, sampler, memory, texels);
+    let mut why = unbound_reason(read_descriptor(at, memory), source, sampler, memory, texels);
+    if let (NamedSampler::Unreadable, Some(sampler_at)) = (sampler, sampler_at) {
+        why.push_str(&sampler_refusal((
+            format!("at {sampler_at:#x}"),
+            sampler_words(sampler_at, memory),
+        )));
+        // Where the module's loads put each: what a sampler offset that lands on another
+        // descriptor is checked against.
+        let _ = write!(
+            why,
+            " [the module loads the image from table offset {:?} and the sampler from {:?}, the table from {:?}]",
+            source.table_offset, source.sampler_offset, source.table
+        );
+    }
     format!(
         "slot {}, from {at:#x}: {} - {why}",
         source.slot,
@@ -7509,11 +8087,11 @@ fn user_data_texture(
     // A depth surface is a depth target, which is not in guest memory to read (D817): a sampler
     // named and unreadable binds nothing.
     if !matches!(named, NamedSampler::Unreadable)
-        && let Some(depth) = depth_texture_from(descriptor, source, named.sampling())
+        && let Some(depth) = depth_or_memory(descriptor, source, named.sampling(), memory)
     {
         return Some(depth);
     }
-    if source.compare {
+    if source.compare && !source.shader_compare {
         return linear_depth_compare(descriptor, source, named.sampling(), memory);
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels).ok()?;
@@ -7522,7 +8100,7 @@ fn user_data_texture(
         NamedSampler::Read(decoded) => {
             // A half-border clamp is honoured only by a module that saturates the coordinates it
             // names (D743).
-            if decoded.saturated() != source.saturated {
+            if decoded.saturated() != source.saturated || decoded.mirrored() != source.mirrored {
                 return None;
             }
             if let RenderCommand::BindTexture { sampling, .. }
@@ -7704,7 +8282,106 @@ fn depth_texture(
         Some(at) => Some(read_sampler(at, memory)?),
         None => None,
     };
-    depth_texture_from(words, source, sampling)
+    depth_or_memory(words, source, sampling, memory)
+}
+
+/// [`depth_texture_from`], carrying the surface's depths as guest memory holds them where a face of
+/// it is one no draw has targeted ([`untargeted_depth`], D939): the backend samples those faces from
+/// them, and every face a draw drew from its attachment.
+fn depth_or_memory(
+    words: [u32; 8],
+    source: &TextureSource,
+    sampling: Option<crate::registers::TextureSampling>,
+    memory: &impl GuestMemory,
+) -> Option<RenderCommand> {
+    let mut bound = depth_texture_from(words, source, sampling)?;
+    if let RenderCommand::BindDepthTexture {
+        target,
+        cube,
+        layered,
+        stencil: false,
+        memory: held,
+        ..
+    } = &mut bound
+    {
+        let faces = if *cube || *layered { CUBE_FACES } else { 1 };
+        if (0..faces)
+            .any(|face| !depth_targeted(crate::depth::depth_target_slice_of(*target, face)))
+        {
+            *held = untargeted_depth(words, faces, memory);
+        }
+    }
+    Some(bound)
+}
+
+/// The depth targets a draw has bound, by id, over the run: a depth surface sampled before any is
+/// read from guest memory (D939).
+fn targeted_depths() -> &'static std::sync::Mutex<std::collections::HashSet<ResourceId>> {
+    static TARGETED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<ResourceId>>> =
+        std::sync::OnceLock::new();
+    TARGETED.get_or_init(std::sync::Mutex::default)
+}
+
+/// Records that a draw binds the depth target `id`.
+fn note_targeted_depth(id: ResourceId) {
+    if let Ok(mut targeted) = targeted_depths().lock() {
+        targeted.insert(id);
+    }
+}
+
+/// Whether a draw has bound the depth target `id` in this run.
+fn depth_targeted(id: ResourceId) -> bool {
+    targeted_depths()
+        .lock()
+        .is_ok_and(|targeted| targeted.contains(&id))
+}
+
+/// A depth surface's depths as guest memory holds them (D939): one level of `16_UNORM` or
+/// `32_FLOAT` under its depth swizzle, detiled by [`crate::swizzle`]'s equation, as `f32` depths. A
+/// cube's `faces` are its first six slices, one after another a slice's bytes apart. [`None`] for
+/// another format, a chain, a pipe-bank XOR, or memory that does not hold the surface.
+fn untargeted_depth(
+    words: [u32; 8],
+    faces: u32,
+    memory: &impl GuestMemory,
+) -> Option<crate::backend::MemoryDepths> {
+    let descriptor = decode_image_descriptor(words);
+    // An `8_8_8_8_UNORM` image's depth is its first channel, normalised: what a compare against
+    // a colour image compares with.
+    let (bytes, first_channel) = match descriptor.format {
+        FORMAT_16_UNORM => (2, false),
+        FORMAT_32_FLOAT => (4, false),
+        FORMAT_8_8_8_8_UNORM => (4, true),
+        _ => return None,
+    };
+    // `64KB_Z_X`'s pipe-bank XOR is not separated from its base (`decode_image_descriptor`); in
+    // any other mode those bits are the address's.
+    if descriptor.levels > 1
+        || (descriptor.tiling == SwizzleMode::Tiled64KbZX && words[0] & 0xFF != 0)
+    {
+        return None;
+    }
+    let equation = crate::swizzle::equation(descriptor.tiling, bytes)?;
+    let (width, height) = (descriptor.width, descriptor.height);
+    let slice = equation.surface_bytes(width, height);
+    let tiled = memory.read(descriptor.base, slice * faces as usize)?;
+    let mut linear = Vec::new();
+    for face in tiled.chunks_exact(slice) {
+        linear.extend(equation.detile(face, (width, height), width, 0)?);
+    }
+    let texels: std::sync::Arc<[u32]> = linear
+        .chunks_exact(bytes as usize)
+        .map(|texel| match texel {
+            [low, high] => (f32::from(u16::from_le_bytes([*low, *high])) / 65535.0).to_bits(),
+            _ if first_channel => (f32::from(texel[0]) / 255.0).to_bits(),
+            _ => u32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]]),
+        })
+        .collect();
+    Some(crate::backend::MemoryDepths {
+        width,
+        height,
+        texels,
+    })
 }
 
 /// The eight words of the image descriptor at `at`.
@@ -7727,7 +8404,8 @@ const FORMAT_16_16_16_16_UNORM: u32 = 65;
 
 /// What a compare source samples when its descriptor is a linear `32_FLOAT` image of one level in
 /// guest memory rather than a depth target: its depths, read as they lie, compared through the
-/// sampler the module names - a GL `shadow2D` against a depth texture the guest uploaded. The
+/// sampler the module names - a GL `shadow2D` against a depth texture the guest uploaded. A tiled
+/// `8_8_8_8_UNORM` image compares its first channel, normalised. The
 /// sampler is required, and must be one the module's coordinates were saturated for (D743).
 /// [`None`] for any other descriptor or sampler.
 fn linear_depth_compare(
@@ -7738,16 +8416,54 @@ fn linear_depth_compare(
 ) -> Option<RenderCommand> {
     let descriptor = decode_image_descriptor(words);
     let sampling = sampling?;
+    // A compare that never or always passes answers 0 or 1 whatever the image holds, wherever it
+    // is sampled and however filtered: one texel of any depth binds it exactly, whatever the image
+    // is - Grand Theft Auto V compares against colour placeholders so.
+    if source.compare && !source.cube && !source.volume && matches!(sampling.depth_compare, 0 | 7) {
+        let texels: std::sync::Arc<[u32]> = std::sync::Arc::from([0.0f32.to_bits()]);
+        return Some(RenderCommand::BindTexture {
+            slot: source.slot,
+            hash: crate::content_hash(&texels),
+            texels,
+            width: 1,
+            height: 1,
+            sampling,
+            encoding: crate::backend::TextureEncoding::DepthCompare,
+            faces: 1,
+            levels: 1,
+        });
+    }
+    let unorm = descriptor.format == FORMAT_8_8_8_8_UNORM;
     if !source.compare
         || source.cube
         || source.volume
-        || descriptor.format != FORMAT_32_FLOAT
-        || descriptor.tiling != SwizzleMode::Linear
+        || !(descriptor.format == FORMAT_32_FLOAT || unorm)
         || words[3] >> 28 != IMAGE_TYPE_2D
         || descriptor.levels > 1
         || sampling.saturated() != source.saturated
+        || sampling.mirrored() != source.mirrored
     {
         return None;
+    }
+    // One in a tiled mode is detiled by its swizzle equation, as an untargeted depth surface is
+    // (D939, D944): Grand Theft Auto V compares against a 1x1 `256B_S` one, and a 1x1
+    // `8_8_8_8_UNORM` one whose first channel the compare reads.
+    if unorm && descriptor.tiling == SwizzleMode::Linear {
+        return None;
+    }
+    if descriptor.tiling != SwizzleMode::Linear {
+        let depths = untargeted_depth(words, 1, memory)?;
+        return Some(RenderCommand::BindTexture {
+            slot: source.slot,
+            hash: crate::content_hash(&depths.texels),
+            texels: depths.texels,
+            width: depths.width,
+            height: depths.height,
+            sampling,
+            encoding: crate::backend::TextureEncoding::DepthCompare,
+            faces: 1,
+            levels: 1,
+        });
     }
     let DispatchSurface::Linear {
         base,
@@ -7814,7 +8530,10 @@ fn depth_texture_from(
         None if !compare => crate::registers::TextureSampling::CLAMPED_POINT,
         None => return None,
     };
-    if sampling.saturated() != saturated || source.cube != cube {
+    if sampling.saturated() != saturated
+        || sampling.mirrored() != source.mirrored
+        || source.cube != cube
+    {
         return None;
     }
     Some(RenderCommand::BindDepthTexture {
@@ -7825,7 +8544,41 @@ fn depth_texture_from(
         cube,
         layered,
         stencil: false,
+        memory: None,
     })
+}
+
+/// How a draw's pixel shader compares `source`, a slot its module samples compared, under
+/// `sampling` ([`orbistoun_translate::wavefront::UserData::compared`]): itself, by the sampler's
+/// function and filter, where the image the draw binds there is not a depth target - a colour image
+/// no host compare sampler reads - and by the host's compare sampler otherwise, zero.
+fn shader_compare_of(
+    source: &TextureSource,
+    sampling: crate::registers::TextureSampling,
+    (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
+) -> u8 {
+    let descriptor = match source.user_data {
+        Some(first) => user_words::<8>(words, first),
+        None => source.table_offset.and_then(|offset| {
+            read_descriptor(
+                table_address(source.table, words) + u64::from(offset),
+                memory,
+            )
+        }),
+    };
+    let Some(descriptor) = descriptor else {
+        return 0;
+    };
+    let image = decode_image_descriptor(descriptor);
+    if is_depth_swizzle(image.tiling) && DEPTH_IMAGE_FORMATS.contains(&image.format) {
+        return 0;
+    }
+    let linear = if sampling.magnify == crate::registers::TextureFilter::Linear {
+        orbistoun_translate::wavefront::SHADER_COMPARE_LINEAR
+    } else {
+        0
+    };
+    orbistoun_translate::wavefront::SHADER_COMPARE | linear | (sampling.depth_compare & 0x7)
 }
 
 /// [`read_texture`] for a descriptor's eight words already in hand, or why it is not bound: a
@@ -7836,6 +8589,7 @@ fn texture_from_words(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Result<RenderCommand, &'static str> {
+    let words = uncompressed_by_keys(words, memory);
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
         let read = crate::perf::span(crate::perf::Span::TextureBlocks, || {
@@ -7855,8 +8609,11 @@ fn texture_from_words(
 /// A flat image in a format [`crate::formats`] samples, where the readers above do not read it
 /// (D923): one level of a tiled 2D image, uncompressed, its elements detiled by
 /// [`crate::swizzle`]'s equation for its mode and element size and bound as they lie, in the
-/// guest's own format under its own selects. A chain's level, a linear image, a cube, a volume or
-/// an array, or a format, mode, size or selects nothing samples exactly, is `None`.
+/// guest's own format under its own selects. A whole cube in a standard swizzle is its six faces,
+/// each a surface after the one before - a standard swizzle's layers carry no XOR (D916) - bound as
+/// six faces: Grand Theft Auto V's 256 x 256 `10_11_11_FLOAT` reflection cube in `4KB_S`. A chain's
+/// level, a linear image, a volume or an array, or a format, mode, size or selects nothing samples
+/// exactly, is `None`.
 fn guest_texture(
     descriptor: &ImageDescriptor,
     words: [u32; 8],
@@ -7870,8 +8627,15 @@ fn guest_texture(
     sampled.view(selects, false)?;
     // An integer format is sampled through an integer image the module declares, which a draw's
     // translation does not yet.
+    let cube = words[3] >> 28 == IMAGE_TYPE_CUBE
+        && words[4] & (DEPTH_FIELD | BASE_ARRAY_FIELD) == ONE_CUBE_LAST_LAYER
+        && matches!(
+            descriptor.tiling,
+            SwizzleMode::Tiled4KbS | SwizzleMode::Tiled64KbS | SwizzleMode::Tiled256BS
+        );
+    let faces = if cube { CUBE_FACES } else { 1 };
     if sampled.layout.sampled_type() != crate::formats::SampledType::Float
-        || words[3] >> 28 != IMAGE_TYPE_2D
+        || !(words[3] >> 28 == IMAGE_TYPE_2D || cube)
         || descriptor.levels > 1
         || descriptor.compression.is_some()
         // `64KB_Z_X`'s pipe-bank XOR is not separated from its base here (`decode_image_descriptor`).
@@ -7891,33 +8655,86 @@ fn guest_texture(
         code: descriptor.format as u16,
         selects: selects.map(|select| select as u8),
     };
-    let span = equation.surface_bytes(across, down);
-    // Another image than any `TexelFormat` reading of the same address and extent.
+    let slice = equation.surface_bytes(across, down);
+    let span = slice * faces as usize;
+    // Another image than any `TexelFormat` reading of the same address and extent, and a cube
+    // another than a flat image at its first face.
     let key = (
         descriptor.base,
         descriptor.width,
         descriptor.height,
-        1 << 28 | descriptor.format,
+        1 << 28 | u32::from(cube) << 27 | descriptor.format,
     );
     let pipe_bank_xor = u32::from(descriptor.pipe_bank_xor);
     let (hash, shared) = kept_or_read((texels, key, span), encoding, |spanned| {
         let tiled = memory.read(descriptor.base, spanned)?;
-        let mut linear = equation.detile(tiled, (across, down), across, pipe_bank_xor)?;
-        linear.resize(linear.len().next_multiple_of(4), 0);
-        Some(
-            linear
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-                .collect(),
-        )
+        let mut words = Vec::new();
+        for face in tiled.chunks_exact(slice) {
+            let mut linear = equation.detile(face, (across, down), across, pipe_bank_xor)?;
+            linear.resize(linear.len().next_multiple_of(4), 0);
+            words.extend(
+                linear
+                    .chunks_exact(4)
+                    .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]])),
+            );
+        }
+        Some(words)
     })?;
     Some(block_bind(
         slot,
         hash,
         shared,
-        (descriptor.width, descriptor.height, 1),
+        (descriptor.width, descriptor.height, faces),
         encoding,
     ))
+}
+
+#[cfg(test)]
+mod untargeted_depth_tests {
+    use super::untargeted_depth;
+
+    /// Guest memory of one surface at [`BASE`].
+    struct Surface(Vec<u8>);
+
+    const BASE: u64 = 0x10_0000;
+
+    impl super::GuestMemory for Surface {
+        fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+            let at = usize::try_from(address.checked_sub(BASE)?).ok()?;
+            self.0.get(at..at.checked_add(length)?)
+        }
+    }
+
+    /// A depth surface no draw targeted is read from guest memory (D939): a `16_UNORM` 4x4 under
+    /// `64KB_Z_X` whose memory holds 0xFFFF everywhere reads sixteen depths of one, 0x8000 reads
+    /// 0x8000 / 0xFFFF, and a cube reads six faces of them.
+    #[test]
+    fn an_untargeted_depth_surface_is_read_from_memory() {
+        let selects = 4 | 5 << 3 | 6 << 6 | 7 << 9;
+        let words = [
+            (BASE >> 8) as u32,
+            7 << 20 | 3 << 30,
+            3 << 14,
+            selects | 24 << 20 | super::IMAGE_TYPE_2D << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let read = |fill: u16, faces: u32| {
+            let memory = Surface(fill.to_le_bytes().repeat(faces as usize * (32 << 10)));
+            untargeted_depth(words, faces, &memory).expect("depths from memory")
+        };
+        assert_eq!(&*read(0xFFFF, 1).texels, &[1.0_f32.to_bits(); 16]);
+        assert_eq!(
+            read(0x8000, 1).texels[0],
+            (f32::from(0x8000_u16) / 65535.0).to_bits()
+        );
+        let cube = read(0xFFFF, 6);
+        assert_eq!(cube.texels.len(), 96);
+        assert_eq!(cube.face(5).map(|(texels, _)| texels.len()), Some(16));
+        assert_eq!(cube.face(6), None);
+    }
 }
 
 #[cfg(test)]
@@ -7992,6 +8809,35 @@ mod guest_texture_tests {
         );
         let bytes: Vec<u8> = texels.iter().flat_map(|word| word.to_le_bytes()).collect();
         assert_eq!(bytes, linear);
+    }
+
+    /// A whole cube in a standard swizzle binds its six faces, each the surface after the one before:
+    /// Grand Theft Auto V's `10_11_11_FLOAT` reflection cube in `4KB_S`. Face `n`'s first element,
+    /// which every swizzle keeps at its surface's first byte, is `n + 1`.
+    #[test]
+    fn a_standard_swizzle_cube_binds_its_six_faces() {
+        let equation = crate::swizzle::equation(crate::registers::SwizzleMode::Tiled4KbS, 4)
+            .expect("4KB_S at 4 bytes");
+        let slice = equation.surface_bytes(8, 8);
+        let mut memory = vec![0u8; slice * 6];
+        for face in 0..6_u32 {
+            let at = face as usize * slice;
+            memory[at..at + 4].copy_from_slice(&(face + 1).to_le_bytes());
+        }
+        // Three channels and one: the fourth select reads 1, as the game's does (0x3ac).
+        let mut cube = words(36, (8, 8), 5);
+        cube[3] = cube[3] & !(0xf << 28 | 7 << 9) | super::IMAGE_TYPE_CUBE << 28 | 1 << 9;
+        cube[4] = super::ONE_CUBE_LAST_LAYER;
+        let bound =
+            texture_from_words(cube, 1, &Surface(memory), &mut TexelCache::new()).expect("bound");
+        let RenderCommand::BindTexture { texels, faces, .. } = bound else {
+            panic!("a texture");
+        };
+        assert_eq!(faces, 6);
+        assert_eq!(texels.len(), 6 * 64);
+        for face in 0..6_u32 {
+            assert_eq!(texels[face as usize * 64], face + 1, "face {face}");
+        }
     }
 
     /// An integer format is not bound through a float image, and a format nothing samples is not
@@ -9563,8 +10409,45 @@ fn texture_keys_cleared(
     match crate::dcc::classify(keys) {
         crate::dcc::Keys::Uncompressed => Some(false),
         crate::dcc::Keys::Clear0000 => Some(true),
-        crate::dcc::Keys::Other => None,
+        crate::dcc::Keys::Other | crate::dcc::Keys::ClearSingle => None,
     }
+}
+
+/// `words` with compression off where its keys say every block is stored uncompressed (D942): memory
+/// then holds the plain surface, as a target a frame was written back into does once its keys are
+/// expanded (D714). One level of `64KB_R_X` only; any other image, or keys that say anything else,
+/// is as it was.
+fn uncompressed_by_keys(mut words: [u32; 8], memory: &impl GuestMemory) -> [u32; 8] {
+    let descriptor = decode_image_descriptor(words);
+    let Some(dcc) = descriptor.compression else {
+        return words;
+    };
+    let Some(bytes) = crate::formats::sampled(descriptor.format)
+        .ok()
+        .map(|sampled| sampled.layout.element_bytes())
+    else {
+        return words;
+    };
+    if descriptor.tiling != SwizzleMode::Tiled64KbRX
+        || descriptor.levels > 1
+        || !bytes.is_power_of_two()
+    {
+        return words;
+    }
+    let meta = crate::dcc::texel_meta_bytes(
+        descriptor.width,
+        descriptor.height,
+        bytes.trailing_zeros(),
+        dcc.pipe_aligned,
+    );
+    let uncompressed = usize::try_from(meta)
+        .ok()
+        .and_then(|meta| memory.read(crate::dcc::meta_start(dcc), meta))
+        .is_some_and(|keys| crate::dcc::classify(keys) == crate::dcc::Keys::Uncompressed);
+    if uncompressed {
+        words[6] &= !(1 << 21);
+    }
+    words
 }
 
 /// How many textures the cache holds before it restarts: enough for a frame's set, and a bound for
@@ -9666,6 +10549,8 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             discard_vertex_exports: false,
             capture_positions: capturing_positions(),
             saturated: UNSATURATED,
+            mirrored: UNSATURATED,
+            compared: [0; MAX_TEXTURES],
             local_words,
             program_address: None,
             integer_targets: 0,
@@ -9690,6 +10575,8 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             discard_vertex_exports: false,
             capture_positions: false,
             saturated: UNSATURATED,
+            mirrored: UNSATURATED,
+            compared: [0; MAX_TEXTURES],
             local_words: None,
             program_address: None,
             integer_targets: 0,
@@ -10512,6 +11399,8 @@ mod tests {
                 volume: false,
                 compare: false,
                 saturated: [false; 2],
+                mirrored: [false; 2],
+                shader_compare: false,
                 level_user_data: None,
                 buffer_offset: None,
                 layered: false,
@@ -10597,6 +11486,8 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated: [false; 2],
+                    mirrored: [false; 2],
+                    shader_compare: false,
                     level_user_data: None,
                     buffer_offset: None,
                     layered: false,
@@ -10803,6 +11694,8 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated: [false; 2],
+                    mirrored: [false; 2],
+                    shader_compare: false,
                     level_user_data: None,
                     buffer_offset: None,
                     layered: false,
@@ -10880,6 +11773,8 @@ mod tests {
                 volume: false,
                 compare: false,
                 saturated: [false; 2],
+                mirrored: [false; 2],
+                shader_compare: false,
                 level_user_data: None,
                 buffer_offset: None,
                 layered: false,
@@ -10967,6 +11862,8 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated,
+                    mirrored: [false; 2],
+                    shader_compare: false,
                     level_user_data: None,
                     buffer_offset: None,
                     layered: false,
@@ -11039,6 +11936,7 @@ mod tests {
                 cube: true,
                 layered: false,
                 stencil: false,
+                memory: None,
             })
         );
         // A flat sample of the same cube reads its first face: the target drawn at slice zero
@@ -11054,6 +11952,7 @@ mod tests {
                 cube: false,
                 layered: false,
                 stencil: false,
+                memory: None,
             })
         );
         // A load of it by face reads the six slices as an array's layers (D922): Grand Theft Auto
@@ -11072,6 +11971,7 @@ mod tests {
                 cube: false,
                 layered: true,
                 stencil: false,
+                memory: None,
             })
         );
         cube[4] = 11;
@@ -11113,6 +12013,42 @@ mod tests {
         assert_eq!(
             super::dispatch_depth_target(sixteen, &TextureSource::default()),
             None
+        );
+        // Its stencil plane, `8_UINT` (5) at a base a draw's stencil tests used, is that target's
+        // too, once a draw has named it; before, it is no target.
+        let mut stencil = image;
+        stencil[0] = 0x0012_3400;
+        stencil[1] = stencil[1] & !(0x1ff << 20) | 5 << 20;
+        let base = super::decode_image_descriptor(stencil).base;
+        assert_eq!(
+            super::dispatch_stencil_target(stencil, &TextureSource::default()),
+            None
+        );
+        let target = crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8);
+        super::note_stencil_plane(&super::StencilPlane {
+            bases: [base, 0],
+            target,
+        });
+        let (id, extent) = super::dispatch_stencil_target(stencil, &TextureSource::default())
+            .expect("the plane's target");
+        assert_eq!(id, target);
+        assert_eq!(
+            super::host_depths(extent, false, stencil).format,
+            super::TexelFormat::R32Uint
+        );
+        // Its bits as `32_UINT` (20) are the same target, whose placeholder reads integers.
+        let mut bits = image;
+        bits[1] = bits[1] & !(0x1ff << 20) | 20 << 20;
+        let (id, extent) =
+            super::dispatch_depth_target(bits, &TextureSource::default()).expect("the target");
+        assert_eq!(id, crate::depth::depth_target_id_at(0x0074_00d6_e500 << 8));
+        assert_eq!(
+            super::host_depths(extent, false, bits).format,
+            super::TexelFormat::R32Uint
+        );
+        assert_eq!(
+            super::host_depths(extent, false, image).format,
+            super::TexelFormat::R32Float
         );
         // A one-layer 2D array (type 13, `DEPTH` 0) a program reads as an array is the same
         // target (D906): Grand Theft Auto V's loading-screen program reads its 1024 x 1024 one so.
@@ -11282,6 +12218,8 @@ mod tests {
             volume: false,
             compare: true,
             saturated: [false; 2],
+            mirrored: [false; 2],
+            shader_compare: false,
             level_user_data: None,
             buffer_offset: None,
             layered: false,
@@ -11332,7 +12270,8 @@ mod tests {
     /// A texture in the user data is read once a submission however many draws bind it, as one in a
     /// table is: PPSA25872 sets the same words before each of its draws, and each read asked the
     /// host whether its 64 MiB atlas had been written since - half a millisecond a draw. The words
-    /// are PPSA03416's shadow map, whose sampler is read from the table, so each read is seen.
+    /// are PPSA03416's shadow map, whose sampler is read from the table, so each read is seen; the
+    /// depth surface's own bytes, which a face no draw targeted is read from (D939), are not counted.
     #[test]
     fn a_user_data_texture_is_read_once_a_submission() {
         use super::{
@@ -11341,7 +12280,9 @@ mod tests {
         struct Memory(Vec<u8>, std::cell::Cell<usize>);
         impl super::GuestMemory for Memory {
             fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
-                self.1.set(self.1.get() + 1);
+                if address == 0x1010 {
+                    self.1.set(self.1.get() + 1);
+                }
                 let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
                 self.0.get(start..start.checked_add(length)?)
             }
@@ -11383,6 +12324,8 @@ mod tests {
                 volume: false,
                 compare: true,
                 saturated: [false; 2],
+                mirrored: [false; 2],
+                shader_compare: false,
                 level_user_data: None,
                 buffer_offset: None,
                 layered: false,
@@ -11469,6 +12412,8 @@ mod tests {
             volume: false,
             compare: true,
             saturated: [false; 2],
+            mirrored: [false; 2],
+            shader_compare: false,
             level_user_data: None,
             buffer_offset: None,
             layered: false,
@@ -12139,6 +13084,49 @@ mod tests {
         );
     }
 
+    /// A compare against a 1x1 `8_8_8_8_UNORM` image in `256B_S` compares its first channel,
+    /// normalised: Grand Theft Auto V binds one as a shadow map no pass has drawn.
+    #[test]
+    fn a_compare_against_a_colour_image_reads_its_first_channel() {
+        use super::{RenderCommand, TextureSource, linear_depth_compare};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 256];
+        bytes[..4].copy_from_slice(&[0xff, 0x10, 0x20, 0x30]);
+        // 1 x 1, 8_8_8_8_UNORM (56), 2D in 256B_S (swizzle mode 1), one level.
+        let words = [0x100, 56 << 20, 0, 0x9010_0fac, 0, 0, 0, 0];
+        let compare = TextureSource {
+            compare: true,
+            ..TextureSource::default()
+        };
+        // A compare that reads the texel: less, not the default's never, which answers alike.
+        let sampling = crate::registers::TextureSampling {
+            depth_compare: 1,
+            ..crate::registers::TextureSampling::default()
+        };
+        let bound = linear_depth_compare(words, &compare, Some(sampling), &Memory(bytes));
+        let Some(RenderCommand::BindTexture {
+            ref texels,
+            width: 1,
+            height: 1,
+            encoding: crate::backend::TextureEncoding::DepthCompare,
+            ..
+        }) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        assert_eq!(
+            texels.to_vec(),
+            [1.0f32.to_bits()],
+            "0xff, as a depth of one"
+        );
+    }
+
     /// A linear `8_8_8_8_UNORM` volume binds its slices as one three-dimensional texture, slice
     /// `s` at `s` slices of the 256-byte pitch in, `DEPTH` plus one of them (D823), and only under
     /// a module that samples a volume.
@@ -12410,6 +13398,8 @@ mod tests {
             user_data: None,
             sampler_user_data: None,
             saturated: [false; 2],
+            mirrored: [false; 2],
+            shader_compare: false,
             cube,
             volume: false,
             compare: false,
@@ -12955,6 +13945,8 @@ mod tests {
                     volume: false,
                     compare: false,
                     saturated: [true; 2],
+                    mirrored: [false; 2],
+                    shader_compare: false,
                     level_user_data: None,
                     buffer_offset: None,
                     layered: false,
@@ -12999,6 +13991,32 @@ mod tests {
             (0, Some((width, height, [TextureWrap::ClampHalfBorder; 2])))
         );
         assert_eq!(bind(None), (1, None), "the words read as a table address");
+    }
+
+    /// A registered pixel shader is still bound per draw, so a draw's half-border samplers reach
+    /// it (D743): Grand Theft Auto V registers its shadow pixel shaders, whose samplers clamp to
+    /// half a border. A registered primitive shader keeps its registration.
+    #[test]
+    fn a_registered_pixel_shader_is_bound_per_draw() {
+        use super::{Candidate, RegisteredShader, ShaderStage, kept_registrations};
+        let (vertex, fragment) = (
+            Candidate {
+                address: 0x1000,
+                stage: ShaderStage::Vertex,
+            },
+            Candidate {
+                address: 0x2000,
+                stage: ShaderStage::Fragment,
+            },
+        );
+        let registered = [vertex, fragment].map(|c| RegisteredShader {
+            address: c.address,
+            stage: c.stage,
+        });
+        assert_eq!(
+            kept_registrations(&[vertex, fragment], &registered),
+            vec![ShaderStage::Vertex]
+        );
     }
 
     /// A draw whose pixel shader no earlier draw prepared still has its half-border samplers read
@@ -13064,12 +14082,14 @@ mod tests {
             stage: ShaderStage::Fragment,
         };
         let mut by_geometry = ByGeometry::default();
-        let saturated = pipeline.draw_saturated(
+        let (saturated, mirrored, compared) = pipeline.draw_saturated(
             &[fragment],
             (&words, &memory),
             &mut by_geometry,
             &mut Submission::default(),
         );
+        assert_eq!(mirrored, super::UNSATURATED, "nothing mirrors once");
+        assert_eq!(compared, [0; super::MAX_TEXTURES], "nothing compares");
         assert_eq!(saturated[0], [true, false]);
         assert!(saturated[1..].iter().all(|slot| *slot == [false; 2]));
     }
@@ -13668,6 +14688,10 @@ mod tests {
     /// against the one its module samples, or the sampler it could not read - what PPSA03416's
     /// refused draw needed to say.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refusal after another, each its own case"
+    )]
     fn an_unbound_slot_names_the_check_that_refused_it() {
         use super::{NamedSampler, TextureSource, unbound_reason};
         struct Memory(Vec<u8>);
@@ -13701,6 +14725,8 @@ mod tests {
             volume: false,
             compare: false,
             saturated: [false; 2],
+            mirrored: [false; 2],
+            shader_compare: false,
             level_user_data: None,
             buffer_offset: None,
             layered: false,
@@ -13718,19 +14744,35 @@ mod tests {
             depth_compare: 7,
             ..never
         };
-        assert_eq!(
+        assert!(
             unbound_reason(
                 Some(descriptor),
                 &compared,
                 NamedSampler::Read(never),
                 &memory,
                 &mut cache
-            ),
-            concat!(
-                "it reads as a flat image, where the module samples a compared depth texture, ",
-                "under a sampler that compares never"
             )
+            .starts_with(concat!(
+                "it reads as a flat image, where the module samples a compared depth texture, ",
+                "under a sampler that compares never ["
+            ))
         );
+        // And either binds it exactly: its answer is the same at every texel.
+        for sampling in [never, always] {
+            let bound = super::linear_depth_compare(descriptor, &compared, Some(sampling), &memory);
+            assert!(
+                matches!(
+                    bound,
+                    Some(crate::backend::RenderCommand::BindTexture {
+                        width: 1,
+                        height: 1,
+                        encoding: crate::backend::TextureEncoding::DepthCompare,
+                        ..
+                    })
+                ),
+                "{bound:?}"
+            );
+        }
         assert!(
             unbound_reason(
                 Some(descriptor),
@@ -13739,7 +14781,7 @@ mod tests {
                 &memory,
                 &mut cache
             )
-            .ends_with("compares always")
+            .contains("compares always")
         );
         assert_eq!(
             unbound_reason(

@@ -550,6 +550,17 @@ pub struct UserData {
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
     pub saturated: [[bool; 2]; MAX_TEXTURES],
+    /// For each texture slot a pixel shader samples, which coordinates, across then down, it
+    /// mirrors once before sampling: those the draw's sampler mirrors once, which no host sampler
+    /// does, taken as their absolute value and clamped as the mode's clamp says.
+    #[serde(default)]
+    pub mirrored: [[bool; 2]; MAX_TEXTURES],
+    /// For each texture slot a module compares against a reference, how the shader compares it
+    /// itself, where the draw binds an image that is not a depth target: [`SHADER_COMPARE`] set,
+    /// the sampler's `DEPTH_COMPARE_FUNC` in bits 2:0 and [`SHADER_COMPARE_LINEAR`] for a bilinear
+    /// filter. Zero leaves the compare to the host's sampler.
+    #[serde(default)]
+    pub compared: [u8; MAX_TEXTURES],
     /// The local data share the stage's program declares, in words: its `RSRC2`'s `LDS_SIZE`, in
     /// the 512-byte units radeonsi encodes it in (`ac_shader_encode_lds_size`). `None` when the
     /// stream declared none, and then the module provides a fixed 1 KiB.
@@ -2147,6 +2158,10 @@ pub struct Wavefront<'a> {
     integer_fetched: u32,
     /// The coordinates each texture slot's samples saturate (D743).
     saturated: [[bool; 2]; MAX_TEXTURES],
+    /// The coordinates each texture slot's samples mirror once.
+    mirrored: [[bool; 2]; MAX_TEXTURES],
+    /// How each texture slot's compares are made in the shader, where they are ([`UserData::compared`]).
+    compared: [u8; MAX_TEXTURES],
     /// The four-component unsigned vector an integer image's texel is, declared on first use.
     uvec4: Option<Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
@@ -2416,6 +2431,8 @@ impl Wavefront<'_> {
                     .sampler
                     .and_then(|sampler| self.resident_sampler(sampler)),
                 saturated: bound.texture.saturate,
+                mirrored: bound.texture.mirror,
+                shader_compare: bound.texture.shader_compare.is_some(),
                 ..bound.source
             })
             .collect()
@@ -2480,7 +2497,7 @@ impl Wavefront<'_> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
             return Err(
-                "this shader reads more than sixteen textures, and sixteen bindings exist (D690)",
+                "this shader reads more than thirty-two textures, and thirty-two bindings exist (D690)",
             );
         }
         // Registers no load reached that still hold the user data they were seeded with read the
@@ -2537,6 +2554,8 @@ impl Wavefront<'_> {
             table,
             sampler_offset: None,
             saturated: [false; 2],
+            mirrored: [false; 2],
+            shader_compare: false,
             user_data,
             sampler_user_data: None,
             cube: shape.cube(),
@@ -3131,6 +3150,8 @@ impl<'a> Wavefront<'a> {
             integer_images: user_data.compute.unwrap_or_default().integer_images,
             integer_fetched: user_data.compute.unwrap_or_default().integer_fetched,
             saturated: user_data.saturated,
+            mirrored: user_data.mirrored,
+            compared: user_data.compared,
             uvec4: None,
             mesh,
             staged,
@@ -3864,11 +3885,36 @@ impl<'a> Wavefront<'a> {
         if register < 128 {
             self.written.0 |= 1 << register;
         }
+        let value = self.within_modelled_lanes(register, value);
         if let Some(half) = exec_half(register) {
             self.known_exec[half] = self.constant_value(value);
         }
         let pointer = self.scalar_pointer(register);
         self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
+    /// `value` as a write of `register` leaves it: in a module that models one lane - a pixel
+    /// shader's, its own pixel - a half of the execution mask keeps only that lane's bit, since no
+    /// other lane exists to run. A waterfall loop retiring the mask's lanes one value at a time
+    /// then ends once the modelled lane has had its turn, rather than waiting on lanes nobody runs.
+    fn within_modelled_lanes(&mut self, register: u32, value: Id) -> Id {
+        let Some(half) = exec_half(register) else {
+            return value;
+        };
+        if self.modelled != 1 || self.invocation.is_some() {
+            return value;
+        }
+        let kept = u32::from(half == 0);
+        if let Some(constant) = self.constant_value(value) {
+            return self.constant(constant & kept);
+        }
+        let kept = self.constant(kept);
+        let masked = self.builder.id();
+        self.builder.function(
+            op::BITWISE_AND,
+            &[self.u32_type.0, masked.0, value.0, kept.0],
+        );
+        masked
     }
 
     /// The value a half of the execution mask is known to hold here, if it is known.
@@ -5073,11 +5119,25 @@ impl Model for Wavefront<'_> {
     }
 
     fn load_descriptor_opaquely(&mut self, first: u32, registers: u32) -> bool {
-        // One image descriptor, or two side by side - each half traced as one.
+        // One image descriptor, or two side by side - each half traced as one, and each the load
+        // an image instruction reads, or one whose type alone the program rewrites before an image
+        // instruction reads it (D895). Eight words no image instruction reads are words the
+        // program reads as values, as a dispatch of Grand Theft Auto V's repacks into buffer
+        // descriptors.
+        let reaches_an_image = |half: &u32| {
+            self.descriptor_loads.0.get(half).is_some_and(|loads| {
+                !self.type_rewrites.is_empty()
+                    || self
+                        .descriptor_loads
+                        .2
+                        .values()
+                        .any(|reaching| loads.contains(reaching))
+            })
+        };
         let traced = registers % model::IMAGE_DESCRIPTOR_REGISTERS == 0
             && (first..first + registers)
                 .step_by(model::IMAGE_DESCRIPTOR_REGISTERS as usize)
-                .all(|half| self.descriptor_loads.0.contains_key(&half));
+                .all(|half| reaches_an_image(&half));
         if !self.exact_memory() || !traced || registers > 2 * model::IMAGE_DESCRIPTOR_REGISTERS {
             return false;
         }
@@ -5651,7 +5711,10 @@ impl Model for Wavefront<'_> {
         } else {
             (self.f32_type, self.vec4)
         };
-        let ((dim, components), depth) = (image_dim(shape), u32::from(shape.compare));
+        // A compare the shader makes itself reads the image as it is, not as depth.
+        let shader_compare = shader_compare_of(&self.compared, source.slot, shape);
+        let (dim, components) = image_dim(shape);
+        let depth = u32::from(shape.compare && shader_compare.is_none());
         // A second texture of the same shape shares these types: each is declared once per module,
         // and only the pointer and variable are the texture's own.
         // A 2D array is fetched as one, at the layer the address names (D897).
@@ -5688,6 +5751,12 @@ impl Model for Wavefront<'_> {
                 .get(source.slot as usize)
                 .copied()
                 .unwrap_or_default(),
+            mirror: self
+                .mirrored
+                .get(source.slot as usize)
+                .copied()
+                .unwrap_or_default(),
+            shader_compare,
             shape,
         };
         self.textures.push(BoundTexture {
@@ -6242,6 +6311,23 @@ impl ImageTrace {
     }
 }
 
+/// How the shader compares slot `slot`'s texture itself, where its draw says so in `compared`
+/// ([`UserData::compared`]) and the module samples it compared: the sampler's function, and whether
+/// it filters bilinearly.
+fn shader_compare_of(compared: &[u8], slot: u32, shape: model::ImageShape) -> Option<(u8, bool)> {
+    compared
+        .get(slot as usize)
+        .copied()
+        .filter(|compared| shape.compare && compared & SHADER_COMPARE != 0)
+        .map(|compared| (compared & 0x7, compared & SHADER_COMPARE_LINEAR != 0))
+}
+
+/// In [`UserData::compared`]: the shader makes the slot's compares itself.
+pub const SHADER_COMPARE: u8 = 0x80;
+/// In [`UserData::compared`]: the sampler filters bilinearly, so four texels are compared and
+/// blended, as a filtered compare is.
+pub const SHADER_COMPARE_LINEAR: u8 = 0x08;
+
 /// The textures a module samples, in slot order, and the images it stores to, in the order it first
 /// stores to them (D893), where each one's descriptor came from.
 pub type ImageSources = (Vec<TextureSource>, Vec<TextureSource>);
@@ -6283,6 +6369,14 @@ pub struct TextureSource {
     /// sampler clamping to half a border is honoured only by a module translated to.
     #[serde(default)]
     pub saturated: [bool; 2],
+    /// The coordinates, across then down, the module's samples of this texture mirror once: a
+    /// sampler that mirrors once is honoured only by a module translated to.
+    #[serde(default)]
+    pub mirrored: [bool; 2],
+    /// Whether the module compares this texture against its reference itself, reading the image
+    /// as it is: one that is not a depth target, which no host compare sampler reads.
+    #[serde(default)]
+    pub shader_compare: bool,
     /// Whether the module samples this texture as a cube, which the host binds as six faces seen
     /// through a cube view (D811).
     #[serde(default)]
@@ -6525,10 +6619,13 @@ fn descriptor_table_loads(
             // Any other write: the destination first, and a carry-out's second, a pair wide at
             // most - untraced from here on.
             (_, [Operand::Scalar(destination), rest @ ..]) => {
-                // A buffer load fills as many registers as it reads words.
-                let width = name
-                    .strip_prefix("s_buffer_load_")
-                    .map_or(2, |load| scalar_load_width(&format!("s_load_{load}")));
+                // A buffer load fills as many registers as it reads words; anything else as many
+                // as its destination's type is wide: `s_or_b32 s27` leaves `s28` - a table's base
+                // in Grand Theft Auto V's pixel shaders - as it was.
+                let width = name.strip_prefix("s_buffer_load_").map_or_else(
+                    || scalar_destination_width(name),
+                    |load| scalar_load_width(&format!("s_load_{load}")),
+                );
                 live.untraced(&mut held, *destination, width);
                 if name.contains("_co_")
                     && let Some(Operand::Scalar(carry)) = rest.first()
@@ -6543,6 +6640,65 @@ fn descriptor_table_loads(
         }
     }
     (loads, sampler_loads, reaching, sampler_reaching, seeded)
+}
+
+/// The scalar registers `instruction` may write, a bit each: a scalar first operand is a
+/// destination - a load's as wide as it reads words, anything else's as its type, a carry-out's
+/// second a pair - except a scalar compare's, which writes only the condition code. An instruction
+/// not named, or one writing relative to `m0`, may write any.
+fn scalar_writes(instruction: &Instruction, encodings: &EncodingTable) -> u128 {
+    let Some(name) = instruction
+        .encoding
+        .and_then(|i| encodings.encodings().get(usize::from(i)))
+        .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
+    else {
+        return u128::MAX;
+    };
+    if name.starts_with("s_movreld") {
+        return u128::MAX;
+    }
+    if name.starts_with("s_cmp") || name.starts_with("s_bitcmp") {
+        return 0;
+    }
+    let mask = |first: u16, count: u32| {
+        (u32::from(first)..u32::from(first) + count)
+            .filter(|&register| register < u128::BITS)
+            .fold(0u128, |mask, register| mask | 1 << register)
+    };
+    let width = name
+        .strip_prefix("s_load_")
+        .or_else(|| name.strip_prefix("s_buffer_load_"))
+        .map_or_else(
+            || scalar_destination_width(name),
+            |load| scalar_load_width(&format!("s_load_{load}")),
+        );
+    match instruction.operands.as_slice() {
+        [Operand::Scalar(destination), rest @ ..] => {
+            let carry = match rest.first() {
+                Some(Operand::Scalar(carry)) if name.contains("_co_") => mask(*carry, 2),
+                _ => 0,
+            };
+            mask(*destination, width) | carry
+        }
+        [_, Operand::Scalar(carry), ..] if name.contains("_co_") => mask(*carry, 2),
+        _ => 0,
+    }
+}
+
+/// How many scalar registers a scalar instruction's destination fills: the first type in its name is
+/// the destination's (`s_bcnt1_i32_b64` writes one, `s_or_b64` two), and a name with none is taken as
+/// a pair, the most an untyped write fills.
+fn scalar_destination_width(name: &str) -> u32 {
+    let first_type = name.split('_').skip(1).find(|part| {
+        part.len() >= 2
+            && matches!(part.as_bytes()[0], b'b' | b'i' | b'u' | b'f')
+            && part[1..].chars().all(|c| c.is_ascii_digit())
+    });
+    match first_type {
+        Some(part) if part.ends_with("64") => 2,
+        Some(_) => 1,
+        None => 2,
+    }
 }
 
 /// The offsets of each pair of instructions that rewrites only the type of an image descriptor loaded
@@ -6694,7 +6850,8 @@ fn moved_word(held: &[Option<TableWord>], source: &Operand) -> Option<TableWord>
 /// traced, carried in program order: a branch target keeps each load an arriving path carries -
 /// the forward branches to it and the fall-through into it - that no other path contradicts with
 /// another load into its registers (D934), and a loop's head, which a later branch reaches with
-/// what is not yet known, keeps nothing.
+/// what the loop's body leaves, keeps those whose registers nothing in the body writes: a
+/// waterfall loop over a vector of descriptors leaves the sampler loaded before it as it was.
 struct LiveLoads {
     loads: Loads,
     /// The scalar registers some path here wrote, a bit each; all of them past a loop's head.
@@ -6702,8 +6859,9 @@ struct LiveLoads {
     /// What each forward branch carried to its target.
     pending: BTreeMap<u32, Vec<(Loads, u128)>>,
     targets: std::collections::BTreeSet<u32>,
-    /// Targets a branch after them goes to.
-    backward: std::collections::BTreeSet<u32>,
+    /// Targets a branch after them goes to, each with the scalar registers the loop's body - the
+    /// head to the last branch back to it - writes, a bit each.
+    backward: BTreeMap<u32, u128>,
     /// Whether the previous instruction lets control fall into this one.
     falls_through: bool,
 }
@@ -6711,17 +6869,29 @@ struct LiveLoads {
 impl LiveLoads {
     fn new(decode: &Decode, encodings: &EncodingTable) -> Self {
         let mut targets = std::collections::BTreeSet::new();
-        let mut backward = std::collections::BTreeSet::new();
+        let mut ends: BTreeMap<u32, u32> = BTreeMap::new();
         for instruction in &decode.instructions {
             if is_branch(instruction, encodings)
                 && let Ok(target) = crate::blocks::branch_target(instruction)
             {
                 targets.insert(target);
                 if target <= instruction.offset {
-                    backward.insert(target);
+                    let end = ends.entry(target).or_default();
+                    *end = (*end).max(instruction.offset);
                 }
             }
         }
+        let backward = ends
+            .into_iter()
+            .map(|(head, end)| {
+                let body = decode
+                    .instructions
+                    .iter()
+                    .filter(|i| (head..=end).contains(&i.offset))
+                    .fold(0, |written, i| written | scalar_writes(i, encodings));
+                (head, body)
+            })
+            .collect();
         Self {
             loads: BTreeMap::new(),
             written: 0,
@@ -6735,11 +6905,6 @@ impl LiveLoads {
     /// Control reaches the instruction at `offset`.
     fn arrive(&mut self, offset: u32) {
         if !self.targets.contains(&offset) {
-            return;
-        }
-        if self.backward.contains(&offset) {
-            self.loads.clear();
-            self.written = u128::MAX;
             return;
         }
         let mut arriving = self.pending.remove(&offset).unwrap_or_default();
@@ -6780,6 +6945,14 @@ impl LiveLoads {
             }
         }
         kept.retain(|group, _| !clashing.contains(group));
+        // A loop's head is also reached from its body's end, with what the body did not write.
+        if let Some(&body) = self.backward.get(&offset) {
+            kept.retain(|&group, &mut (_, width)| {
+                (group..group + width)
+                    .all(|register| register >= u128::BITS || body >> register & 1 == 0)
+            });
+            self.written |= body;
+        }
         self.loads = kept;
     }
 
@@ -7591,6 +7764,27 @@ fn dispatch_masks(
                 .map_or(0, |&(_, offset, _)| offset),
             detail,
         })
+}
+
+#[cfg(test)]
+mod destination_width_tests {
+    /// A scalar write fills as many registers as its destination's type is wide, the first type
+    /// in its name: `s_or_b32 s27` leaves `s28` traced, where a pair-wide guess forgot a table's
+    /// base in Grand Theft Auto V's pixel shaders.
+    #[test]
+    fn a_scalar_write_fills_its_destination_type() {
+        use super::scalar_destination_width as width;
+        assert_eq!(width("s_or_b32"), 1);
+        assert_eq!(width("s_or_b64"), 2);
+        assert_eq!(width("s_bcnt1_i32_b64"), 1);
+        assert_eq!(width("s_mul_i32"), 1);
+        assert_eq!(width("s_cselect_b64"), 2);
+        assert_eq!(
+            width("s_getpc"),
+            2,
+            "no type: a pair, the most an untyped write fills"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -317,6 +317,8 @@ pub enum Keys {
     Uncompressed,
     /// Every block is cleared to all-zero bits, whatever memory holds.
     Clear0000,
+    /// Every block is cleared to the value its first texel holds (comp-to-single).
+    ClearSingle,
     /// The keys differ, or say something else; decoding them needs per-block key addressing.
     Other,
 }
@@ -328,9 +330,26 @@ pub fn classify(keys: &[u8]) -> Keys {
         Some(&first) if keys.iter().all(|&key| key == first) => match first {
             KEY_UNCOMPRESSED => Keys::Uncompressed,
             KEY_CLEAR_0000 => Keys::Clear0000,
+            KEY_CLEAR_SINGLE => Keys::ClearSingle,
             _ => Keys::Other,
         },
         _ => Keys::Other,
+    }
+}
+
+/// A surface every block of which is cleared to its first texel, expanded in place: each 256-byte
+/// block of `surface` - one compress block, wherever the swizzle and the pipe-bank XOR put it, since
+/// both move whole 256-byte blocks - becomes its first `texel_bytes` bytes repeated. Exact with no
+/// key addressing, because every key says the same of its block (`GFX9_DCC_CLEAR_SINGLE`, the clear
+/// stored "at the beginning of every 256B block", `radv_meta_nir.c:834`).
+pub fn expand_cleared_to_single(surface: &mut [u8], texel_bytes: usize) {
+    for block in surface.chunks_mut(1 << COMPRESS_BLOCK_LOG2) {
+        let Some(texel) = block.get(..texel_bytes).map(<[u8]>::to_vec) else {
+            continue;
+        };
+        for (at, byte) in block.iter_mut().enumerate() {
+            *byte = texel[at % texel_bytes];
+        }
     }
 }
 
@@ -583,11 +602,27 @@ mod tests {
         assert_eq!(meta_start(dcc), 0x4_0284_0000);
     }
 
+    /// A surface cleared to single values takes each 256-byte block's first texel throughout:
+    /// Grand Theft Auto V's 16-bit float target, every key `0x10`.
+    #[test]
+    fn a_block_cleared_to_single_takes_its_first_texel_throughout() {
+        let mut surface: Vec<u8> = (0..512_u32).map(|i| (i % 251) as u8).collect();
+        surface[256..260].copy_from_slice(&[0xff, 0x7b, 0xff, 0x7b]);
+        super::expand_cleared_to_single(&mut surface, 4);
+        assert!(surface[..256].chunks(4).all(|texel| texel == [0, 1, 2, 3]));
+        assert!(
+            surface[256..]
+                .chunks(4)
+                .all(|texel| texel == [0xff, 0x7b, 0xff, 0x7b])
+        );
+    }
+
     /// Uniform keys decode; anything else is left to per-block addressing.
     #[test]
     fn only_uniform_uncompressed_or_cleared_keys_decode() {
         assert_eq!(classify(&[0xFF; 64]), Keys::Uncompressed);
         assert_eq!(classify(&[0x00; 64]), Keys::Clear0000);
+        assert_eq!(classify(&[0x10; 64]), Keys::ClearSingle);
         assert_eq!(
             classify(&[0x20; 64]),
             Keys::Other,

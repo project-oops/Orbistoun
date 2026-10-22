@@ -239,6 +239,23 @@ struct DrawnOn(Option<ResourceId>);
 /// ([`VulkanBackend::depth_texels`]).
 pub type DepthTexels = (std::sync::Arc<[u32]>, u64, (u32, u32));
 
+/// `depths` cut to their top-left `width` x `height`, where they are larger: a drawn face's
+/// attachment, sized to the colour target, around the surface its descriptor names (D939). Depths
+/// already that size, or smaller, are as they were.
+fn cropped_depths(depths: DepthTexels, (width, height): (u32, u32)) -> DepthTexels {
+    let (texels, hash, (held_width, held_height)) = depths;
+    if (held_width, held_height) == (width, height) || held_width < width || held_height < height {
+        return (texels, hash, (held_width, held_height));
+    }
+    let cut: std::sync::Arc<[u32]> = texels
+        .chunks_exact(held_width as usize)
+        .take(height as usize)
+        .flat_map(|row| row[..width as usize].iter().copied())
+        .collect();
+    let hash = orbistoun_gpu::content_hash(&cut);
+    (cut, hash, (width, height))
+}
+
 /// A Vulkan render backend.
 ///
 /// Holds the host objects a submission's resources become, keyed by content id; runs compute
@@ -750,7 +767,10 @@ impl VulkanBackend {
     /// # Errors
     ///
     /// When it holds no stencil, or the device could not read it back.
-    fn stencil_texels(&mut self, target: ResourceId) -> Result<Option<DepthTexels>, BackendError> {
+    pub fn stencil_texels(
+        &mut self,
+        target: ResourceId,
+    ) -> Result<Option<DepthTexels>, BackendError> {
         let Some(attachment) = self.depths.get(&target) else {
             return Ok(None);
         };
@@ -817,6 +837,52 @@ impl VulkanBackend {
         Ok(true)
     }
 
+    /// Holds depth target `target` at `extent` where no draw has made it: a dispatch storing to a
+    /// depth target, or its stencil plane, before any draw does makes it as a draw would.
+    ///
+    /// # Errors
+    ///
+    /// When the device could not make it.
+    pub fn hold_depth_target(
+        &mut self,
+        target: ResourceId,
+        extent: (u32, u32),
+    ) -> Result<(), BackendError> {
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.depths.entry(target) {
+            let extent = framebuffer::scaled(extent, framebuffer::render_scale());
+            let pending = self.depth_clears.remove(&target);
+            slot.insert(
+                depth::DepthAttachment::create(extent.0, extent.1, pending)
+                    .map_err(|e| BackendError::Device(format!("depth target: {e:?}")))?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Replaces depth target `target`'s stencil with `texels`, one value a texel widened to a word:
+    /// what a dispatch that stores to its stencil plane wrote. Its read-back stencil is then these.
+    /// `false` for a target this backend never drew.
+    ///
+    /// # Errors
+    ///
+    /// When it holds no stencil, `texels` does not fit it, or the device could not write it.
+    pub fn write_stencil_texels(
+        &mut self,
+        target: ResourceId,
+        texels: &[u32],
+    ) -> Result<bool, BackendError> {
+        let Some(attachment) = self.depths.get(&target) else {
+            return Ok(false);
+        };
+        attachment
+            .write_stencil(texels)
+            .map_err(|e| BackendError::Device(format!("stencil write: {e:?}")))?;
+        let written: std::sync::Arc<[u32]> = texels.into();
+        let hash = orbistoun_gpu::content_hash(&written);
+        self.stencil_reads.insert(target, (written, hash));
+        Ok(true)
+    }
+
     /// Binds the depth target a [`RenderCommand::BindDepthTexture`] names at its slot (D817): its
     /// attachment's depth as the draws before left it, read back once per drawing onto it and
     /// sampled through a compare by the sampler's function. A target this backend never drew is
@@ -830,6 +896,7 @@ impl VulkanBackend {
             cube,
             layered,
             stencil,
+            ref memory,
         } = command
         else {
             return Ok(());
@@ -852,15 +919,33 @@ impl VulkanBackend {
             } else {
                 self.depth_texels(face_target)?
             }
-            .or_else(|| self.cleared_texels(face_target, stencil));
-            let Some((texels, hash, face_extent)) = fetched else {
+            .or_else(|| self.cleared_texels(face_target, stencil))
+            // A face no draw drew samples what guest memory holds there (D939).
+            .or_else(|| {
+                let memory = memory.as_ref().filter(|_| !stencil)?;
+                let (texels, hash) = memory.face(face)?;
+                Some((texels, hash, (memory.width, memory.height)))
+            });
+            let Some(fetched) = fetched else {
                 self.undrawn_depth.insert(face_target);
                 self.refused += 1;
                 return Err(BackendError::Unsupported {
                     command: "BindDepthTexture of a depth target this backend never drew",
                 });
             };
-            if extent.is_some_and(|extent| extent != face_extent) {
+            // A drawn face's attachment may be larger than the surface the descriptor names, which
+            // is its top-left corner: cut to the surface's extent where memory gives it (D939).
+            let (texels, hash, face_extent) = match memory.as_ref().filter(|_| !stencil) {
+                Some(memory) => cropped_depths(fetched, (memory.width, memory.height)),
+                None => fetched,
+            };
+            if let Some(first) = extent.filter(|&extent| extent != face_extent) {
+                tracing::info!(
+                    "a cube's faces differ in extent: face 0 is {first:?}, face {face} of {face_target:x?} is {face_extent:?}; drawn {}, cleared {}, memory {:?}",
+                    self.depths.contains_key(&face_target),
+                    self.depth_clears.contains_key(&face_target),
+                    memory.as_ref().map(|memory| (memory.width, memory.height)),
+                );
                 self.refused += 1;
                 return Err(BackendError::Unsupported {
                     command: "BindDepthTexture of a cube whose faces were drawn at other extents",
@@ -2368,6 +2453,7 @@ mod tests {
                 cube: false,
                 layered: false,
                 stencil,
+                memory: None,
             })
             .map(|()| b.textures[0].as_ref().map(|t| (t.texels.to_vec(), t.width)))
         };
@@ -2381,6 +2467,7 @@ mod tests {
             cube: false,
             layered: false,
             stencil: false,
+            memory: None,
         };
         assert!(b.execute(&never).is_err(), "neither drawn nor cleared");
         // Named for the report, once.

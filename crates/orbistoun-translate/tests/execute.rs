@@ -482,10 +482,18 @@ fn known_encodings() -> Vec<(String, u32, String, Vec<u32>)> {
         let Some(encoding) = table.encodings().iter().find(|e| e.name == family) else {
             continue;
         };
-        let mut words = vec![encoding.value | (opcode << encoding.opcode.shift)];
+        let low = opcode & ((1 << encoding.opcode.width) - 1);
+        let mut words = vec![encoding.value | (low << encoding.opcode.shift)];
         // A wide encoding needs its second word, or the appended terminator would be read
         // as it.
         words.resize((encoding.width_bytes / 4) as usize, 0);
+        // A split opcode's rest goes where the family keeps it: the typed-buffer family's
+        // fourth bit is in its second word.
+        if let Some(rest) = &encoding.opcode_extension
+            && let Some(word) = words.get_mut(rest.word)
+        {
+            *word |= (opcode >> encoding.opcode.width) << rest.shift;
+        }
         out.push((family.to_owned(), opcode, name.to_owned(), words));
     }
     out
@@ -8814,6 +8822,221 @@ fn a_quad_permute_moves_the_lane_it_names() {
     }
 }
 
+/// The DPP16 word of a row control: `control` (16:8) over first source `src`, rows and banks
+/// enabled as `rows` and `banks` give, and `bound_ctrl` as given.
+fn dpp_row(src: u32, control: u32, (rows, banks): (u32, u32), bound_zero: bool) -> u32 {
+    src | (control << 8) | (u32::from(bound_zero) << 19) | (banks << 24) | (rows << 28)
+}
+
+/// `v_add_nc_u32_dpp vD, vS, vT` with `word` its DPP16 word: `vS` read across lanes, `vT` not.
+fn v_add_dpp(dst: u32, src1: u32, word: u32) -> [u32; 2] {
+    [
+        head("v_add_nc_u32_e32") | (dst << 17) | (src1 << 9) | 0xfa,
+        word,
+    ]
+}
+
+/// Runs `body` after `v0 = lane` and `v2 = seed`, and returns each lane's `v2`.
+fn lanes_after(seed: &[u32], body: &[u32]) -> Vec<u32> {
+    let mut program = lane_index_into(0).to_vec();
+    program.extend(seed);
+    program.extend(body);
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    memory.iter().take(64).copied().collect()
+}
+
+/// A DPP16 row control and what each lane reads under it: the lane, or `None` past the row's edge.
+type RowCase = (u32, fn(u32) -> Option<u32>);
+
+/// The row controls of DPP16 - shift, rotate, mirror, share and xmask, within each row of sixteen
+/// lanes - and the row mask, in the shapes Grand Theft Auto V's compute program at `0x400003e16400`
+/// sums a wave with: `row_shr:1,2,4,8` adds each lane's row-mates below it, a lane whose source
+/// lies before its row left as it was (`bound_ctrl` clear), and a `quad_perm` identity under
+/// `row_mask:0xa` adds only in rows one and three.
+#[test]
+fn the_dpp_row_controls_read_within_a_row() {
+    if !device_or_skip("the_dpp_row_controls_read_within_a_row") {
+        return;
+    }
+    let full = (0xf, 0xf);
+    // v2 = 1, then the inclusive sum across the row: each lane its place in the row, plus one.
+    let one = [v_mov_code(2, 128 + 1)];
+    let mut scan = Vec::new();
+    for shift in [1, 2, 4, 8] {
+        scan.extend(v_add_dpp(2, 2, dpp_row(2, 0x110 | shift, full, false)));
+    }
+    for (lane, stored) in lanes_after(&one, &scan).into_iter().enumerate() {
+        assert_eq!(stored, (lane as u32 & 15) + 1, "row sum, lane {lane}");
+    }
+
+    // v2 = v2 + v0 in rows one and three only: v2 starts at the lane index, so those rows double.
+    let index = [v_mov_code(2, 256)];
+    let masked = v_add_dpp(2, 2, dpp_row(0, 0xe4, (0xa, 0xf), false));
+    for (lane, stored) in lanes_after(&index, &masked).into_iter().enumerate() {
+        let lane = lane as u32;
+        let doubled = (lane >> 4) & 1 == 1;
+        assert_eq!(
+            stored,
+            if doubled { 2 * lane } else { lane },
+            "row mask, lane {lane}"
+        );
+    }
+
+    // The others, as moves of the lane index: what each lane reads, `None` past the row's edge,
+    // where `bound_ctrl` set reads zero.
+    let cases: [RowCase; 6] = [
+        (0x101, |p| (p < 15).then_some(p + 1)),     // row_shl:1
+        (0x113, |p| p.checked_sub(3)),              // row_shr:3
+        (0x122, |p| Some((p + 14) & 15)),           // row_ror:2
+        (0x140, |p| Some(15 - p)),                  // row_mirror
+        (0x141, |p| Some((p & 8) | (7 - (p & 7)))), // row_half_mirror
+        (0x165, |p| Some(p ^ 5)),                   // row_xmask:5
+    ];
+    for (control, source) in cases {
+        let zero = [v_mov_code(2, 128)];
+        let [_, word] = v_mov_quad_perm(2, 0, [0, 1, 2, 3], true);
+        let word = (word & !(0x1ff << 8)) | (control << 8);
+        let body = [v_mov_code(2, 0xfa), word];
+        for (lane, stored) in lanes_after(&zero, &body).into_iter().enumerate() {
+            let lane = lane as u32;
+            let expected = source(lane & 15).map_or(0, |place| (lane & !15) | place);
+            assert_eq!(stored, expected, "control {control:#x}, lane {lane}");
+        }
+    }
+}
+
+/// The signed compact compares against a sign-extended sixteen-bit immediate, each read back by
+/// `s_cselect_b32`: -5 against 3, as Grand Theft Auto V's pixel shader at `0x74005b565000` tests.
+#[test]
+fn the_signed_compact_compares_set_the_condition_code() {
+    if !device_or_skip("the_signed_compact_compares_set_the_condition_code") {
+        return;
+    }
+    let (one, zero) = (129, 128);
+    let cases = [
+        ("s_cmpk_lt_i32", 3, 1),
+        ("s_cmpk_le_i32", -5, 1),
+        ("s_cmpk_gt_i32", -6, 1),
+        ("s_cmpk_ge_i32", 3, 0),
+    ];
+    let mut program = Vec::new();
+    for (at, (name, immediate, _)) in cases.iter().enumerate() {
+        program.push(sopk("s_movk_i32", 0, -5));
+        program.push(sopk(name, 0, *immediate));
+        program.push(sop2("s_cselect_b32", 2 + at as u32, one, zero));
+    }
+    program.push(s_endpgm());
+    let registers = run(&program);
+    for (at, (name, immediate, expected)) in cases.iter().enumerate() {
+        assert_eq!(
+            scalar(&registers, 2 + at),
+            *expected,
+            "{name} -5, {immediate}"
+        );
+    }
+}
+
+/// `v_readlane_b32 vcc_lo, v0, 63` reads lane 63 into the condition mask's low half, which a
+/// vector move then reads back: Grand Theft Auto V's wave sum takes its last lane so.
+#[test]
+fn a_lane_read_into_a_mask_half_is_that_half() {
+    if !device_or_skip("a_lane_read_into_a_mask_half_is_that_half") {
+        return;
+    }
+    let vcc_lo = 106;
+    let body = [
+        head("v_readlane_b32") | vcc_lo,
+        256 | ((128 + 63) << 9),
+        v_mov_code(2, vcc_lo),
+    ];
+    for (lane, stored) in lanes_after(&[v_mov_code(2, 128)], &body)
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(stored, 63, "lane 63's index, read back in lane {lane}");
+    }
+}
+
+/// The unsigned scalar minimum and maximum, and the lowest set bit of a word and of a pair, each
+/// into `vcc_lo` and read back: the forms Grand Theft Auto V's compute programs use.
+#[test]
+fn unsigned_minimum_maximum_and_first_one_reach_a_mask_half() {
+    if !device_or_skip("unsigned_minimum_maximum_and_first_one_reach_a_mask_half") {
+        return;
+    }
+    let vcc_lo = 106;
+    let cases: [(Vec<u32>, u32); 5] = [
+        // s0 = 0xffff_fff0 (large unsigned), s1 = 5.
+        (vec![sop2("s_min_u32", vcc_lo, 0, 1)], 5),
+        (vec![sop2("s_max_u32", vcc_lo, 0, 1)], 0xffff_fff0),
+        (vec![sop1("s_ff1_i32_b32", vcc_lo, 0)], 4),
+        // s[2:3] = (0, 0x100): the pair's lowest set bit is 40.
+        (vec![sop1("s_ff1_i32_b64", vcc_lo, 2)], 40),
+        (vec![sop1("s_ff1_i32_b32", vcc_lo, 2)], u32::MAX),
+    ];
+    for (body, expected) in cases {
+        let mut program = Vec::new();
+        program.extend(s_mov_literal(0, 0xffff_fff0));
+        program.extend(s_mov_literal(1, 5));
+        program.extend(s_mov_literal(2, 0));
+        program.extend(s_mov_literal(3, 0x100));
+        program.extend(body);
+        program.push(sop1("s_mov_b32", 4, vcc_lo));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        assert_eq!(scalar(&registers, 4), expected);
+    }
+}
+
+/// The two-source long forms Grand Theft Auto V's compute programs use, from scalars: the signed
+/// high product of -3 and `i32::MIN` is 1, a mask of four ones at bit 8 is 0xf00, 0xff's eight bits
+/// plus 3 are 11, and 1.5 scaled by 2^3 is 12.
+#[test]
+fn the_two_source_long_forms_compute_as_published() {
+    if !device_or_skip("the_two_source_long_forms_compute_as_published") {
+        return;
+    }
+    let cases = [
+        ("v_mul_hi_i32", (0xffff_fffd_u32, 0x8000_0000_u32), 1),
+        ("v_bfm_b32", (4, 8), 0xf00),
+        ("v_bcnt_u32_b32", (0xff, 3), 11),
+        ("v_ldexp_f32", (1.5f32.to_bits(), 3), 12.0f32.to_bits()),
+    ];
+    for (name, (a, b), expected) in cases {
+        let mut seed = Vec::new();
+        seed.extend(s_mov_literal(4, a));
+        seed.extend(s_mov_literal(5, b));
+        let body = vop3(name, 2, [4, 5, 0], 0, 0);
+        for (lane, stored) in lanes_after(&seed, &body).into_iter().enumerate() {
+            assert_eq!(stored, expected, "{name}, lane {lane}");
+        }
+    }
+}
+
+/// `s_bfm_b64 exec, 32, 32` runs only the upper half of the wave, as Grand Theft Auto V's compute
+/// program at `0x400003e16400` sets it before reading lane 31's sum.
+#[test]
+fn a_bit_mask_into_the_execution_mask_runs_those_lanes() {
+    if !device_or_skip("a_bit_mask_into_the_execution_mask_runs_those_lanes") {
+        return;
+    }
+    let (exec, thirty_two, minus_one) = (126, 128 + 32, 193);
+    let body = [
+        sop2("s_bfm_b64", exec, thirty_two, thirty_two),
+        v_mov_code(2, 128 + 7),
+        sop1("s_mov_b64", exec, minus_one),
+    ];
+    for (lane, stored) in lanes_after(&[v_mov_code(2, 128)], &body)
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(stored, if lane >= 32 { 7 } else { 0 }, "lane {lane}");
+    }
+}
+
 /// A SOP1 instruction: `name sD, <source code>`.
 fn sop1(name: &str, dst: u32, source: u32) -> u32 {
     head(name) | (dst << 16) | source
@@ -9388,4 +9611,42 @@ fn the_cube_instructions_pick_the_face_and_its_coordinates() {
             "id of ({x}, {y}, -{z})"
         );
     }
+}
+
+/// A waterfall loop visits each distinct value its lanes hold once and then ends: Grand Theft
+/// Auto V's shadow pixel shaders save the mask, then repeat `v_readfirstlane_b32 s31, v38`,
+/// `v_cmpx_eq_u32 s31, v38`, `s_andn2_b64 s64, s64, exec`, `s_mov_b64 exec, s64`,
+/// `s_cbranch_scc1` back, until every lane has had its turn. Here each lane holds its index
+/// modulo four, so four passes run each lane's body once.
+#[test]
+fn a_waterfall_loop_visits_each_value_once_and_ends() {
+    if !device_or_skip("a_waterfall_loop_visits_each_value_once_and_ends") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let mut program: Vec<u32> = lane_index_into(0).to_vec();
+    program.push(v_int_op("v_and_b32_e32", 1, 128 + 3, 0));
+    program.push(v_mov_inline(2, 0));
+    program.push(v_int_op("v_lshlrev_b32_e32", 3, 128 + 2, 0));
+    program.push(sop1("s_mov_b64", 58, EXEC_LO_CODE));
+    program.push(sop1("s_mov_b64", 64, EXEC_LO_CODE));
+    program.push(s_mov_inline(5, 0));
+    // The loop: a pass counted, then one value's lanes take their turn.
+    program.push(sop2("s_add_u32", 5, 5, 128 + 1));
+    program.push(head("v_readfirstlane_b32") | (31 << 17) | vgpr_code(1));
+    program.push(v_cmp_f32("v_cmpx_eq_u32_e32", 31, 1));
+    program.push(v_int_op("v_add_nc_u32_e32", 2, 128 + 1, 2));
+    program.push(s_logic_b64("s_andn2_b64", 64, 64, EXEC_LO_CODE));
+    program.push(sop1("s_mov_b64", EXEC_LO_CODE, 64));
+    program.push(branch("s_cbranch_scc1", -7));
+    program.push(sop1("s_mov_b64", EXEC_LO_CODE, 58));
+    program.extend(global_store(3, 2));
+    program.push(s_endpgm());
+    let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 5), 4, "four passes");
+    assert!(
+        memory[..16].iter().all(|&visits| visits == 1),
+        "each lane's body ran once: {:?}",
+        &memory[..16]
+    );
 }

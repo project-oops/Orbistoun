@@ -3171,6 +3171,12 @@ pub struct TextureSampling {
     /// What is added to every computed level of detail, `SQ_IMG_SAMP_WORD2.LOD_BIAS` (bits 13:0),
     /// signed 5.8 fixed point, sign-extended.
     pub lod_bias: i16,
+    /// Which coordinates, across then down, mirror once before [`Self::wrap`] clamps them: the
+    /// mirror-once modes `SQ_TEX_MIRROR_ONCE_LAST_TEXEL` (3), `_HALF_BORDER` (5) and `_BORDER` (7)
+    /// are the clamp of the same name at the coordinate's absolute value - its reflection about
+    /// zero, which mirroring once makes - and only `_LAST_TEXEL` has a host mode of its own
+    /// (`radv_sampler.c:32-33`, `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE`).
+    pub mirror_once: [bool; 2],
 }
 
 /// Level 15 in the sampler's 4.8 fixed point: the most `MAX_LOD` can say, and so no clamp.
@@ -3190,6 +3196,7 @@ impl TextureSampling {
         min_lod: 0,
         max_lod: LOD_UNCLAMPED,
         lod_bias: 0,
+        mirror_once: [false; 2],
     };
 
     /// Which coordinates, across then down, the shader saturates before sampling: those a
@@ -3197,6 +3204,12 @@ impl TextureSampling {
     #[must_use]
     pub fn saturated(&self) -> [bool; 2] {
         self.wrap.map(|wrap| wrap == TextureWrap::ClampHalfBorder)
+    }
+
+    /// Which coordinates, across then down, the shader mirrors once before sampling.
+    #[must_use]
+    pub const fn mirrored(&self) -> [bool; 2] {
+        self.mirror_once
     }
 }
 
@@ -3213,16 +3226,17 @@ impl Default for TextureSampling {
 /// anisotropy ratio, the level-of-detail clamp and bias and the built-in border colour are read; a 2D texture has no third coordinate.
 /// An anisotropic filter is its point or bilinear base at `1 << MAX_ANISO_RATIO` (D775).
 pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
-    let wrap = |value: u32| match value {
-        0 => Ok(TextureWrap::Repeat),
-        1 => Ok(TextureWrap::Mirror),
-        2 => Ok(TextureWrap::ClampToEdge),
-        4 => Ok(TextureWrap::ClampHalfBorder),
-        6 => Ok(TextureWrap::ClampBorder),
-        _ => Err(concat!(
-            "the sampler mirrors once or clamps to the last texel's mirror, a mode with no ",
-            "exact host form"
-        )),
+    // `SQ_TEX_CLAMP` (`gfx10-rsrc.json`): each mirror-once mode is the clamp after it at the
+    // coordinate's absolute value.
+    let wrap = |value: u32| match value & 0x7 {
+        0 => (TextureWrap::Repeat, false),
+        1 => (TextureWrap::Mirror, false),
+        2 => (TextureWrap::ClampToEdge, false),
+        3 => (TextureWrap::ClampToEdge, true),
+        4 => (TextureWrap::ClampHalfBorder, false),
+        5 => (TextureWrap::ClampHalfBorder, true),
+        6 => (TextureWrap::ClampBorder, false),
+        _ => (TextureWrap::ClampBorder, true),
     };
     // `SQ_TEX_XY_FILTER` (`gfx6.json`): point, bilinear, then their anisotropic forms.
     let filter = |value: u32| {
@@ -3245,7 +3259,8 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         2 => MipFilter::Linear,
         _ => return Err("the sampler's mip filter is a reserved value"),
     };
-    let wrap = [wrap(words[0] & 0x7)?, wrap((words[0] >> 3) & 0x7)?];
+    let ((across, across_once), (down, down_once)) = (wrap(words[0]), wrap(words[0] >> 3));
+    let wrap = [across, down];
     let border = match words[3] >> 30 {
         0 => BorderColour::TransparentBlack,
         1 => BorderColour::OpaqueBlack,
@@ -3270,6 +3285,7 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         max_lod: ((words[1] >> 12) & 0xfff) as u16,
         // Fourteen bits, sign-extended from bit 13.
         lod_bias: i16::from_ne_bytes((((words[2] & 0x3fff) << 2) as u16).to_ne_bytes()) >> 2,
+        mirror_once: [across_once, down_once],
     })
 }
 
@@ -3557,6 +3573,10 @@ mod tests {
     /// `mag << 20 | min << 22 | mip << 26` in word 2) decode to the wrap and filters asked for; a
     /// border from the colour table and an anisotropic filter are refused rather than approximated.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one descriptor after another, each its own case"
+    )]
     fn a_sampler_descriptor_decodes_to_its_wrap_and_filters() {
         use super::{
             BorderColour, MipFilter, TextureFilter, TextureWrap, decode_sampler_descriptor,
@@ -3590,7 +3610,7 @@ mod tests {
         assert_eq!(clamped.wrap, [TextureWrap::ClampToEdge; 2]);
         assert_eq!(clamped.mip, MipFilter::None);
         // `CLAMP_BORDER` with a built-in colour, as PPSA28061's pixel shader samples; one whose
-        // colour is in the table, and mirroring once to the border, are refused.
+        // colour is in the table is named by its entry.
         let border = decode_sampler_descriptor(words(6, 6, 1, 1, 1)).expect("a border decodes");
         assert_eq!(
             (border.wrap, border.border),
@@ -3606,9 +3626,26 @@ mod tests {
             Ok(BorderColour::Table(2)),
             "a border from the table, by its entry"
         );
-        assert!(
-            decode_sampler_descriptor(words(7, 0, 0, 0, 0)).is_err(),
-            "mirror once to the border"
+        // Mirroring once is the clamp of the same name at the coordinate's absolute value: once to
+        // the last texel across and once to the border down, as Grand Theft Auto V's shadow sampler
+        // mirrors (`0xae57fc`: half border across, once to the border down).
+        let once = decode_sampler_descriptor(words(3, 7, 0, 0, 0)).expect("mirror once decodes");
+        assert_eq!(
+            (once.wrap, once.mirrored()),
+            (
+                [TextureWrap::ClampToEdge, TextureWrap::ClampBorder],
+                [true, true]
+            )
+        );
+        let shadow = decode_sampler_descriptor([0x00ae_57fc, 0x0160_0074, 0, 0x9010_0204])
+            .expect("the shadow sampler decodes");
+        assert_eq!(
+            (shadow.wrap, shadow.mirrored(), shadow.saturated()),
+            (
+                [TextureWrap::ClampHalfBorder, TextureWrap::ClampBorder],
+                [false, true],
+                [true, false]
+            )
         );
         let half = decode_sampler_descriptor(words(0, 4, 1, 1, 0)).expect("GL_CLAMP decodes");
         assert_eq!(
@@ -3629,9 +3666,15 @@ mod tests {
             Ok(BorderColour::Table(0)),
             "a half border from the colour table"
         );
-        assert!(
-            decode_sampler_descriptor(words(0, 5, 0, 0, 0)).is_err(),
-            "mirror once to half a border"
+        let half_once = decode_sampler_descriptor(words(0, 5, 0, 0, 0)).expect("decodes");
+        assert_eq!(
+            (
+                half_once.wrap[1],
+                half_once.mirrored(),
+                half_once.saturated()
+            ),
+            (TextureWrap::ClampHalfBorder, [false, true], [false, true]),
+            "mirror once to half a border: the half-border clamp at the absolute value"
         );
         // An anisotropic filter is its base filter at `1 << MAX_ANISO_RATIO`, the inverse of radv's
         // encoding (D775): PPSA02664's `BC3` sampler, bilinear at 16x, and a point one at 2x.

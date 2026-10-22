@@ -98,6 +98,44 @@ pub const USER_DATA_BLOCK_OFFSETS: [usize; 2] = [0, 32];
 
 /// One thing the guest asked the GPU to do.
 ///
+/// A depth surface's depths read where guest memory holds them (D939): `faces` faces of `width` x
+/// `height`, one after another, each depth an `f32`'s bits.
+#[derive(Clone, PartialEq)]
+pub struct MemoryDepths {
+    /// Each face's width.
+    pub width: u32,
+    /// Each face's height.
+    pub height: u32,
+    /// The depths, face after face.
+    pub texels: std::sync::Arc<[u32]>,
+}
+
+impl MemoryDepths {
+    /// Face `face`'s depths and their hash, where it is one of them.
+    #[must_use]
+    pub fn face(&self, face: u32) -> Option<(std::sync::Arc<[u32]>, u64)> {
+        let size = self.width as usize * self.height as usize;
+        let start = size.checked_mul(face as usize)?;
+        let texels: std::sync::Arc<[u32]> =
+            self.texels.get(start..start.checked_add(size)?)?.into();
+        let hash = crate::content_hash(&texels);
+        Some((texels, hash))
+    }
+}
+
+// A listing names its size, not its megabytes of depths.
+impl std::fmt::Debug for MemoryDepths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MemoryDepths({}x{}, {} texels)",
+            self.width,
+            self.height,
+            self.texels.len()
+        )
+    }
+}
+
 /// Each variant describes an intent the guest expressed, never a step a host API requires.
 // No `Eq`: clear colours are floats, and two clear values that differ by a rounding error are
 // different commands.
@@ -286,6 +324,9 @@ pub enum RenderCommand {
         /// Whether it is the target's stencil plane rather than its depth: each texel's stencil
         /// value as [`TextureEncoding::IntegerBits`] (D927).
         stencil: bool,
+        /// The surface's depths as guest memory holds them, every face, where a face may be one no
+        /// draw has drawn: what that face samples (D939).
+        memory: Option<MemoryDepths>,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).

@@ -5035,9 +5035,12 @@ pub(crate) fn enter_window_slot(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let waiting = std::mem::take(&mut slots.fences[slot]);
     if !waiting.is_empty() {
-        // SAFETY: every fence is live, created on this device and submitted with a queue submit.
-        unsafe { device.wait_for_fences(&waiting, true, u64::MAX) }
-            .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))?;
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::FrameFenceWait, || {
+            // SAFETY: every fence is live, created on this device and submitted with a queue
+            // submit.
+            unsafe { device.wait_for_fences(&waiting, true, u64::MAX) }
+        })
+        .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))?;
         for fence in waiting {
             // SAFETY: signalled, so no pending submit uses it; taken out of the list, so destroyed once.
             unsafe { device.destroy_fence(fence, None) };

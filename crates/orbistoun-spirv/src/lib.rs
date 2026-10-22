@@ -320,6 +320,10 @@ pub mod op {
     pub const FORD_LESS_THAN: u16 = 184;
     /// Ordered float greater-than.
     pub const FORD_GREATER_THAN: u16 = 186;
+    /// Whether neither float is a NaN: an ordered pair.
+    pub const ORDERED: u16 = 162;
+    /// Whether either float is a NaN: an unordered pair.
+    pub const UNORDERED: u16 = 163;
     /// Whether a float is a NaN.
     ///
     /// Preferred over comparing a value with itself, which a compiler assuming no NaNs may fold
@@ -1936,10 +1940,11 @@ pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = {
     bindings
 };
 
-/// How many sampled images a pixel shader may read, one binding each (D690): sixteen, the sampled
-/// images and the samplers one stage may reach on every Vulkan device (the required minimum of
-/// `maxPerStageDescriptorSampledImages` and `maxPerStageDescriptorSamplers`).
-pub const MAX_TEXTURES: usize = 16;
+/// How many sampled images a pixel shader may read, one binding each (D690): thirty-two. Grand Theft
+/// Auto V's shadow pixel shaders read more than sixteen, the least every Vulkan device lets one
+/// stage reach (the required minimum of `maxPerStageDescriptorSampledImages` and
+/// `maxPerStageDescriptorSamplers`); the desktop devices this runs on allow far more.
+pub const MAX_TEXTURES: usize = 32;
 
 /// Which binding a compute module reaches the global data share at: six, after the draw data
 /// (D789). Declared only by a module that accesses it.
@@ -2893,6 +2898,8 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         RestStride::Every,
     ),
+    (op::ORDERED, Some(1), &[0, 2, 3], None, RestStride::Every),
+    (op::UNORDERED, Some(1), &[0, 2, 3], None, RestStride::Every),
     (
         op::FORD_LESS_THAN,
         Some(1),
