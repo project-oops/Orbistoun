@@ -30,6 +30,12 @@ pub enum DispatchFormat {
     /// One sixteen-bit normalised channel, the guest's `16_UNORM`: the low half of a word a texel
     /// (D916).
     R16Unorm,
+    /// One sixteen-bit float channel, the guest's `16_FLOAT`: the low half of a word a texel.
+    R16Float,
+    /// Two sixteen-bit float channels, the guest's `16_16_FLOAT`: a word a texel, red lowest.
+    Rg16Float,
+    /// Two normalised eight-bit channels, the guest's `8_8_UNORM`: the low half of a word a texel.
+    Rg8Unorm,
     /// Two thirty-two-bit unsigned channels, the guest's `32_32_UINT`: two words a texel (D916).
     Rg32Uint,
     /// One thirty-two-bit float channel, the guest's `32_FLOAT`: a word a texel, its bits as they are.
@@ -58,6 +64,9 @@ impl DispatchFormat {
             Self::R32Uint => vk::Format::R32_UINT,
             Self::R16Uint => vk::Format::R16_UINT,
             Self::R16Unorm => vk::Format::R16_UNORM,
+            Self::R16Float => vk::Format::R16_SFLOAT,
+            Self::Rg16Float => vk::Format::R16G16_SFLOAT,
+            Self::Rg8Unorm => vk::Format::R8G8_UNORM,
             Self::Rg32Uint => vk::Format::R32G32_UINT,
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
@@ -75,9 +84,10 @@ impl DispatchFormat {
             | Self::Rgb10A2
             | Self::Float11_11_10
             | Self::R32Uint
+            | Self::Rg16Float
             | Self::R32Float => 4,
             Self::R8 | Self::R8Uint => 1,
-            Self::R16Uint | Self::R16Unorm => 2,
+            Self::R16Uint | Self::R16Unorm | Self::R16Float | Self::Rg8Unorm => 2,
             Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
         }

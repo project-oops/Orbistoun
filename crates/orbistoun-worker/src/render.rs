@@ -1126,6 +1126,15 @@ fn dispatch_image(
             orbistoun_gpu::pipeline::TexelFormat::R16Unorm => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R16Unorm
             }
+            orbistoun_gpu::pipeline::TexelFormat::R16Float => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::R16Float
+            }
+            orbistoun_gpu::pipeline::TexelFormat::Rg16Float => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rg16Float
+            }
+            orbistoun_gpu::pipeline::TexelFormat::Rg8Unorm => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rg8Unorm
+            }
             orbistoun_gpu::pipeline::TexelFormat::Rg32Uint => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rg32Uint
             }
@@ -2901,6 +2910,29 @@ fn report_open_work() {
             "at the end, thread {thread} was inside {}{}",
             span.unwrap_or("no span"),
             phase.map_or_else(String::new, |phase| format!(", in phase {phase}"))
+        );
+    }
+    // A pipeline the host driver was still compiling: what a run that stops drawing waits on when
+    // no guest wait explains it.
+    if let Some((elapsed, vertex, fragment)) = perf::build_under_way() {
+        let written = frames_dir().is_some_and(|dir| {
+            [("vertex", &vertex), ("fragment", &fragment)]
+                .iter()
+                .all(|(stage, words)| {
+                    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    std::fs::write(dir.join(format!("building-{stage}.spv")), bytes).is_ok()
+                })
+        });
+        tracing::warn!(
+            "at the end, the host driver had been compiling a pipeline for {} ms: a vertex module of {} words and a fragment module of {} words{}",
+            elapsed.as_millis(),
+            vertex.len(),
+            fragment.len(),
+            if written {
+                ", written as building-vertex.spv and building-fragment.spv"
+            } else {
+                ""
+            }
         );
     }
 }

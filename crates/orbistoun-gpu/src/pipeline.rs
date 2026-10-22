@@ -3323,6 +3323,12 @@ pub enum TexelFormat {
     R16Uint,
     /// One sixteen-bit normalised channel, a texel half a word: the guest's `16_UNORM` (D916).
     R16Unorm,
+    /// One sixteen-bit float channel, a texel half a word: the guest's `16_FLOAT`.
+    R16Float,
+    /// Two sixteen-bit float channels, a texel a word, red lowest: the guest's `16_16_FLOAT`.
+    Rg16Float,
+    /// Two normalised eight-bit channels, a texel half a word, red lowest: the guest's `8_8_UNORM`.
+    Rg8Unorm,
     /// Two thirty-two-bit unsigned channels, a texel two words: the guest's `32_32_UINT` (D916).
     Rg32Uint,
     /// One thirty-two-bit float channel, a texel a word: the guest's `32_FLOAT`.
@@ -3352,9 +3358,10 @@ impl TexelFormat {
             | Self::Rgb10A2
             | Self::R32Uint
             | Self::R32Float
+            | Self::Rg16Float
             | Self::Rgba8Uint => 4,
             Self::R8 | Self::R8Uint => 1,
-            Self::R16Uint | Self::R16Unorm => 2,
+            Self::R16Uint | Self::R16Unorm | Self::R16Float | Self::Rg8Unorm => 2,
             Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
         }
@@ -4080,7 +4087,21 @@ fn fetched_image(
             }
         }
         crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize].into(),
-        crate::dcc::Keys::Other | crate::dcc::Keys::ClearSingle => {
+        // Every block its first texel: its 256-byte blocks expanded as memory holds them, before
+        // they are detiled - the swizzle moves whole blocks.
+        crate::dcc::Keys::ClearSingle => {
+            let mut spanned = read_spanned(&surface, memory)?;
+            crate::dcc::expand_cleared_to_single(&mut spanned, format.bytes() as usize);
+            let texels = detiled.detile(&surface, &spanned);
+            match order {
+                Some(order) => texels
+                    .iter()
+                    .map(|&texel| to_shader_channels(texel, order))
+                    .collect(),
+                None => texels,
+            }
+        }
+        crate::dcc::Keys::Other => {
             return Err(format!(
                 "the fetched image's compression keys need per-block addressing, which is not modelled ({:?} at {} bytes a texel, format {}, levels {}-{}, {}x{}, {} level(s), type {}, word 4 {:#x}, layered {}, volume {}; {})",
                 descriptor.tiling,
@@ -4637,6 +4658,9 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
         FORMAT_16_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R16Uint),
         FORMAT_16_UNORM if one_channel_selects(words[3]) => Ok(TexelFormat::R16Unorm),
+        FORMAT_16_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R16Float),
+        FORMAT_16_16_FLOAT if two_channel_selects(words[3]) => Ok(TexelFormat::Rg16Float),
+        FORMAT_8_8_UNORM if two_channel_selects(words[3]) => Ok(TexelFormat::Rg8Unorm),
         FORMAT_32_32_UINT if two_channel_selects(words[3]) => Ok(TexelFormat::Rg32Uint),
         FORMAT_8_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R8Uint),
         FORMAT_32_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Float),
@@ -4748,6 +4772,99 @@ mod dispatch_format_tests {
             format,
             words(5 | 4 << 3 | 6 << 6 | 7 << 9)[3]
         ));
+    }
+
+    /// An expanded surface reads its own bytes where a read lies wholly inside it, and guest memory
+    /// anywhere else - a read that runs off its end included.
+    #[test]
+    fn an_expanded_surface_reads_its_own_bytes_inside_it() {
+        use super::{ExpandedSurface, GuestMemory};
+        struct Memory;
+        impl GuestMemory for Memory {
+            fn read(&self, _: u64, length: usize) -> Option<&[u8]> {
+                static NINES: [u8; 16] = [9; 16];
+                NINES.get(..length)
+            }
+        }
+        let surface = ExpandedSurface {
+            inner: &Memory,
+            base: 0x1000,
+            bytes: vec![1, 2, 3, 4],
+        };
+        assert_eq!(surface.read(0x1001, 2), Some(&[2_u8, 3][..]));
+        assert_eq!(surface.read(0x1002, 4), Some(&[9_u8; 4][..]), "off its end");
+        assert_eq!(surface.read(0x0ff0, 2), Some(&[9_u8; 2][..]), "before it");
+    }
+
+    /// A one-channel `16_FLOAT` texture is sampled as four half floats a texel: its half, then
+    /// zero, zero and one - what Grand Theft Auto V's prologue draws sample at slot 1.
+    #[test]
+    fn a_one_channel_half_float_texture_is_widened() {
+        use super::{RenderCommand, widened_half_float_texture};
+        let bound = RenderCommand::BindTexture {
+            slot: 1,
+            hash: 7,
+            texels: std::sync::Arc::from([0x3800_u32, 0xC000]),
+            width: 2,
+            height: 1,
+            sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+            encoding: crate::backend::TextureEncoding::Rgba8,
+            faces: 1,
+            levels: 1,
+        };
+        let RenderCommand::BindTexture {
+            texels, encoding, ..
+        } = widened_half_float_texture(bound)
+        else {
+            panic!("still a texture");
+        };
+        assert_eq!(encoding, crate::backend::TextureEncoding::Rgba16Float);
+        assert_eq!(&*texels, [0x3800, 0x3C00_0000, 0xC000, 0x3C00_0000]);
+    }
+
+    /// A `16_16_FLOAT` image (format 29, `gfx10-rsrc.json:34`) read through two channels is a word
+    /// a texel: what Grand Theft Auto V's prologue programs fetch at 640 x 360 and 2560 x 1440.
+    #[test]
+    fn a_two_channel_half_float_image_is_a_word() {
+        // Format 29, 640 x 360, `XYZW` selects - its two channels then the constants - 2D in
+        // 64KB_R_X (swizzle mode 27).
+        let (last_column, last_row) = (640_u32 - 1, 360_u32 - 1);
+        let words = [
+            0,
+            29 << 20 | (last_column % 4) << 30,
+            (last_column >> 2) | last_row << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 27 << 20 | 9 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("read");
+        assert_eq!(format, super::TexelFormat::Rg16Float);
+        assert_eq!((format.bytes(), format.is_integer()), (4, false));
+    }
+
+    /// A `16_FLOAT` image (format 13, `gfx10-rsrc.json:18`) read through one channel is half a word
+    /// of float: what Grand Theft Auto V's prologue program fetches at 2560 x 1440 in `64KB_R_X`.
+    #[test]
+    fn a_sixteen_bit_float_image_is_half_a_word() {
+        // Format 13, 2560 x 1440, `X001` selects, 2D in 64KB_R_X (swizzle mode 27).
+        let (last_column, last_row) = (2560_u32 - 1, 1440_u32 - 1);
+        let words = [
+            0,
+            13 << 20 | (last_column % 4) << 30,
+            (last_column >> 2) | last_row << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 27 << 20 | 9 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("read");
+        assert_eq!(format, super::TexelFormat::R16Float);
+        assert_eq!((format.bytes(), format.is_integer()), (2, false));
     }
 
     /// A `16_UNORM` image (format 7) read through one channel is half a word of normalised value
@@ -5622,7 +5739,7 @@ impl Pipeline {
     /// exported colour channels are recorded with them, from the same decode.
     fn note_memory(
         &mut self,
-        resource: ResourceId,
+        (resource, address): (ResourceId, u64),
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
         (stage, user_data, strategy): (Stage, UserData, Strategy),
     ) {
@@ -5658,7 +5775,18 @@ impl Pipeline {
         if let Some(access) =
             reaches_guest_memory(decoded, &self.encodings, (&buffers.served, drops_stores))
         {
-            self.memory_readers.insert(resource, access);
+            // Named with the program it is in, so a draw refused for it says which shader.
+            // And, where a store kept the program's buffers from being traced at all, which.
+            let untraced = buffers
+                .untraced_by
+                .as_ref()
+                .map_or_else(String::new, |(at, store)| {
+                    format!(" - none of its buffers were traced, for the store {store} at {at:#x}")
+                });
+            self.memory_readers.insert(
+                resource,
+                format!("{access} in the {stage:?} program at {address:#x}{untraced}"),
+            );
         }
         if stage == Stage::Fragment {
             self.colour_channels.insert(
@@ -6390,7 +6518,7 @@ impl Pipeline {
         // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources.insert(resource, kept.textures);
         self.note_memory(
-            resource,
+            (resource, address),
             (shader, decoded),
             (host_stage, user_data, strategy),
         );
@@ -7302,6 +7430,12 @@ const FORMAT_32_UINT: u32 = 20;
 const FORMAT_16_UINT: u32 = 11;
 /// `GFX10_FORMAT_16_UNORM` (`gfx10-rsrc.json`, value 7): one normalised sixteen-bit channel.
 const FORMAT_16_UNORM: u32 = 7;
+/// `GFX10_FORMAT_16_FLOAT` (`gfx10-rsrc.json:18`, value 13): one sixteen-bit float channel.
+const FORMAT_16_FLOAT: u32 = 13;
+/// `GFX10_FORMAT_16_16_FLOAT` (`gfx10-rsrc.json:34`, value 29): two sixteen-bit float channels.
+const FORMAT_16_16_FLOAT: u32 = 29;
+/// `GFX10_FORMAT_8_8_UNORM` (`gfx10-rsrc.json:19`, value 14): two normalised eight-bit channels.
+const FORMAT_8_8_UNORM: u32 = 14;
 /// `GFX10_FORMAT_32_32_UINT` (`gfx10-rsrc.json`, value 62): two unsigned thirty-two-bit channels.
 const FORMAT_32_32_UINT: u32 = 62;
 /// `GFX10_FORMAT_2_10_10_10_UNORM` (`gfx10-rsrc.json`): red, green and blue ten bits each from the
@@ -7324,7 +7458,7 @@ fn user_data_bound(
     (memory, texels): (&impl GuestMemory, &mut TexelCache),
     read_from_user: &mut BTreeMap<UserTextureKey, Option<RenderCommand>>,
 ) -> Option<RenderCommand> {
-    let plane = stencil.and_then(|plane| stencil_texture(source, user_words(user, first)?, plane));
+    let plane = user_words(user, first).and_then(|words| stencil_texture(source, words, stencil));
     plane.or_else(|| {
         read_from_user
             .entry(user_texture_key(source, first, user))
@@ -7351,6 +7485,9 @@ fn bind_textures(
     // changed.
     let mut out = Vec::with_capacity(commands.len());
     let (mut words, mut fragment, mut stale) = (None, None, false);
+    // And the primitive shader's, from its own user data: the images it fetches are bound at slots
+    // of their own ([`orbistoun_spirv::PRIMITIVE_FIRST_TEXTURE`]).
+    let (mut vertex_words, mut vertex) = (None, None);
     let mut read: TexturesRead = BTreeMap::new();
     // And the user data's, the same way: a stream sets the same words before each of many draws,
     // and asking the host whether a large texture was written since is not free.
@@ -7371,24 +7508,45 @@ fn bind_textures(
                 fragment = Some(*shader);
                 stale = true;
             }
+            RenderCommand::SetUserData {
+                stage: ShaderStage::Vertex,
+                words: set,
+            } => {
+                vertex_words = Some(*set);
+                stale = true;
+            }
+            RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader,
+            } => {
+                vertex = Some(*shader);
+                stale = true;
+            }
             RenderCommand::Draw { .. }
             | RenderCommand::DrawIndexed { .. }
             | RenderCommand::DrawChunks { .. }
                 if stale =>
             {
                 stale = false;
-                let slots = fragment
-                    .and_then(|module| sources.get(&module))
-                    .map_or(&[][..], Vec::as_slice);
                 // A module this pipeline did not translate gets the one default texture source.
                 let default = [TextureSource::default()];
-                let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
-                    &default[..]
-                } else {
-                    slots
+                let slots = match fragment.map(|module| sources.get(&module)) {
+                    Some(Some(slots)) => slots.as_slice(),
+                    Some(None) => &default[..],
+                    None => &[][..],
                 };
-                for source in slots {
-                    let user = words.as_ref().map_or(&[][..], |w| &w[..]);
+                let vertex_slots = vertex
+                    .and_then(|module| sources.get(&module))
+                    .map_or(&[][..], Vec::as_slice);
+                let stages = [
+                    (slots, words.as_ref()),
+                    (vertex_slots, vertex_words.as_ref()),
+                ];
+                for (source, stage_words) in stages
+                    .into_iter()
+                    .flat_map(|(slots, words)| slots.iter().map(move |source| (source, words)))
+                {
+                    let user = stage_words.map_or(&[][..], |w| &w[..]);
                     // A descriptor still in the user data the stage was seeded with is read from
                     // those words, with a sampler beside it there.
                     if let Some(first) = source.user_data {
@@ -7409,49 +7567,18 @@ fn bind_textures(
                         out.extend(bound);
                         continue;
                     }
-                    // The table where the program formed its address: user-data words or
-                    // constants.
-                    let table = table_address(source.table, user);
-                    let Some(at) = descriptor_at(source, table, memory) else {
-                        *unbound += 1;
-                        note_unbound(first_unbound, unreadable_buffer(source));
-                        continue;
-                    };
-                    // Read once per descriptor per submission: guest memory does not change while a
-                    // submission is prepared, and a frame binds the same few textures many times.
-                    let sampler_at = source
-                        .sampler_offset
-                        .map(|offset| table + u64::from(offset));
-                    // Named once a submission, as it is first read: not again for each draw.
-                    let fresh = !read.contains_key(&(
-                        at,
-                        source.slot,
-                        sampler_at,
-                        source.saturated,
-                        source.mirrored,
-                        source.shader_compare,
-                    ));
-                    let bound = table_bound(
+                    match table_source_bound(
                         source,
-                        (at, sampler_at),
-                        stencil,
+                        (user, stencil),
                         (memory, texels),
-                        &mut read,
-                    )
-                    .filter(|bound| shaped_for(bound, source));
-                    named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
-                    let bound = bound.or_else(|| unreached_texture(source, at, memory));
-                    // A texture the module samples and nothing binds draws the backend's
-                    // placeholder, which is not the guest's picture: counted, so the draw is
-                    // refused rather than drawn wrong.
-                    if bound.is_none() {
-                        *unbound += 1;
-                        note_unbound(
-                            first_unbound,
-                            unbound_in_table(source, (at, sampler_at), memory, texels),
-                        );
+                        (&mut read, &mut named),
+                    ) {
+                        Ok(bound) => out.extend(bound),
+                        Err(why) => {
+                            *unbound += 1;
+                            note_unbound(first_unbound, why);
+                        }
                     }
-                    out.extend(bound);
                 }
             }
             _ => {}
@@ -7460,6 +7587,42 @@ fn bind_textures(
     }
     *commands = out;
     named.0
+}
+
+/// What a source whose descriptor is in a table binds - the table where its program formed the
+/// address, from user-data words or constants - read once per descriptor per submission, since
+/// guest memory does not change while a submission is prepared and a frame binds the same few
+/// textures many times; or why nothing binds there, a texture the module samples and nothing binds
+/// drawing the backend's placeholder, which is not the guest's picture.
+fn table_source_bound(
+    source: &TextureSource,
+    (user, stencil): (&[u32], Option<StencilPlane>),
+    (memory, texels): (&impl GuestMemory, &mut TexelCache),
+    (read, named): (&mut TexturesRead, &mut NamedTextures),
+) -> Result<Option<RenderCommand>, String> {
+    let table = table_address(source.table, user);
+    let Some(at) = descriptor_at(source, table, memory) else {
+        return Err(unreadable_buffer(source));
+    };
+    let sampler_at = source
+        .sampler_offset
+        .map(|offset| table + u64::from(offset));
+    // Named once a submission, as it is first read: not again for each draw.
+    let fresh = !read.contains_key(&(
+        at,
+        source.slot,
+        sampler_at,
+        source.saturated,
+        source.mirrored,
+        source.shader_compare,
+    ));
+    let bound = table_bound(source, (at, sampler_at), stencil, (memory, texels), read)
+        .filter(|bound| shaped_for(bound, source));
+    named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
+    match bound.or_else(|| unreached_texture(source, at, memory)) {
+        Some(bound) => Ok(Some(bound)),
+        None => Err(unbound_in_table(source, (at, sampler_at), memory, texels)),
+    }
 }
 
 /// The most unbound slots a refusal describes.
@@ -7507,7 +7670,7 @@ fn table_bound(
     read: &mut TexturesRead,
 ) -> Option<RenderCommand> {
     let plane =
-        stencil.and_then(|plane| stencil_texture(source, read_descriptor(at, memory)?, plane));
+        read_descriptor(at, memory).and_then(|words| stencil_texture(source, words, stencil));
     plane.or_else(|| {
         read.entry((
             at,
@@ -7632,31 +7795,39 @@ fn unnamed_stencil_plane(words: [u32; 8]) -> Option<u64> {
 }
 
 /// The stencil plane `words` describe, loaded by `source` (D927): an `8_UINT` image under a depth
-/// swizzle, flat, at the base the submission's stencil tests read or write. Each texel binds as its
-/// value's bits, which a load answers as they are. [`None`] for any other descriptor, or a module
-/// that samples it compared, as a cube or a volume.
+/// swizzle, flat, at the base the submission's stencil tests read or write - or, where `plane` is
+/// not that one, a base an earlier draw's stencil tests used, the depth target that held it then
+/// holding it still: Grand Theft Auto V's prologue draws load the scene's stencil in later passes.
+/// Each texel binds as its value's bits, which a load answers as they are. [`None`] for any other
+/// descriptor, or a module that samples it compared, as a cube or a volume.
 fn stencil_texture(
     source: &TextureSource,
     words: [u32; 8],
-    plane: StencilPlane,
+    plane: Option<StencilPlane>,
 ) -> Option<RenderCommand> {
     let descriptor = decode_image_descriptor(words);
-    (descriptor.format == FORMAT_8_UINT
+    if !(descriptor.format == FORMAT_8_UINT
         && is_depth_swizzle(descriptor.tiling)
         && words[3] >> 28 == IMAGE_TYPE_2D
         && descriptor.base != 0
-        && plane.bases.contains(&descriptor.base)
         && !(source.compare || source.cube || source.volume || source.layered))
-        .then_some(RenderCommand::BindDepthTexture {
-            slot: source.slot,
-            target: plane.target,
-            sampling: crate::registers::TextureSampling::CLAMPED_POINT,
-            compare: false,
-            cube: false,
-            layered: false,
-            stencil: true,
-            memory: None,
-        })
+    {
+        return None;
+    }
+    let target = plane
+        .filter(|plane| plane.bases.contains(&descriptor.base))
+        .map(|plane| plane.target)
+        .or_else(|| stencil_planes().lock().ok()?.get(&descriptor.base).copied())?;
+    Some(RenderCommand::BindDepthTexture {
+        slot: source.slot,
+        target,
+        sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+        compare: false,
+        cube: false,
+        layered: false,
+        stencil: true,
+        memory: None,
+    })
 }
 
 /// The textures [`bind_textures`] bound, each by its descriptor, once.
@@ -7867,7 +8038,7 @@ fn unbound_reason(
         };
     }
     let bound = match texture_from_words(words, source.slot, memory, texels) {
-        Err(why) => return why.to_owned(),
+        Err(why) => return why,
         Ok(bound) => bound,
     };
     if !shaped_for(&bound, source) {
@@ -8588,7 +8759,22 @@ fn texture_from_words(
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
-) -> Result<RenderCommand, &'static str> {
+) -> Result<RenderCommand, String> {
+    // A fast-cleared image is read as its clears leave it: its blocks expanded over guest memory,
+    // and read as an uncompressed one.
+    if let Some((overlay, uncompressed)) = cleared_surface(words, memory) {
+        return texture_from_read_words(uncompressed, slot, &overlay, texels);
+    }
+    texture_from_read_words(words, slot, memory, texels)
+}
+
+/// [`texture_from_words`] for an image whose clears need no expanding.
+fn texture_from_read_words(
+    words: [u32; 8],
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Result<RenderCommand, String> {
     let words = uncompressed_by_keys(words, memory);
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
@@ -8596,14 +8782,154 @@ fn texture_from_words(
             read_block_texture(&descriptor, &words, block, slot, memory, texels)
         });
         // Blocks in a tiling the block reader does not model are read by its equation (D923).
-        return read
-            .or_else(|why| guest_texture(&descriptor, words, slot, memory, texels).ok_or(why));
+        return read.or_else(|why| {
+            guest_texture(&descriptor, words, slot, memory, texels).ok_or_else(|| why.to_owned())
+        });
     }
     if let Some(bound) = texel_texture(&descriptor, words, slot, memory, texels) {
         return Ok(bound);
     }
     guest_texture(&descriptor, words, slot, memory, texels)
-        .ok_or("its format, selects, tiling or shape is not one sampled exactly")
+        .ok_or_else(|| unsampled_reason(&descriptor, words, memory))
+}
+
+/// The texel format a sampled image of guest format `format` is read as, where it is one sampling
+/// reads.
+const fn sampled_texel_format(format: u32) -> Option<TexelFormat> {
+    Some(match format {
+        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
+        FORMAT_8_UNORM => TexelFormat::R8,
+        FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
+        FORMAT_8_8_8_8_SRGB => TexelFormat::Rgba8Srgb,
+        FORMAT_16_16_16_16_FLOAT => TexelFormat::Rgba16Float,
+        FORMAT_16_UNORM => TexelFormat::R16Unorm,
+        FORMAT_16_FLOAT => TexelFormat::R16Float,
+        _ => return None,
+    })
+}
+
+/// Guest memory with one surface's bytes replaced by `bytes`: what a fast-cleared image reads as
+/// once its blocks are expanded, nothing written back to the guest.
+struct ExpandedSurface<'a, M: GuestMemory> {
+    inner: &'a M,
+    base: u64,
+    bytes: Vec<u8>,
+}
+
+impl<M: GuestMemory> GuestMemory for ExpandedSurface<'_, M> {
+    fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+        let start = address
+            .checked_sub(self.base)
+            .and_then(|at| usize::try_from(at).ok());
+        match start {
+            Some(start)
+                if start
+                    .checked_add(length)
+                    .is_some_and(|end| end <= self.bytes.len()) =>
+            {
+                self.bytes.get(start..start + length)
+            }
+            _ => self.inner.read(address, length),
+        }
+    }
+}
+
+/// A fast-cleared image a sample reads exactly once its clears are expanded, and its descriptor's
+/// words with compression off: keys all cleared to `0000` read every bit zero, and keys all
+/// comp-to-single each 256-byte block its first texel ([`crate::dcc::expand_cleared_to_single`]) -
+/// Grand Theft Auto V's prologue samples a `16_16_16_16_FLOAT` image of the one kind and a
+/// `16_FLOAT` of the other. `None` for an image whose keys say anything else, or none.
+fn cleared_surface<M: GuestMemory>(
+    words: [u32; 8],
+    memory: &M,
+) -> Option<(ExpandedSurface<'_, M>, [u32; 8])> {
+    let descriptor = decode_image_descriptor(words);
+    descriptor.compression?;
+    let format = sampled_texel_format(descriptor.format)?;
+    let span = surface_layout(&descriptor, format)?.chain_bytes(
+        descriptor.width,
+        descriptor.height,
+        descriptor.levels,
+    );
+    let span = usize::try_from(span).ok()?;
+    let bytes = match surface_keys(&descriptor, format, memory).ok()? {
+        crate::dcc::Keys::Clear0000 => vec![0; span],
+        crate::dcc::Keys::ClearSingle => {
+            let mut bytes = memory.read(descriptor.base, span)?.to_vec();
+            crate::dcc::expand_cleared_to_single(&mut bytes, format.bytes() as usize);
+            bytes
+        }
+        crate::dcc::Keys::Uncompressed | crate::dcc::Keys::Other => return None,
+    };
+    let mut uncompressed = words;
+    uncompressed[6] &= !(1 << 21);
+    Some((
+        ExpandedSurface {
+            inner: memory,
+            base: descriptor.base,
+            bytes,
+        },
+        uncompressed,
+    ))
+}
+
+/// Why an image the readers above did not read is not sampled exactly, by the first check it fails
+/// as they make them: compression keys that are not all uncompressed - their census said - a format
+/// the sampled reader does not read, selects it cannot honour, a tiling it does not place, or a
+/// cube's or volume's shape there.
+fn unsampled_reason(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    memory: &impl GuestMemory,
+) -> String {
+    let kind = words[3] >> 28;
+    if !matches!(
+        kind,
+        IMAGE_TYPE_2D | IMAGE_TYPE_3D | IMAGE_TYPE_CUBE | IMAGE_TYPE_2D_ARRAY
+    ) {
+        return format!("its image type {kind} is not one sampled");
+    }
+    let format = sampled_texel_format(descriptor.format);
+    if descriptor.compression.is_some()
+        && let Some(format) = format
+    {
+        let keys = surface_keys(descriptor, format, memory);
+        if !matches!(keys, Ok(crate::dcc::Keys::Uncompressed)) {
+            return format!(
+                "its compression keys are not all uncompressed, which sampling reads only so ({:?} at {} bytes a texel, format {}; {})",
+                descriptor.tiling,
+                format.bytes(),
+                descriptor.format,
+                keys.map_or_else(|why| why, |_| key_census(descriptor, format, memory))
+            );
+        }
+    }
+    let Some(format) = format else {
+        return format!(
+            "its format {} is not one sampling reads exactly",
+            descriptor.format
+        );
+    };
+    if sampled_view(descriptor, words).is_none() {
+        return format!(
+            "its selects {:?} are not ones format {} is sampled through exactly",
+            destination_selects(words[3]),
+            descriptor.format
+        );
+    }
+    if !SAMPLED_AS_RENDERED.contains(&descriptor.tiling) {
+        return format!(
+            "its tiling {:?} at {} bytes a texel is not one sampling places",
+            descriptor.tiling,
+            format.bytes()
+        );
+    }
+    format!(
+        "its shape (type {}) in {:?} at {} bytes a texel is not one sampled exactly",
+        words[3] >> 28,
+        descriptor.tiling,
+        format.bytes()
+    )
 }
 
 /// A flat image in a format [`crate::formats`] samples, where the readers above do not read it
@@ -9372,15 +9698,7 @@ fn sampled_view(descriptor: &ImageDescriptor, words: [u32; 8]) -> Option<(TexelF
 }
 
 fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelFormat, [u32; 4])> {
-    let format = match descriptor.format {
-        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
-        FORMAT_8_UNORM => TexelFormat::R8,
-        FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
-        FORMAT_8_8_8_8_SRGB => TexelFormat::Rgba8Srgb,
-        FORMAT_16_16_16_16_FLOAT => TexelFormat::Rgba16Float,
-        FORMAT_16_UNORM => TexelFormat::R16Unorm,
-        _ => return None,
-    };
+    let format = sampled_texel_format(descriptor.format)?;
     let selects = destination_selects(word3);
     // An array is sampled flat at its first layer, its view checked where it is read (D920).
     (matches!(
@@ -9422,6 +9740,11 @@ fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
     if format == TexelFormat::Rgba16Float {
         return selects == IDENTITY_SELECTS;
     }
+    // A one-channel half float is widened with its other channels the constants: read only as X,
+    // then those.
+    if format == TexelFormat::R16Float {
+        return matches!(selects, [SELECT_X, 0 | 5, 0 | 6, 1 | 7]);
+    }
     // An sRGB texel's colour channels are decoded where they lie, so they are read only as they
     // are: a channel moved into another's place would be decoded, or not, as the wrong one.
     if format == TexelFormat::Rgba8Srgb {
@@ -9441,7 +9764,10 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
-        TexelFormat::Rgba16Float => crate::backend::TextureEncoding::Rgba16Float,
+        // A one-channel half float is widened to four a texel, red then zero, zero and one.
+        TexelFormat::Rgba16Float | TexelFormat::R16Float => {
+            crate::backend::TextureEncoding::Rgba16Float
+        }
         // The guest's bits as they are, in its own format (D923).
         TexelFormat::Rgba16Unorm => crate::backend::TextureEncoding::Guest {
             code: FORMAT_16_16_16_16_UNORM as u16,
@@ -9455,6 +9781,8 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         | TexelFormat::R32Uint
         | TexelFormat::R16Uint
         | TexelFormat::R16Unorm
+        | TexelFormat::Rg16Float
+        | TexelFormat::Rg8Unorm
         | TexelFormat::Rg32Uint
         | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
     }
@@ -9476,6 +9804,10 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
     // A sixteen-bit texel a word, packed two to a word with its selects as its lanes (D920).
     if format == TexelFormat::R16Unorm {
         return packed_half_texture(bound, selects);
+    }
+    // A sixteen-bit float texel a word, widened to four half floats a texel.
+    if format == TexelFormat::R16Float {
+        return widened_half_float_texture(bound);
     }
     let RenderCommand::BindTexture {
         slot,
@@ -9672,6 +10004,44 @@ fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand
 /// A `16_UNORM` texture's binding as [`crate::backend::TextureEncoding::R16`]: the low half of each
 /// of `bound`'s words, packed two to a word, and each channel's source as its `selects` pick it, as
 /// a one-byte texture's are ([`byte_lanes`], D920).
+/// A one-channel `16_FLOAT` texture, a texel a word in its low half, as four half floats a texel -
+/// red, then zero, zero and one, the constants a one-channel image's other channels read as - for
+/// the host to sample as `R16G16B16A16_SFLOAT`. Exact: the half is carried as it is.
+fn widened_half_float_texture(bound: RenderCommand) -> RenderCommand {
+    /// A half float's one, in the top half of a texel's second word: alpha.
+    const ALPHA_ONE: u32 = 0x3C00 << 16;
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        faces,
+        levels,
+        ..
+    } = bound
+    else {
+        return bound;
+    };
+    let widened: std::sync::Arc<[u32]> = texels
+        .iter()
+        .flat_map(|&texel| [texel & 0xFFFF, ALPHA_ONE])
+        .collect();
+    let encoding = crate::backend::TextureEncoding::Rgba16Float;
+    RenderCommand::BindTexture {
+        slot,
+        hash: hash ^ u64::from(encoding_tag(encoding)) ^ 0x5231_3646,
+        texels: widened,
+        width,
+        height,
+        sampling,
+        encoding,
+        faces,
+        levels,
+    }
+}
+
 fn packed_half_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand {
     let RenderCommand::BindTexture {
         slot,
@@ -9787,6 +10157,9 @@ fn swizzle_texels_by_channel(
                 | TexelFormat::R32Uint
                 | TexelFormat::R16Uint
                 | TexelFormat::R16Unorm
+                | TexelFormat::R16Float
+                | TexelFormat::Rg16Float
+                | TexelFormat::Rg8Unorm
                 | TexelFormat::Rg32Uint
                 | TexelFormat::R32Float
                 | TexelFormat::Float11_11_10
@@ -11657,6 +12030,10 @@ mod tests {
         // With no plane, the descriptor names memory this test does not map: the null texture, not
         // the stencil (D921).
         assert_eq!(bind(None), (0, None), "no stencil plane bound");
+        // A plane an earlier draw's stencil tests used is bound from the target that held it, though
+        // this submission binds another: Grand Theft Auto V's later passes load the scene's.
+        super::note_stencil_plane(&plane);
+        assert_eq!(bind(None), (0, Some((5, target, true))), "an earlier plane");
     }
 
     /// A table slot whose descriptor names an image in no guest memory binds the null texture
@@ -11808,7 +12185,7 @@ mod tests {
             first.as_deref(),
             Some(concat!(
                 "slot 0, from user data 0: [0x11e9df14, 0x107400, 0x1, 0x4dfac, 0x0, 0x7000b0, 0x0, ",
-                "0x0] - its format, selects, tiling or shape is not one sampled exactly"
+                "0x0] - its image type 0 is not one sampled"
             ))
         );
     }
@@ -12480,14 +12857,14 @@ mod tests {
         let refused =
             texture_from_words(bc3(0x91B0_0FAC), 0, &Nothing, &mut super::TexelCache::new());
         assert_eq!(
-            refused.err(),
+            refused.err().as_deref(),
             Some("its blocks are in a tiling block-compressed textures are not read in")
         );
         // A 3D image (type 10) in `64KB_S`.
         let refused =
             texture_from_words(bc3(0xA090_0FAC), 0, &Nothing, &mut super::TexelCache::new());
         assert_eq!(
-            refused.err(),
+            refused.err().as_deref(),
             Some("it is a block-compressed image that is neither 2D nor one cube")
         );
     }

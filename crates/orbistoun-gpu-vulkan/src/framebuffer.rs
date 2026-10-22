@@ -5399,18 +5399,20 @@ fn build_resident_pipeline(
     shaders
         .map(|(vertex, fragment)| {
             orbistoun_gpu::perf::measure(orbistoun_gpu::perf::Phase::Build, || {
-                build_pipeline(
-                    Devices {
-                        instance,
-                        physical,
-                        device,
-                    },
-                    pass.render_pass,
-                    (vertex, fragment),
-                    (width, height),
-                    geometry,
-                    bound,
-                )
+                orbistoun_gpu::perf::building((vertex, fragment), || {
+                    build_pipeline(
+                        Devices {
+                            instance,
+                            physical,
+                            device,
+                        },
+                        pass.render_pass,
+                        (vertex, fragment),
+                        (width, height),
+                        geometry,
+                        bound,
+                    )
+                })
             })
             .and_then(|built| {
                 if built.owns_guest_memory {
@@ -6100,12 +6102,13 @@ fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, Di
     ];
     // The fragment stage only: a guest's pixel shader samples textures, and declaring other stages
     // would claim what nothing has shown.
+    // The mesh stage too: a primitive shader fetches images of its own at the last slots.
     let sampled = TEXTURE_BINDINGS.map(|binding| {
         vk::DescriptorSetLayoutBinding::default()
             .binding(binding)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT)
     });
     let bindings: Vec<_> = bindings.into_iter().chain(sampled).collect();
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);

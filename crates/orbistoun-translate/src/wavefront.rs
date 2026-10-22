@@ -2494,17 +2494,27 @@ impl Wavefront<'_> {
         descriptor: u32,
         (reaching, shape, unwritten): (Reaching, model::ImageShape, bool),
     ) -> Result<TextureSource, &'static str> {
-        let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
+        // A primitive shader's images take the last slots, so they never share one with the pixel
+        // shader drawn beside it.
+        let first = if self.stage == Stage::Mesh {
+            orbistoun_spirv::PRIMITIVE_FIRST_TEXTURE
+        } else {
+            0
+        };
+        let slot = u32::try_from(first + self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
-            return Err(
-                "this shader reads more than thirty-two textures, and thirty-two bindings exist (D690)",
-            );
+            return Err(concat!(
+                "this shader reads more textures than its stage has bindings: thirty-two, the ",
+                "last eight a primitive shader's (D690)"
+            ));
         }
         // Registers no load reached that still hold the user data they were seeded with read the
         // user data's texture, whatever a later load puts there: GTA V's intro video shader samples
         // its luma plane from `s[0:7]` and then loads a volume's descriptor into them.
-        // So do registers no path to this access wrote, though another path writes them (D934).
-        let seeded = (reaching.is_none() && matches!(self.stage, Stage::Compute | Stage::Fragment))
+        // So do registers no path to this access wrote, though another path writes them (D934). A
+        // primitive shader's fetch reads its own user data so, as Grand Theft Auto V's does at `s8`.
+        let seeded = reaching
+            .is_none()
             .then(|| {
                 self.still_seeded(descriptor, model::IMAGE_DESCRIPTOR_REGISTERS)
                     .or_else(|| unwritten.then(|| self.seeded_word(descriptor)).flatten())
@@ -2541,7 +2551,9 @@ impl Wavefront<'_> {
         let earlier_resolved = self.textures.iter().all(|earlier| {
             earlier.source.table_offset.is_some() || earlier.source.user_data.is_some()
         });
-        if slot >= 1 && ((table_offset.is_none() && user_data.is_none()) || !earlier_resolved) {
+        if !self.textures.is_empty()
+            && ((table_offset.is_none() && user_data.is_none()) || !earlier_resolved)
+        {
             return Err(concat!(
                 "this shader reads more than one texture and at least one descriptor did not come from ",
                 "its descriptor table, so which is which cannot be told (D690)"
@@ -5645,16 +5657,9 @@ impl Model for Wavefront<'_> {
         sampler: Option<u32>,
         (at, shape): (u32, model::ImageShape),
     ) -> Result<model::Texture, &'static str> {
-        // The fragment stage only: the harness binds its sampled image with fragment stage flags,
-        // and the `vec4` type a sample answers with is declared by the colour output, which only a
-        // fragment module has.
-        // A compute module samples only at a named level, which the model checks (D904).
-        if self.stage == Stage::Mesh {
-            return Err(concat!(
-                "only a pixel shader samples a texture here, and a compute dispatch fetches one - ",
-                "a primitive shader's image and a compute sample are not bound"
-            ));
-        }
+        // A primitive shader's images take slots of its own. It and a compute module sample only
+        // at a named level - neither has derivatives to choose one from - which the model checks
+        // (D904).
         // The load that filled the descriptor registers for this sample, where it is known: a shader
         // that reuses the registers for a second texture names a different one there.
         let reaching = self.descriptor_loads.2.get(&at).copied();

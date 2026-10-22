@@ -41,6 +41,12 @@ macro_rules! span_labels {
             Span::PrepareAgain => $as!("prepare again"),
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
+            Span::TargetRuns => $as!("run draws: target runs"),
+            Span::SegmentStream => $as!("run draws: segment stream"),
+            Span::SegmentPrepare => $as!("run draws: segment prepare"),
+            Span::ExpandDcc => $as!("run draws: expand dcc"),
+            Span::MoreTargets => $as!("run draws: more targets"),
+            Span::StreamoutSegment => $as!("run draws: streamout"),
             Span::LivePipelineWait => $as!("live pipeline: wait"),
             Span::DrawExecute => $as!("draw: execute"),
             Span::DrawPendingFrame => $as!("draw: settle pending frame"),
@@ -342,6 +348,46 @@ fn leave(shift: u32, was: u64) {
 /// that never returns is, read at the end of a run.
 #[must_use]
 pub fn open_work() -> Vec<(String, Option<&'static str>, Option<&'static str>)> {
+    open_spans()
+}
+
+/// The pipeline build under way, if one is: when it began and the modules it compiles. A build the
+/// host driver never finishes holds a run as surely as a wait does, and leaves nothing else behind
+/// to say so.
+type Building = Option<(std::time::Instant, Vec<u32>, Vec<u32>)>;
+
+/// See [`Building`].
+static BUILDING: std::sync::Mutex<Building> = std::sync::Mutex::new(None);
+
+/// Runs `build`, the pipeline of `modules` (vertex, then fragment) being compiled, recorded as under
+/// way meanwhile ([`build_under_way`]).
+pub fn building<T>((vertex, fragment): (&[u32], &[u32]), build: impl FnOnce() -> T) -> T {
+    if let Ok(mut held) = BUILDING.lock() {
+        *held = Some((
+            std::time::Instant::now(),
+            vertex.to_vec(),
+            fragment.to_vec(),
+        ));
+    }
+    let pipeline = build();
+    if let Ok(mut held) = BUILDING.lock() {
+        *held = None;
+    }
+    pipeline
+}
+
+/// The pipeline build under way now, if one is: how long it has run and its modules.
+#[must_use]
+pub fn build_under_way() -> Option<(std::time::Duration, Vec<u32>, Vec<u32>)> {
+    BUILDING
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|(began, vertex, fragment)| (began.elapsed(), vertex.clone(), fragment.clone()))
+}
+
+/// [`open_work`]'s spans and phases.
+fn open_spans() -> Vec<(String, Option<&'static str>, Option<&'static str>)> {
     let Ok(slots) = open_slots().lock() else {
         return Vec::new();
     };
@@ -482,6 +528,18 @@ pub enum Span {
     CommandProcessor,
     /// Carrying out a submission's draws into its target.
     RunDraws,
+    /// Within [`Self::RunDraws`]: a stream's draws found with the colour target each draws into.
+    TargetRuns,
+    /// Within [`Self::RunDraws`]: the stream as one segment's draws see it, copied (D729).
+    SegmentStream,
+    /// Within [`Self::RunDraws`]: one segment's stream prepared, every packet before it walked.
+    SegmentPrepare,
+    /// Within [`Self::RunDraws`]: a DCC target's blocks expanded before its draws.
+    ExpandDcc,
+    /// Within [`Self::RunDraws`]: the further colour targets seeded or written back.
+    MoreTargets,
+    /// Within [`Self::RunDraws`]: a segment carried out as a streamout pass.
+    StreamoutSegment,
     /// Waiting for the live pipeline, which one thread at a time prepares through: where a thread
     /// that never gets it is seen waiting.
     LivePipelineWait,
@@ -766,7 +824,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 129] = [
+    pub const ALL: [Self; 135] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -774,6 +832,12 @@ impl Span {
         Self::PrepareAgain,
         Self::CommandProcessor,
         Self::RunDraws,
+        Self::TargetRuns,
+        Self::SegmentStream,
+        Self::SegmentPrepare,
+        Self::ExpandDcc,
+        Self::MoreTargets,
+        Self::StreamoutSegment,
         Self::LivePipelineWait,
         Self::DrawExecute,
         Self::DrawPendingFrame,
@@ -1048,6 +1112,20 @@ pub fn take_spans() -> [(u64, u64); SPANS] {
 #[cfg(test)]
 mod tests {
     use super::{Count, Phase, Span};
+
+    /// A pipeline build is under way, with its modules, while it runs and not after: what a run's
+    /// end reads of a compile the host driver never finished.
+    #[test]
+    fn a_pipeline_build_is_under_way_while_it_runs() {
+        let (vertex, fragment) = ([1_u32, 2], [3_u32]);
+        let seen = super::building((&vertex, &fragment), super::build_under_way);
+        let (_, held_vertex, held_fragment) = seen.expect("under way inside the build");
+        assert_eq!((held_vertex, held_fragment), (vec![1, 2], vec![3]));
+        assert!(
+            super::build_under_way().is_none(),
+            "nothing once it is built"
+        );
+    }
 
     /// A thread inside a span is seen there by name, with its phase, and leaves no mark once out:
     /// what a run's end reads of a thread that never came back.

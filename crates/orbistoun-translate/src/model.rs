@@ -379,6 +379,24 @@ pub const SUPPORTED: &[&str] = &[
     "v_pk_lshlrev_b16",
     "v_pk_sub_u16",
     "v_pk_add_u16",
+    "v_pk_add_f16",
+    "v_pk_mul_f16",
+    "v_pk_fma_f16",
+    "v_pk_min_f16",
+    "v_pk_max_f16",
+    "v_fma_f16",
+    "v_min3_f16",
+    "v_max3_f16",
+    "v_med3_f16",
+    "v_lshrrev_b16",
+    "v_sub_nc_i16",
+    "v_rcp_f16_e32",
+    "v_cmp_lt_f16_e32",
+    "v_cmp_eq_f16_e32",
+    "v_cmp_le_f16_e32",
+    "v_cmp_gt_f16_e32",
+    "v_cmp_ge_f16_e32",
+    "v_cmp_neq_f16_e32",
     "v_min3_i16",
     "v_lshrrev_b64",
     "v_max_f32_e32",
@@ -2998,6 +3016,12 @@ pub fn instruction<M: Model + ?Sized>(
     // An SDWA form: the same operation over selected parts of its sources, placed into part of
     // its destination. Admitted only for `SDWA_INTEGER` and `SDWA_FLOAT`, before translation began.
     if let Some(word) = sdwa_word(model.encodings(), instruction) {
+        if SDWA_HALF.contains(&name) {
+            return sdwa_half(model, instruction, name, word);
+        }
+        if name.starts_with("v_cmp_") && name.ends_with("_f16_e32") {
+            return half_compare(model, instruction, name, Some(word));
+        }
         if let Some(long) = sdwa_float_long_form(name) {
             return sdwa_float(model, instruction, long, word);
         }
@@ -3199,6 +3223,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_pk_mad_u16" => packed_multiply_add(model, instruction),
         "v_pk_lshlrev_b16" => packed_shift_left(model, instruction),
         "v_pk_sub_u16" | "v_pk_add_u16" => packed_add_or_subtract(model, instruction, name),
+        name if is_sixteen_bit(name) => sixteen_bit(model, instruction, name),
         "v_min3_i16" => half_minimum_of_three(model, instruction),
 
         // A lane learns its own index by counting the mask bits below itself; no instruction hands
@@ -8402,6 +8427,161 @@ pub const SDWA_INTEGER: &[&str] = &[
     "v_and_b32_e32",
 ];
 
+/// The sixteen-bit float short forms translated in their SDWA form (`sdwa_half`): a word
+/// select is a half, which is what the long form's `op_sel` picks.
+pub const SDWA_HALF: &[&str] = &[
+    "v_add_f16_e32",
+    "v_sub_f16_e32",
+    "v_subrev_f16_e32",
+    "v_mul_f16_e32",
+    "v_max_f16_e32",
+    "v_min_f16_e32",
+    "v_rcp_f16_e32",
+];
+
+/// The SDWA select codes for a register's low and high sixteen bits (`aco_ir.h:1679-1688`).
+const SDWA_WORD_0: u32 = 4;
+/// See [`SDWA_WORD_0`].
+const SDWA_WORD_1: u32 = 5;
+
+/// A sixteen-bit float short form in its SDWA form (AMD's published RDNA instruction set, SDWA):
+/// each source the half its select names - a word select, or the whole dword's low half - with the
+/// word's negate (bits 20 and 28) and absolute value (21 and 29); the result, computed in single
+/// precision and rounded to a half, into the half `dst_sel` names, the other kept where `dst_unused`
+/// preserves and zeroed where it pads, or into the low half of a whole-dword destination, the high
+/// kept as the plain form keeps it. Grand Theft Auto V's prologue programs do
+/// `v_mul_f16_sdwa v?, v29, v? dst_sel:WORD_1 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1` (word
+/// `0x0605151d`). A clamp is made as the stage's `DX10_CLAMP` says; byte selects, sign-extending fill
+/// and an output multiplier are refused.
+fn sdwa_half<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    word: u32,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let fields = SdwaFields::read(word);
+    if word & 0x3 << 14 != 0 {
+        return Err(refuse(
+            "a sixteen-bit float SDWA form's output multiplier, which is not translated",
+        ));
+    }
+    // A clamp to [0, 1], made in single precision before the result is rounded to a half, a NaN as
+    // the stage's `DX10_CLAMP` says.
+    let clamp = if word >> 13 & 1 != 0 {
+        Some(model.dx10_clamp().ok_or_else(|| {
+            refuse("a sixteen-bit float SDWA form clamps, and the stage's DX10_CLAMP mode was not given")
+        })?)
+    } else {
+        None
+    };
+    let half_of = |select: u32| match select {
+        SDWA_WORD_0 | SDWA_DWORD => Ok(false),
+        SDWA_WORD_1 => Ok(true),
+        _ => Err(refuse(
+            "a sixteen-bit float SDWA form selecting a byte, which is not translated",
+        )),
+    };
+    let (high_destination, pad) = match (fields.dst_sel, fields.dst_unused) {
+        (SDWA_DWORD, _) => (false, false),
+        (SDWA_WORD_0 | SDWA_WORD_1, SDWA_UNUSED_PRESERVE) => (fields.dst_sel == SDWA_WORD_1, false),
+        (SDWA_WORD_0 | SDWA_WORD_1, 0) => (fields.dst_sel == SDWA_WORD_1, true),
+        _ => {
+            return Err(refuse(
+                "a sixteen-bit float SDWA form whose destination select or fill is not translated",
+            ));
+        }
+    };
+    let [Operand::Vector(destination), rest @ ..] = instruction.operands.as_slice() else {
+        return Err(refuse(
+            "a sixteen-bit float SDWA form without a vector destination",
+        ));
+    };
+    let sources = sdwa_half_sources(instruction, (name, word, fields), rest, half_of)?;
+    let (sign, magnitude) = (model.constant(0x8000), model.constant(0x7FFF));
+    let one = model.constant(1.0f32.to_bits());
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut operands = Vec::with_capacity(sources.len());
+        for (operand, high, [negate, absolute]) in &sources {
+            let mut bits = read_half_float(model, instruction, operand, lane, *high)?;
+            if *absolute {
+                bits = model.binary(op::BITWISE_AND, bits, magnitude);
+            }
+            if *negate {
+                bits = model.binary(op::BITWISE_XOR, bits, sign);
+            }
+            operands.push(model.half_to_float_bits(bits));
+        }
+        let (x, y) = (operands[0], operands.get(1).copied().unwrap_or(operands[0]));
+        let result = match name {
+            "v_add_f16_e32" => model.f32_binary(op::FADD, x, y),
+            "v_sub_f16_e32" => model.f32_binary(op::FSUB, x, y),
+            "v_subrev_f16_e32" => model.f32_binary(op::FSUB, y, x),
+            "v_mul_f16_e32" => model.f32_binary(op::FMUL, x, y),
+            "v_max_f16_e32" => model.f32_ext_binary(GLSL_FMAX, x, y),
+            "v_min_f16_e32" => model.f32_ext_binary(GLSL_FMIN, x, y),
+            _ => model.f32_binary(op::FDIV, one, x),
+        };
+        let result = match clamp {
+            Some(nan_to_zero) => clamp_unit(model, result, nan_to_zero),
+            None => result,
+        };
+        let half = model.float_bits_to_half(result);
+        if pad {
+            let word = if high_destination {
+                model.binary(op::SHIFT_LEFT_LOGICAL, half, sixteen)
+            } else {
+                half
+            };
+            model.write_vector_lane(u32::from(*destination), lane, word);
+        } else {
+            write_half(
+                model,
+                instruction,
+                (u32::from(*destination), lane),
+                half,
+                high_destination,
+            )?;
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// A sixteen-bit float SDWA form's sources, each with the half its select reads and its negate and
+/// absolute value: the word's first source, and for a two-source form the vector register the first
+/// word names. A second source in the scalar space is refused.
+fn sdwa_half_sources(
+    instruction: &Instruction,
+    (name, word, fields): (&str, u32, SdwaFields),
+    rest: &[Operand],
+    half_of: impl Fn(u32) -> Result<bool, TranslateError>,
+) -> Result<Vec<(Operand, bool, [bool; 2])>, TranslateError> {
+    let mut sources = vec![(
+        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
+        half_of(fields.select[0].0)?,
+        [word >> 20 & 1 != 0, word >> 21 & 1 != 0],
+    )];
+    if name != "v_rcp_f16_e32" {
+        let Some(Operand::Vector(register)) = rest.last().filter(|_| !fields.src1_scalar) else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a sixteen-bit float SDWA form whose second source is not a vector register",
+            });
+        };
+        sources.push((
+            Operand::Vector(*register),
+            half_of(fields.select[1].0)?,
+            [word >> 28 & 1 != 0, word >> 29 & 1 != 0],
+        ));
+    }
+    Ok(sources)
+}
+
 /// The float short-form instructions translated in their SDWA form over whole registers, each with
 /// the long form it then is: SDWA's source negate and absolute value, clamp and output multiplier
 /// are the long form's (RDNA ISA, SDWA), so only the selects are SDWA's own.
@@ -8659,6 +8839,8 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
             })
             .is_some_and(|(family, name)| {
                 SDWA_INTEGER.contains(&name)
+                    || SDWA_HALF.contains(&name)
+                    || (name.starts_with("v_cmp_") && name.ends_with("_f16_e32"))
                     || SDWA_FLOAT_UNARY.contains(&name)
                     || SDWA_COMPARE.contains(&name)
                     || SDWA_CARRY.contains(&name)
@@ -10826,6 +11008,402 @@ fn half_float_arithmetic<M: Model + ?Sized>(
     Ok(())
 }
 
+/// Whether `name` is one of the sixteen-bit forms [`sixteen_bit`] carries out.
+fn is_sixteen_bit(name: &str) -> bool {
+    (name.starts_with("v_cmp_") && name.ends_with("_f16_e32"))
+        || PACKED_HALF_FLOATS.contains(&name)
+        || LONG_HALF_FLOATS.contains(&name)
+        || matches!(name, "v_lshrrev_b16" | "v_sub_nc_i16" | "v_rcp_f16_e32")
+}
+
+/// The sixteen-bit forms: packed and long-form float arithmetic, the sixteen-bit shift and
+/// subtract, and the half-float reciprocal.
+fn sixteen_bit<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    if PACKED_HALF_FLOATS.contains(&name) {
+        packed_half_float(model, instruction, name)
+    } else if LONG_HALF_FLOATS.contains(&name) {
+        long_half_float(model, instruction, name)
+    } else if name == "v_rcp_f16_e32" {
+        half_float_reciprocal(model, instruction)
+    } else if name.starts_with("v_cmp_") {
+        half_compare(model, instruction, name, None)
+    } else {
+        long_sixteen_bit(model, instruction, name)
+    }
+}
+
+/// The packed sixteen-bit float arithmetic [`packed_half_float`] carries out.
+const PACKED_HALF_FLOATS: [&str; 5] = [
+    "v_pk_add_f16",
+    "v_pk_mul_f16",
+    "v_pk_fma_f16",
+    "v_pk_min_f16",
+    "v_pk_max_f16",
+];
+
+/// The long-form sixteen-bit float arithmetic [`long_half_float`] carries out.
+const LONG_HALF_FLOATS: [&str; 4] = ["v_fma_f16", "v_min3_f16", "v_max3_f16", "v_med3_f16"];
+
+/// The bits of an inline float as a sixteen-bit float instruction reads it: the half-precision
+/// value of the constant the operand table names (LLVM encodes `v_add_f16 v0, 1.0, v0` with
+/// operand 242, and `0.15915494` as 248, a half `0x3118`). `None` for a name that is not one.
+fn inline_half_bits(name: &str) -> Option<u32> {
+    let magnitude = match name.trim_start_matches('-') {
+        "0.5" => 0x3800,
+        "1.0" => 0x3C00,
+        "2.0" => 0x4000,
+        "4.0" => 0x4400,
+        INVERSE_TWO_PI => 0x3118,
+        _ => return None,
+    };
+    Some(if name.starts_with('-') {
+        magnitude | 0x8000
+    } else {
+        magnitude
+    })
+}
+
+/// One sixteen-bit float source as its instruction reads it, zero above: [`read_half`], or the
+/// half-precision value of an inline float in the low half.
+fn read_half_float<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    operand: &Operand,
+    lane: u32,
+    high: bool,
+) -> Result<Id, TranslateError> {
+    // An inline float is the same half in either half: a packed instruction's `op_sel_hi` reads the
+    // constant (ACO treats a packed operand's constant as it does a register's,
+    // `aco_optimizer.cpp:1315-1320`, and takes `op_sel_hi` as in force for it,
+    // `aco_register_allocation.cpp:2998`).
+    if let Operand::Named(name) = operand
+        && let Some(bits) = inline_half_bits(name)
+    {
+        return Ok(model.constant(bits));
+    }
+    read_half(model, instruction, operand, lane, high)
+}
+
+/// A sixteen-bit float compare into the condition mask (AMD's published RDNA instruction set,
+/// `VOPC`): each source's low half - or, in an SDWA form, the half its select names, negated and
+/// made absolute as the word says - compared as single precision, which orders halves exactly.
+/// Grand Theft Auto V's prologue does `v_cmp_lt_f16_sdwa vcc, v10, s? src1_sel:WORD_1` (word
+/// `0x8506000a`). An SDWA form naming a destination of its own, or clamping, is refused.
+fn half_compare<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    word: Option<u32>,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let float_name = name.replacen("_f16_", "_f32_", 1);
+    let (opcode, _) = op_for_compare(instruction, &float_name)?;
+    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(2) else {
+        return Err(refuse(
+            "a sixteen-bit float compare's second source is not its register field",
+        ));
+    };
+    // Each source, the half it reads, and its negate and absolute value.
+    let sources: [(Operand, bool, [bool; 2]); 2] =
+        match word {
+            None => [
+                (
+                    instruction.operands.get(1).cloned().ok_or_else(|| {
+                        refuse("a sixteen-bit float compare without a first source")
+                    })?,
+                    false,
+                    [false; 2],
+                ),
+                (Operand::Vector(*vsrc1), false, [false; 2]),
+            ],
+            Some(word) => {
+                if word >> 15 & 1 != 0 || word >> 13 & 1 != 0 {
+                    return Err(refuse(concat!(
+                        "a sixteen-bit float SDWA compare naming a destination of its own, or ",
+                        "clamping, which is not translated"
+                    )));
+                }
+                let fields = SdwaFields::read(word);
+                let half_of = |select: u32| match select {
+                    SDWA_WORD_0 | SDWA_DWORD => Ok(false),
+                    SDWA_WORD_1 => Ok(true),
+                    _ => Err(refuse("a sixteen-bit float SDWA compare selecting a byte")),
+                };
+                [
+                    (
+                        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
+                        half_of(fields.select[0].0)?,
+                        [word >> 20 & 1 != 0, word >> 21 & 1 != 0],
+                    ),
+                    (
+                        sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?,
+                        half_of(fields.select[1].0)?,
+                        [word >> 28 & 1 != 0, word >> 29 & 1 != 0],
+                    ),
+                ]
+            }
+        };
+    let (sign, magnitude) = (model.constant(0x8000), model.constant(0x7FFF));
+    let zero = model.constant(0);
+    let mut halves = (zero, zero);
+    for lane in 0..model.modelled_lanes() {
+        if model.lane_known_idle(lane) {
+            continue;
+        }
+        let mut sides = [zero, zero];
+        for (side, (operand, high, [negate, absolute])) in sides.iter_mut().zip(&sources) {
+            let mut bits = read_half_float(model, instruction, operand, lane, *high)?;
+            if *absolute {
+                bits = model.binary(op::BITWISE_AND, bits, magnitude);
+            }
+            if *negate {
+                bits = model.binary(op::BITWISE_XOR, bits, sign);
+            }
+            let widened = model.half_to_float_bits(bits);
+            *side = model.as_float(widened);
+        }
+        let condition = lane_compare(model, opcode, sides[0], sides[1]);
+        halves = model.set_lane_bit(halves, lane, condition);
+    }
+    let halves = running_bits(model, halves)?;
+    model.write_lane_mask(VCC_LOW_HALF, halves.0, halves.1)?;
+    model.count();
+    Ok(())
+}
+
+/// Rounds `operands`, already single-precision bits, through the sixteen-bit float operation `name`
+/// names: a sum, product, fused multiply-add, minimum, maximum or median. A product of two halves
+/// is exact in single precision, so a multiply-add rounds once there and once to a half.
+fn half_float_operation<M: Model + ?Sized>(model: &mut M, name: &str, operands: &[Id]) -> Id {
+    let at = |index: usize| operands.get(index).copied().unwrap_or(operands[0]);
+    let (a, b, c) = (at(0), at(1), at(2));
+    match name {
+        "v_pk_add_f16" => model.f32_binary(op::FADD, a, b),
+        "v_pk_mul_f16" => model.f32_binary(op::FMUL, a, b),
+        "v_pk_min_f16" => model.f32_ext_binary(GLSL_FMIN, a, b),
+        "v_pk_max_f16" => model.f32_ext_binary(GLSL_FMAX, a, b),
+        "v_min3_f16" => {
+            let less = model.f32_ext_binary(GLSL_FMIN, a, b);
+            model.f32_ext_binary(GLSL_FMIN, less, c)
+        }
+        "v_max3_f16" => {
+            let more = model.f32_ext_binary(GLSL_FMAX, a, b);
+            model.f32_ext_binary(GLSL_FMAX, more, c)
+        }
+        "v_med3_f16" => {
+            let (less, more) = (
+                model.f32_ext_binary(GLSL_FMIN, a, b),
+                model.f32_ext_binary(GLSL_FMAX, a, b),
+            );
+            let capped = model.f32_ext_binary(GLSL_FMIN, more, c);
+            model.f32_ext_binary(GLSL_FMAX, less, capped)
+        }
+        // `v_pk_fma_f16` and `v_fma_f16`.
+        _ => {
+            let product = model.f32_binary(op::FMUL, a, b);
+            model.f32_binary(op::FADD, product, c)
+        }
+    }
+}
+
+/// The packed sixteen-bit float arithmetic (AMD's published RDNA instruction set, `VOP3P`):
+/// `v_pk_add_f16`, `v_pk_mul_f16`, `v_pk_fma_f16`, `v_pk_min_f16` and `v_pk_max_f16`. Each half of
+/// the result is the operation on the halves [`packed_selects`]'s bits pick - `op_sel` for the low
+/// result, `op_sel_hi` for the high - each negated where `neg_lo` (the second word's 31:29) or
+/// `neg_hi` (the first word's 10:8) says, computed in single precision and rounded back to a half;
+/// the whole register is written. Clamp (bit 15) is refused.
+fn packed_half_float<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), sources @ ..] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a packed sixteen-bit float instruction without a vector destination",
+        });
+    };
+    let second = instruction.second_word.unwrap_or(0);
+    if instruction.word & 1 << 15 != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a packed sixteen-bit float instruction's clamp, which is not translated",
+        });
+    }
+    let low_select = [11, 12, 13].map(|bit| instruction.word >> bit & 1 != 0);
+    let high_select = [
+        second >> 27 & 1 != 0,
+        second >> 28 & 1 != 0,
+        instruction.word >> 14 & 1 != 0,
+    ];
+    let negated = [
+        [29, 30, 31].map(|bit| second >> bit & 1 != 0),
+        [8, 9, 10].map(|bit| instruction.word >> bit & 1 != 0),
+    ];
+    let sign = model.constant(0x8000);
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut halves = [model.constant(0); 2];
+        for (half, selects) in [low_select, high_select].iter().enumerate() {
+            let mut operands = Vec::with_capacity(sources.len());
+            for (index, source) in sources.iter().enumerate() {
+                let bits = read_half_float(model, instruction, source, lane, selects[index])?;
+                let bits = if negated[half][index] {
+                    model.binary(op::BITWISE_XOR, bits, sign)
+                } else {
+                    bits
+                };
+                operands.push(model.half_to_float_bits(bits));
+            }
+            let result = half_float_operation(model, name, &operands);
+            halves[half] = model.float_bits_to_half(result);
+        }
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
+        let word = model.binary(op::BITWISE_OR, halves[0], high);
+        model.write_vector_lane(u32::from(*destination), lane, word);
+    }
+    model.count();
+    Ok(())
+}
+
+/// The long-form sixteen-bit float arithmetic (AMD's published RDNA instruction set, `VOP3`):
+/// `v_fma_f16`, `v_min3_f16`, `v_max3_f16` and `v_med3_f16`. Each source is the half `op_sel`
+/// (bits 13:11) picks, its absolute value where `abs` (bits 10:8) says and negated where `neg` (the
+/// second word's 31:29) does; the result, computed in single precision and rounded to a half, goes
+/// to the destination's half `op_sel` bit 14 picks, the other kept. Clamp (bit 15) is refused.
+fn long_half_float<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), sources @ ..] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit float instruction without a vector destination",
+        });
+    };
+    if instruction.word & 1 << 15 != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit float instruction's clamp, which is not translated",
+        });
+    }
+    let second = instruction.second_word.unwrap_or(0);
+    let select = [11, 12, 13].map(|bit| instruction.word >> bit & 1 != 0);
+    let absolute = [8, 9, 10].map(|bit| instruction.word >> bit & 1 != 0);
+    let negated = [29, 30, 31].map(|bit| second >> bit & 1 != 0);
+    let high_destination = instruction.word >> 14 & 1 != 0;
+    let (sign, magnitude) = (model.constant(0x8000), model.constant(0x7FFF));
+    for lane in running_lanes(model) {
+        let mut operands = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let mut bits = read_half_float(model, instruction, source, lane, select[index])?;
+            if absolute[index] {
+                bits = model.binary(op::BITWISE_AND, bits, magnitude);
+            }
+            if negated[index] {
+                bits = model.binary(op::BITWISE_XOR, bits, sign);
+            }
+            operands.push(model.half_to_float_bits(bits));
+        }
+        let result = half_float_operation(model, name, &operands);
+        let half = model.float_bits_to_half(result);
+        write_half(
+            model,
+            instruction,
+            (u32::from(*destination), lane),
+            half,
+            high_destination,
+        )?;
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_rcp_f16_e32 d, a`: one over `a`'s low half, computed in single precision and rounded to a half
+/// into the destination's low half, the high kept (AMD's published RDNA instruction set; a
+/// sixteen-bit result keeps the rest of its register on GFX10, `aco_ir.cpp:956`).
+fn half_float_reciprocal<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), source] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_rcp_f16 does not name a vector register and a source",
+        });
+    };
+    let one = model.constant(1.0f32.to_bits());
+    for lane in running_lanes(model) {
+        let bits = read_half_float(model, instruction, source, lane, false)?;
+        let value = model.half_to_float_bits(bits);
+        let reciprocal = model.f32_binary(op::FDIV, one, value);
+        let half = model.float_bits_to_half(reciprocal);
+        write_half(
+            model,
+            instruction,
+            (u32::from(*destination), lane),
+            half,
+            false,
+        )?;
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_lshrrev_b16 d, a, b` - `b`'s half shifted right by `a`'s low four bits - and
+/// `v_sub_nc_i16 d, a, b` - `a`'s half less `b`'s, wrapping - (AMD's published RDNA instruction
+/// set): each source the half `op_sel` (bits 12:11) picks, the result into the destination's half
+/// bit 14 picks, the other kept. Clamp (bit 15) is refused.
+fn long_sixteen_bit<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), first, second] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit integer instruction without a vector destination and two sources",
+        });
+    };
+    if instruction.word & 1 << 15 != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit integer instruction's clamp, which is not translated",
+        });
+    }
+    let select = [11, 12].map(|bit| instruction.word >> bit & 1 != 0);
+    let high_destination = instruction.word >> 14 & 1 != 0;
+    let (low, fifteen) = (model.constant(0xFFFF), model.constant(0xF));
+    for lane in running_lanes(model) {
+        let a = read_half(model, instruction, first, lane, select[0])?;
+        let b = read_half(model, instruction, second, lane, select[1])?;
+        let result = if name == "v_lshrrev_b16" {
+            let amount = model.binary(op::BITWISE_AND, a, fifteen);
+            model.binary(op::SHIFT_RIGHT_LOGICAL, b, amount)
+        } else {
+            let difference = model.binary(op::ISUB, a, b);
+            model.binary(op::BITWISE_AND, difference, low)
+        };
+        write_half(
+            model,
+            instruction,
+            (u32::from(*destination), lane),
+            result,
+            high_destination,
+        )?;
+    }
+    model.count();
+    Ok(())
+}
+
 /// `v_writelane_b32 v, s, lane`: `s` into `v` at the lane the second source names, its low six bits
 /// in a wave of sixty-four and five in one of thirty-two, every other lane kept (AMD's published RDNA
 /// instruction set). The hardware writes that lane whether it runs or not; here the write goes
@@ -12161,8 +12739,9 @@ fn lane_texel<M: Model + ?Sized>(
 }
 
 /// The component a gather returns of four texels - the one its mask's one bit names - where `name`
-/// is one; all four registers are written (D913). Of a flat image only: more than one mask bit, other
-/// shapes, offsets, sixteen-bit data or a destination past the register file are refused.
+/// is one; all four registers are written (D913), or with sixteen-bit data two, the four halves packed
+/// two a register as a sample's are (Grand Theft Auto V's prologue gathers so). Of a flat image only:
+/// more than one mask bit, other shapes, offsets or a destination past the register file are refused.
 fn gather_component(
     name: &str,
     (mask, shape): (u32, ImageShape),
@@ -12171,15 +12750,15 @@ fn gather_component(
     if !name.starts_with("image_gather4") {
         return Ok(None);
     }
+    let registers = data_registers(IMAGE_COMPONENTS, d16);
     if mask.count_ones() != 1
         || shape.dimension != Dimension::Flat
         || offset
-        || d16
-        || destination + IMAGE_COMPONENTS > VECTOR_REGISTERS
+        || destination + registers > VECTOR_REGISTERS
     {
         return Err(concat!(
-            "a gather of more than one component, of other than a flat image, with offsets or ",
-            "sixteen-bit data, or past the register file is not translated"
+            "a gather of more than one component, of other than a flat image, with offsets, or ",
+            "past the register file is not translated"
         ));
     }
     Ok(Some(mask.trailing_zeros()))

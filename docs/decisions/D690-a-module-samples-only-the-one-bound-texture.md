@@ -25,3 +25,6 @@ every Vulkan device (the required minimum of `maxPerStageDescriptorSampledImages
 `maxPerStageDescriptorSamplers`); the desktop devices orbistoun runs on allow far more. One image
 read through two samplers takes two slots, each with its own sampler. A thirty-third is refused, as
 is a second or later texture when any descriptor came from neither the table nor the user data.
+A primitive shader's images take the last eight slots, 24 to 31, so they never share one with the
+pixel shader drawn beside it: Grand Theft Auto V's vertex programs fetch and sample at a named
+level there. Only a pixel shader samples at the level derivatives choose.

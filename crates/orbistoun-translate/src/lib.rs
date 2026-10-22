@@ -630,6 +630,41 @@ pub fn translate_windowed_primitive(
     )
 }
 
+/// The first instruction whose SDWA or DPP modifier word is not translated, refused by name with
+/// its modifier and that word, so the form to translate next is plain.
+fn refused_modifier(decode: &Decode, encodings: &EncodingTable) -> Option<TranslateError> {
+    for instruction in &decode.instructions {
+        if let Some(marker) = modifier_of(instruction, encodings)
+            && !model::sdwa_translated(marker, instruction, encodings)
+            && !model::dpp_translated(marker, instruction, encodings)
+        {
+            let family = instruction
+                .encoding
+                .and_then(|e| encodings.encodings().get(usize::from(e)))
+                .map_or("", |e| e.name.as_str());
+            let name = encodings
+                .mnemonic_for(family, instruction.opcode)
+                .unwrap_or("an unnamed instruction");
+            return Some(TranslateError::NotTranslated {
+                offset: instruction.offset,
+                mnemonic: format!(
+                    "{name} with {} word {:#010x}",
+                    // Operand code 0xf9 selects SDWA; 0xfa, 0xe9 and 0xea the DPP forms.
+                    if marker == 0xF9 { "SDWA" } else { "DPP" },
+                    instruction.second_word.unwrap_or(0)
+                ),
+                detail: concat!(
+                    "the instruction carries an SDWA or DPP modifier word, which selects parts ",
+                    "of its operands or other lanes' values; only SDWA on the integer ",
+                    "instructions `model::SDWA_INTEGER` names, and a quad permute of a one- or ",
+                    "two-source vector instruction's first source, are translated"
+                ),
+            });
+        }
+    }
+    None
+}
+
 /// The modifier marker an instruction's first source selects - SDWA or DPP - when it has one.
 fn modifier_of(
     instruction: &orbistoun_shader::Instruction,
@@ -775,21 +810,8 @@ pub fn translate_with_user_data(
     if let Some(refusal) = unlaid_instructions(decode, encodings) {
         return Err(refusal);
     }
-    for instruction in &decode.instructions {
-        if let Some(marker) = modifier_of(instruction, encodings)
-            && !model::sdwa_translated(marker, instruction, encodings)
-            && !model::dpp_translated(marker, instruction, encodings)
-        {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: concat!(
-                    "the instruction carries an SDWA or DPP modifier word, which selects parts ",
-                    "of its operands or other lanes' values; only SDWA on the integer ",
-                    "instructions `model::SDWA_INTEGER` names, and a quad permute of a one- or ",
-                    "two-source vector instruction's first source, are translated"
-                ),
-            });
-        }
+    if let Some(refusal) = refused_modifier(decode, encodings) {
+        return Err(refusal);
     }
 
     match fidelity {
@@ -1263,6 +1285,96 @@ mod tests {
         );
     }
 
+    /// A primitive shader fetches its images at the last slots, which a pixel shader's leave free,
+    /// and a sample through a sampler there is still refused: Grand Theft Auto V's primitive shader
+    /// at `0x74005ab83600` does `image_load v6, v10, s[8:15]` (words 0xf0000108 0x0002060a).
+    #[test]
+    fn a_primitive_shader_fetches_at_its_own_slots() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        // v_mov_b32 v10, 0; v_mov_b32 v7, 0; v_mov_b32 v11, 0; image_load v6, v10, s[8:15]
+        // dmask:0x1; image_load v9, [v7, v11], s[8:15] dmask:0x1 - its third word the address
+        // registers after the first - then s_endpgm. Both read the user data the stage was seeded
+        // with at `s8`, its first word: one texture, which an unresolved first fetch made two.
+        let words = [
+            0x7E14_0280,
+            0x7E0E_0280,
+            0x7E16_0280,
+            0xF000_0108,
+            0x0002_060A,
+            0xF000_010A,
+            0x0002_0907,
+            0x0000_000B,
+            0xBF81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Mesh, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                first_register: 8,
+                count: 16,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let first = orbistoun_spirv::PRIMITIVE_FIRST_TEXTURE as u32;
+        assert_eq!(
+            translated
+                .textures
+                .iter()
+                .map(|texture| (texture.slot, texture.user_data))
+                .collect::<Vec<_>>(),
+            [(first, Some(0))]
+        );
+    }
+
+    /// A primitive shader samples through a sampler at a named level, as Grand Theft Auto V's do
+    /// with `image_sample_lz v0, v2, s[8:15], s[16:19]` (words 0xf09c0308 0x00820002), at its own
+    /// slots; one sampling at the level derivatives choose is refused, having none (D904).
+    #[test]
+    fn a_primitive_shader_samples_at_a_named_level() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let mesh = |sample: [u32; 2]| {
+            // v_mov_b32 v2, 0; v_mov_b32 v3, 0; the sample; s_endpgm.
+            let words = [0x7E04_0280, 0x7E06_0280, sample[0], sample[1], 0xBF81_0000];
+            let decoded = decode(&stream(&words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Mesh, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    first_register: 8,
+                    count: 16,
+                    ..UserData::default()
+                },
+            )
+        };
+        let level_zero = mesh([0xF09C_0308, 0x0082_0002]).expect("a level-zero sample translates");
+        assert_eq!(
+            level_zero.textures.first().map(|texture| texture.slot),
+            Some(orbistoun_spirv::PRIMITIVE_FIRST_TEXTURE as u32)
+        );
+        // The same sample at the level derivatives choose: `image_sample` (MIMG opcode 32).
+        let implicit = (0xF09C_0308 & !(0x7F << 18)) | 32 << 18;
+        assert!(
+            mesh([implicit, 0x0082_0002]).is_err(),
+            "no derivatives to choose a level from"
+        );
+    }
+
     /// A desynchronised decode is refused.
     #[test]
     fn an_untrustworthy_decode_is_refused() {
@@ -1580,7 +1692,7 @@ mod tests {
         }
         let refused = fragment(33).expect_err("refused").to_string();
         assert!(
-            refused.contains("more than thirty-two textures"),
+            refused.contains("more textures than its stage has bindings"),
             "{refused}"
         );
     }

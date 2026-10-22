@@ -9650,3 +9650,132 @@ fn a_waterfall_loop_visits_each_value_once_and_ends() {
         &memory[..16]
     );
 }
+
+/// The sixteen-bit float and integer forms Grand Theft Auto V's prologue compute programs use
+/// compute as published (AMD's RDNA instruction set): a packed add takes each half's own pair,
+/// `op_sel_hi` choosing the high halves; a packed multiply-add negates the low half of its first
+/// source where `neg_lo` says; a median over an inline `1.0` - a half here - keeps the destination's
+/// high half; a sixteen-bit subtract writes the half `op_sel` bit 14 names. Halves: `v0` holds 2.0
+/// low and 1.0 high, `v1` 0.5 low and 4.0 high.
+#[test]
+fn the_sixteen_bit_float_forms_compute_as_published() {
+    if !device_or_skip("the_sixteen_bit_float_forms_compute_as_published") {
+        return;
+    }
+    let long = |name: &str, dst: u32, low_bits: u32, sources: [u32; 3], high_bits: u32| {
+        [
+            head(name) | dst | low_bits,
+            sources[0] | sources[1] << 9 | sources[2] << 18 | high_bits,
+        ]
+    };
+    let (v0, v1) = (vgpr_code(0), vgpr_code(1));
+    let mut program: Vec<u32> = Vec::new();
+    program.extend(v_mov_literal(0, 0x3C00_4000));
+    program.extend(v_mov_literal(1, 0x4400_3800));
+    program.extend(v_mov_literal(4, 0xABCD_0000));
+    program.extend(v_mov_literal(5, 0x0000_1234));
+    // v_pk_add_f16 v2, v0, v1 op_sel_hi:[1,1]: 2.0 + 0.5 low, 1.0 + 4.0 high.
+    program.extend(long("v_pk_add_f16", 2, 0, [v0, v1, 0], 0b11 << 27));
+    // v_pk_fma_f16 v3, v0, v1, v0 op_sel_hi:[1,1,1] neg_lo:[1,0,0]: -2.0 * 0.5 + 2.0 low,
+    // 1.0 * 4.0 + 1.0 high.
+    program.extend(long(
+        "v_pk_fma_f16",
+        3,
+        1 << 14,
+        [v0, v1, v0],
+        0b11 << 27 | 1 << 29,
+    ));
+    // v_med3_f16 v4, v0, v1, 1.0: the median of 2.0, 0.5 and 1.0, into the low half.
+    program.extend(long("v_med3_f16", 4, 0, [v0, v1, 242], 0));
+    // v_sub_nc_i16 v5, v0, v1 op_sel:[0,0,1]: 0x4000 - 0x3800 into the high half.
+    program.extend(long("v_sub_nc_i16", 5, 1 << 14, [v0, v1, 0], 0));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 2), 0x4500_4100, "2.5 low, 5.0 high");
+    assert_eq!(vector(&registers, 3), 0x4500_3C00, "1.0 low, 5.0 high");
+    assert_eq!(
+        vector(&registers, 4),
+        0xABCD_3C00,
+        "1.0 low, the high half kept"
+    );
+    assert_eq!(
+        vector(&registers, 5),
+        0x0800_1234,
+        "the difference high, the low half kept"
+    );
+}
+
+/// A sixteen-bit float SDWA form reads and writes the halves its word names, as Grand Theft Auto
+/// V's prologue does with `v_mul_f16_sdwa ... dst_sel:WORD_1 dst_unused:UNUSED_PRESERVE
+/// src0_sel:WORD_1` (word 0x0605151d): the high halves multiplied into the high half, the low half
+/// kept. A plain `v_rcp_f16` writes one over its source's low half into the low half, the high kept.
+#[test]
+fn sixteen_bit_float_sdwa_and_reciprocal_compute_as_published() {
+    const SDWA_MARKER: u32 = 0xF9;
+    if !device_or_skip("sixteen_bit_float_sdwa_and_reciprocal_compute_as_published") {
+        return;
+    }
+    let mut program: Vec<u32> = Vec::new();
+    program.extend(v_mov_literal(0, 0x4000_3C00));
+    program.extend(v_mov_literal(1, 0x0000_4400));
+    program.extend(v_mov_literal(2, 0x0000_1234));
+    program.extend(v_mov_literal(3, 0xABCD_0000));
+    // v_mul_f16_sdwa v2, v0, v1 dst_sel:WORD_1 dst_unused:PRESERVE src0_sel:WORD_1 src1_sel:DWORD:
+    // 2.0 (v0's high half) times 4.0 (v1's low half).
+    program.extend([
+        head("v_mul_f16_e32") | 2 << 17 | 1 << 9 | SDWA_MARKER,
+        5 << 8 | 2 << 11 | 5 << 16 | 6 << 24,
+    ]);
+    // v_rcp_f16_e32 v3, v1: one over 4.0.
+    program.push(head("v_rcp_f16_e32") | 3 << 17 | vgpr_code(1));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        vector(&registers, 2),
+        0x4800_1234,
+        "8.0 high, the low half kept"
+    );
+    assert_eq!(
+        vector(&registers, 3),
+        0xABCD_3400,
+        "0.25 low, the high half kept"
+    );
+}
+
+/// A packed multiply-add reads an inline float as the same half in both halves, as Grand Theft Auto
+/// V's prologue does with `v_pk_fma_f16 v17, 4.0, v9, 4.0`; a sixteen-bit float compare in its SDWA
+/// form compares the halves its word names, as it does with `v_cmp_lt_f16_sdwa` (word 0x8506000a).
+/// `v1` holds 0.5 low and 4.0 high, `v0` 2.0 low.
+#[test]
+fn packed_inline_halves_and_half_compares_compute_as_published() {
+    const SDWA_MARKER: u32 = 0xF9;
+    if !device_or_skip("packed_inline_halves_and_half_compares_compute_as_published") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let mut program: Vec<u32> = Vec::new();
+    program.extend(v_mov_literal(0, 0x0000_4000));
+    program.extend(v_mov_literal(1, 0x4400_3800));
+    // v_pk_fma_f16 v6, 4.0, v1, 4.0 op_sel_hi:[1,1,1]: 4.0 * 0.5 + 4.0 low, 4.0 * 4.0 + 4.0 high.
+    program.extend([
+        head("v_pk_fma_f16") | 6 | 1 << 14,
+        F_4 | vgpr_code(1) << 9 | F_4 << 18 | 0b11 << 27,
+    ]);
+    // v_cmp_lt_f16_sdwa vcc, v0, v1 src0_sel:DWORD src1_sel:WORD_1: 2.0 < 4.0, into s4.
+    program.extend([
+        head("v_cmp_lt_f16_e32") | 1 << 9 | SDWA_MARKER,
+        6 << 16 | 5 << 24,
+    ]);
+    program.push(sop1("s_mov_b32", 4, 106));
+    // And the other way round: 4.0 < 2.0, into s5.
+    program.extend([
+        head("v_cmp_lt_f16_e32") | SDWA_MARKER,
+        1 | 5 << 16 | 6 << 24,
+    ]);
+    program.push(sop1("s_mov_b32", 5, 106));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 6), 0x4D00_4600, "6.0 low, 20.0 high");
+    assert_eq!(scalar(&registers, 4) & 1, 1, "2.0 < 4.0");
+    assert_eq!(scalar(&registers, 5) & 1, 0, "4.0 < 2.0 does not hold");
+}

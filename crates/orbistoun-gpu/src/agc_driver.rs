@@ -394,6 +394,42 @@ fn writable_more_target(
     .then_some((target, format.swap))
 }
 
+/// The first of [`writable_more_target`]'s checks a further attachment fails: what its refusal says.
+fn more_target_refusal(
+    more: &crate::pipeline::MoreColourTarget,
+    first: ColourTarget,
+) -> &'static str {
+    let (Some(target), Some(format)) = (more.target, more.format) else {
+        return "it is not placed, or its format was never written";
+    };
+    let Some(bytes_per_texel) = format.written_back_bytes() else {
+        return "its format is not one a frame is written back into";
+    };
+    if more.dcc.is_some_and(|dcc| {
+        crate::dcc::unsupported(more.tiling, dcc.two_dimensional, dcc.single_sample).is_some()
+    }) {
+        return "its compression is not modelled";
+    }
+    if (target.width, target.height) != (first.width, first.height) {
+        return "its extent is not the first attachment's, and one extent is drawn";
+    }
+    if target.base == first.base {
+        return "it shares the first attachment's base";
+    }
+    if more
+        .tiling
+        .and_then(tiling::SurfaceLayout::of)
+        .and_then(|layout| layout.at_bytes_per_texel(bytes_per_texel))
+        != Some(target.layout)
+    {
+        return "its tiling at its texel size is not its placed layout";
+    }
+    if !target.layout.models(target.pipe_bank_xor) {
+        return "its pipe-bank XOR is not modelled in its layout";
+    }
+    "it is written back"
+}
+
 /// The one colour target a submission's draws can be carried out into and written back to exactly:
 /// a single base, a single resident target of the same extent, a modelled layout for its tiling at
 /// its element's size, and either an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names
@@ -737,6 +773,53 @@ impl GuestCp<'_> {
         segment: &cp::DrawSegment<'_>,
         whole: &Submission,
     ) -> Result<Vec<(u32, u32)>, String> {
+        // Each draw's target is the stream's, the same for every segment of it: found once a
+        // stream, since walking it and its registers again for each of a frame's thousands of
+        // segments costs the square of its length.
+        let key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            segment.stream.hash(&mut hasher);
+            std::ptr::from_ref(whole).hash(&mut hasher);
+            hasher.finish()
+        };
+        let cached = STREAM_TARGETS.with(|held| {
+            held.borrow()
+                .as_ref()
+                .filter(|(at, _)| *at == key)
+                .map(|(_, targets)| targets.clone())
+        });
+        let targets = if let Some(targets) = cached {
+            targets
+        } else {
+            let targets: Arc<[(u32, u32, Option<u32>)]> =
+                crate::perf::span(crate::perf::Span::TargetRuns, || {
+                    self.stream_targets(segment, whole)
+                })?
+                .into();
+            STREAM_TARGETS.with(|held| *held.borrow_mut() = Some((key, targets.clone())));
+            targets
+        };
+        let within: Vec<(u32, u32, Option<u32>)> = targets
+            .iter()
+            .copied()
+            .filter(|&(start, _, _)| (segment.first..segment.end).contains(&start))
+            .collect();
+        let runs = crate::registers::runs_of(&within);
+        Ok(if runs.is_empty() {
+            vec![(segment.first, segment.end)]
+        } else {
+            runs
+        })
+    }
+
+    /// Every draw of `segment`'s stream with the colour target base in force at it, from the
+    /// registers in force as the stream was submitted ([`crate::registers::draw_targets`]).
+    fn stream_targets(
+        &self,
+        segment: &cp::DrawSegment<'_>,
+        whole: &Submission,
+    ) -> Result<Vec<(u32, u32, Option<u32>)>, String> {
         let walked = crate::packet::walk(segment.stream);
         let writes = {
             let live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
@@ -759,16 +842,10 @@ impl GuestCp<'_> {
             .iter()
             .filter(|packet| {
                 matches!(packet.kind, crate::packet::PacketKind::Command { opcode } if cp::is_draw(opcode))
-                    && (segment.first..segment.end).contains(&packet.offset)
             })
             .map(|packet| (packet.offset, packet.offset + packet.length))
             .collect();
-        let runs = crate::registers::colour_target_runs(&writes, &draws);
-        Ok(if runs.is_empty() {
-            vec![(segment.first, segment.end)]
-        } else {
-            runs
-        })
+        Ok(crate::registers::draw_targets(&writes, &draws))
     }
 
     /// Prepares one run of a segment's draws from [`segment_stream`] and draws it into its target.
@@ -777,7 +854,7 @@ impl GuestCp<'_> {
         segment: &cp::DrawSegment<'_>,
         whole: &Submission,
     ) -> Result<(), String> {
-        let bytes = segment_stream(segment);
+        let bytes = crate::perf::span(crate::perf::Span::SegmentStream, || segment_stream(segment));
         let prepared = {
             let mut live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
                 live_pipeline()
@@ -789,13 +866,17 @@ impl GuestCp<'_> {
             // written to them.
             // And over the register state the whole was prepared over, not what has been carried
             // since (D821).
-            let prepared = pipeline.submit_over(
-                whole.carried_in.clone(),
-                &bytes,
-                Queue::Draw,
-                &[],
-                &whole.tables.over(&SettledReads(&self.memory)),
-            );
+            let prepared = crate::perf::span(crate::perf::Span::SegmentPrepare, || {
+                crate::perf::measure(crate::perf::Phase::Prepare, || {
+                    pipeline.submit_over(
+                        whole.carried_in.clone(),
+                        &bytes,
+                        Queue::Draw,
+                        &[],
+                        &whole.tables.over(&SettledReads(&self.memory)),
+                    )
+                })
+            });
             keep_new_translations(pipeline);
             note_made(&prepared);
             prepared
@@ -1030,9 +1111,13 @@ impl GuestCp<'_> {
             );
         }
         if let Some(dcc) = submission.colour_target_dcc {
-            self.expand_dcc(dcc, target.layout)?;
+            crate::perf::span(crate::perf::Span::ExpandDcc, || {
+                self.expand_dcc(dcc, target.layout)
+            })?;
         }
-        let more = self.seed_more_targets(submission, target)?;
+        let more = crate::perf::span(crate::perf::Span::MoreTargets, || {
+            self.seed_more_targets(submission, target)
+        })?;
         // What the guest wrote into the pending frame's rows reaches the device before more is
         // drawn over it (D864); where it cannot, the frame goes back whole and is read afresh.
         let banded_here = open_band()
@@ -1125,10 +1210,11 @@ impl GuestCp<'_> {
                 format!(
                     concat!(
                         "its colour attachment {} (CB_COLOR{}) is not one a frame can be written ",
-                        "back to exactly: {:?}, {:?}, {:?}, {}"
+                        "back to exactly - {} - : {:?}, {:?}, {:?}, {}"
                     ),
                     more.len() + 1,
                     attachment.buffer,
+                    more_target_refusal(attachment, first),
                     attachment.target,
                     attachment.tiling,
                     attachment.format,
@@ -3140,7 +3226,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         (hooks.release)(copy.pages.0, copy.pages.1, copy.pages.2);
     }
     carry_out_all(&touched, hooks);
-    if carried && guard.is_some() && (hooks.guard)(pages.0, pages.1).is_none() {
+    if carried && guard.is_some() && guard_pages(hooks, pages.0, pages.1).is_none() {
         return Err(CannotWait);
     }
     let Some(snapshot) = crate::perf::span(crate::perf::Span::KeepSnapshot, hooks.snapshot) else {
@@ -3151,7 +3237,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     };
     let Some(protection) = guard.or_else(|| {
         crate::perf::span(crate::perf::Span::CopyGuard, || {
-            (hooks.guard)(pages.0, pages.1)
+            guard_pages(hooks, pages.0, pages.1)
         })
     }) else {
         (hooks.discard)(snapshot);
@@ -3997,7 +4083,7 @@ fn defer_fill(address: u64, pattern: u32, length: u64) -> bool {
     if !carry_out_all(&touched, hooks) {
         return false;
     }
-    let Some(protection) = (hooks.guard)(address, length) else {
+    let Some(protection) = guard_pages(hooks, address, length) else {
         return false;
     };
     list.push(Deferred {
@@ -4149,6 +4235,28 @@ pub fn guards_guest_memory() -> bool {
     deferred()
         .try_lock()
         .map_or(true, |copies| !copies.is_empty())
+}
+
+/// The page spans whose words are being edited in place now ([`GuestCp::edit_words`]): no deferred
+/// copy guards them meanwhile.
+fn editing() -> &'static Mutex<Vec<(u64, u64)>> {
+    static EDITING: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+    &EDITING
+}
+
+/// Guards `[base, base + length)` through `hooks`, the protection to restore - or `None`, guarding
+/// nothing, where words there are being edited in place: the edit's writes would fault on the
+/// guard.
+fn guard_pages(hooks: &LazyCopies, base: u64, length: u64) -> Option<u32> {
+    let busy = editing().lock().is_ok_and(|editing| {
+        editing
+            .iter()
+            .any(|&held| ranges_overlap(held, (base, length)))
+    });
+    if busy {
+        return None;
+    }
+    (hooks.guard)(base, length)
 }
 
 fn deferred() -> &'static Mutex<Vec<Deferred>> {
@@ -4496,7 +4604,7 @@ impl GuestCp<'_> {
         carry_out_all(&touched, hooks);
         // Carrying another copy out restored protection on the pages it shared with this one; a
         // guard kept from the superseded copy is put back, keeping the protection it saved.
-        if carried && guard.is_some() && (hooks.guard)(pages.0, pages.1).is_none() {
+        if carried && guard.is_some() && guard_pages(hooks, pages.0, pages.1).is_none() {
             if let Some(old) = superseded_snapshot {
                 (hooks.discard)(old);
             }
@@ -4514,7 +4622,7 @@ impl GuestCp<'_> {
         };
         let Some(protection) = guard.or_else(|| {
             crate::perf::span(crate::perf::Span::CopyGuard, || {
-                (hooks.guard)(pages.0, pages.1)
+                guard_pages(hooks, pages.0, pages.1)
             })
         }) else {
             (hooks.discard)(snapshot);
@@ -4756,7 +4864,14 @@ const RUN_GAP: u64 = 4096;
 /// The longest stretch written back as one.
 const RUN_STRETCH: u64 = 16 << 20;
 
+/// A stream's draws with the colour target base each draws into, under a key naming the stream and
+/// the submission it is carried out for.
+type StreamTargets = Option<(u64, Arc<[(u32, u32, Option<u32>)]>)>;
+
 thread_local! {
+    /// The last stream's draws with their colour targets ([`GuestCp::target_runs`]).
+    static STREAM_TARGETS: std::cell::RefCell<StreamTargets> =
+        const { std::cell::RefCell::new(None) };
     /// The releases the command processor reported during the walk in progress on this thread,
     /// handed to the display once the walk returns (D728).
     static RELEASED: std::cell::RefCell<Vec<(u64, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -4778,9 +4893,10 @@ impl cp::CpMemory for GuestCp<'_> {
 
     fn run_draws(&mut self, segment: &cp::DrawSegment<'_>) -> bool {
         crate::perf::span(crate::perf::Span::RunDraws, || {
-            let ran = self
-                .streamout_segment(segment)
-                .unwrap_or_else(|| self.draw_segment(segment));
+            let ran = crate::perf::span(crate::perf::Span::StreamoutSegment, || {
+                self.streamout_segment(segment)
+            })
+            .unwrap_or_else(|| self.draw_segment(segment));
             match ran {
                 Ok(()) => true,
                 Err(why) => {
@@ -4913,18 +5029,26 @@ impl cp::CpMemory for GuestCp<'_> {
             return false;
         }
         unprotect_overlapping(address, length);
-        // The deferred copies held while the words are edited: one deferred onto these pages meanwhile
-        // - by an asynchronous compute queue carried out on another thread - would guard them with
-        // no access under the write. One already there is refused rather than written through.
-        let Ok(list) = deferred().lock() else {
-            return false;
-        };
+        // A copy already deferred onto these pages is refused rather than written through; one
+        // deferred meanwhile - by an asynchronous compute queue carried out on another thread -
+        // would guard them with no access under the write, so the pages are marked as being edited
+        // until the edit is done, and no guard is put on them. The deferred list itself is not
+        // held: the edit's writes may fault on pages guarded another way, and the fault's handler
+        // takes it (a write-back drawn on helper threads deadlocked so).
         let pages = page_span(address, length);
-        if list
-            .iter()
-            .any(|copy| ranges_overlap((copy.pages.0, copy.pages.1), pages))
         {
-            return false;
+            let Ok(list) = deferred().lock() else {
+                return false;
+            };
+            if list
+                .iter()
+                .any(|copy| ranges_overlap((copy.pages.0, copy.pages.1), pages))
+            {
+                return false;
+            }
+            if let Ok(mut editing) = editing().lock() {
+                editing.push(pages);
+            }
         }
         // SAFETY: a protected target's pages here were given their protection back above, no
         // deferred copy guards them while `list` is held, and the installed lookup vouched that
@@ -4936,7 +5060,11 @@ impl cp::CpMemory for GuestCp<'_> {
             std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u32>(at), count)
         };
         edit(words);
-        drop(list);
+        if let Ok(mut editing) = editing().lock()
+            && let Some(at) = editing.iter().position(|&held| held == pages)
+        {
+            editing.swap_remove(at);
+        }
         true
     }
 
@@ -6688,6 +6816,37 @@ fn first_unwritable(
 
 #[cfg(test)]
 mod tests {
+    /// No deferred copy guards pages whose words are being edited in place: the edit's writes would
+    /// fault on the guard, and the edit no longer holds the deferred list against that - its
+    /// faults' handler takes the list, which deadlocked Grand Theft Auto V's write-back drawn on
+    /// helper threads.
+    #[test]
+    fn pages_being_edited_are_not_guarded() {
+        let hooks = super::LazyCopies {
+            snapshot: || None,
+            show: || None,
+            take: |_, _| None,
+            discard: |_| {},
+            replace: |_| None,
+            guard: |_, _| Some(7),
+            protect_writes: |_, _| None,
+            release: |_, _, _| true,
+        };
+        let pages = (0x7_1234_0000, 0x2000);
+        super::editing().lock().expect("editing").push(pages);
+        assert_eq!(super::guard_pages(&hooks, 0x7_1234_1000, 0x1000), None);
+        assert_eq!(
+            super::guard_pages(&hooks, 0x7_1235_0000, 0x1000),
+            Some(7),
+            "apart"
+        );
+        super::editing()
+            .lock()
+            .expect("editing")
+            .retain(|&held| held != pages);
+        assert_eq!(super::guard_pages(&hooks, 0x7_1234_1000, 0x1000), Some(7));
+    }
+
     /// A segment with a draw whose pixel shader could not be prepared is refused for that, not for
     /// the textures the shader bound before it then fails to find: Grand Theft Auto V's pixel shader
     /// reading more than sixteen textures left its draws to the previous module, and the refusal

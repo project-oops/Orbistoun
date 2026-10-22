@@ -433,6 +433,33 @@ pub(crate) fn readable(address: u64, len: usize) -> bool {
     address.saturating_add(len as u64) <= end
 }
 
+/// Whether the page holding `address` can be written now: committed, and its protection one that
+/// allows a write. A write that faulted there was made under a protection another thread has
+/// changed since.
+#[cfg(windows)]
+pub(crate) fn writable(address: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+        PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
+    };
+    if address == 0 {
+        return false;
+    }
+    // SAFETY: every field of this structure is a plain integer or pointer, so all-zero is a
+    // valid initialised value; `VirtualQuery` overwrites it before it is read.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let size = size_of::<MEMORY_BASIC_INFORMATION>();
+    // SAFETY: `info` is a live, correctly sized buffer this call owns. `VirtualQuery` only
+    // describes the mapping at `address` and does not dereference it.
+    let written = unsafe { VirtualQuery(address as *const core::ffi::c_void, &raw mut info, size) };
+    written != 0
+        && info.State == MEM_COMMIT
+        && info.Protect & PAGE_GUARD == 0
+        && info.Protect
+            & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
+            != 0
+}
+
 /// Away from Windows the fault reporter is not implemented, so nothing here is reached. Answering
 /// "not readable" keeps the byte windows empty.
 #[cfg(not(windows))]
@@ -1809,6 +1836,19 @@ mod imp {
             && orbistoun_gpu::agc_driver::with_guest_touch(touch, || {
                 orbistoun_gpu::agc_driver::carry_out_at(parameters[1] as u64)
             })
+        {
+            return CONTINUE_EXECUTION;
+        }
+        // An access the page allows now faulted under a protection another thread has since
+        // changed - a guard put on and taken off while helper threads wrote a target back: it runs
+        // again. A genuine fault never lands on a page that allows it.
+        if code == ACCESS_VIOLATION
+            && count >= 2
+            && match parameters[0] {
+                0 => super::readable(parameters[1] as u64, 1),
+                1 => super::writable(parameters[1] as u64),
+                _ => false,
+            }
         {
             return CONTINUE_EXECUTION;
         }

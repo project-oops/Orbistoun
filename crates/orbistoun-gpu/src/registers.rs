@@ -2771,6 +2771,17 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
 /// draws into more than one target is drawn a run at a time, each into its own target.
 #[must_use]
 pub fn colour_target_runs(writes: &[RegisterWrite], draws: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    runs_of(&draw_targets(writes, draws))
+}
+
+/// Each draw's span with the colour target zero base in force at it, in stream order: what
+/// [`colour_target_runs`] groups. It is the same for every segment of one stream, so it is found
+/// once a stream and each segment's runs grouped from its own draws ([`runs_of`]).
+#[must_use]
+pub fn draw_targets(
+    writes: &[RegisterWrite],
+    draws: &[(u32, u32)],
+) -> Vec<(u32, u32, Option<u32>)> {
     let mut bases_written: Vec<(u32, u32)> = writes
         .iter()
         .filter(|write| write.register == CB_COLOR0_BASE)
@@ -2779,15 +2790,27 @@ pub fn colour_target_runs(writes: &[RegisterWrite], draws: &[(u32, u32)]) -> Vec
     bases_written.sort_by_key(|&(offset, _)| offset);
     let mut draws = draws.to_vec();
     draws.sort_unstable();
-    let mut runs: Vec<(Option<u32>, u32, u32)> = Vec::new();
     let (mut next, mut in_force) = (0, None);
-    for (start, end) in draws {
-        while let Some(&(offset, value)) = bases_written.get(next)
-            && offset < start
-        {
-            in_force = Some(value);
-            next += 1;
-        }
+    draws
+        .into_iter()
+        .map(|(start, end)| {
+            while let Some(&(offset, value)) = bases_written.get(next)
+                && offset < start
+            {
+                in_force = Some(value);
+                next += 1;
+            }
+            (start, end, in_force)
+        })
+        .collect()
+}
+
+/// Consecutive draws of [`draw_targets`] grouped by their base: each run's span, from its first
+/// draw packet to the end of its last.
+#[must_use]
+pub fn runs_of(draws: &[(u32, u32, Option<u32>)]) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(Option<u32>, u32, u32)> = Vec::new();
+    for &(start, end, in_force) in draws {
         match runs.last_mut() {
             Some((base, _, run_end)) if *base == in_force => *run_end = end,
             _ => runs.push((in_force, start, end)),
@@ -5290,6 +5313,45 @@ mod tests {
             "one target, one run"
         );
         assert!(colour_target_runs(&writes, &[]).is_empty());
+    }
+
+    /// A segment's runs grouped from the stream's draw targets, found once, are the runs found
+    /// from the segment's own draws: each segment of a frame need not walk its whole stream again.
+    #[test]
+    fn a_segment_s_runs_are_grouped_from_its_stream_s_draw_targets() {
+        use super::{CB_COLOR0_BASE, RegisterWrite, colour_target_runs, draw_targets, runs_of};
+        let base = |packet_offset, value| RegisterWrite {
+            packet_offset,
+            register: CB_COLOR0_BASE,
+            value,
+        };
+        let writes = [base(0, 0x100), base(40, 0x200), base(80, 0x100)];
+        let draws = [
+            (16, 28),
+            (28, 40),
+            (48, 60),
+            (64, 76),
+            (88, 100),
+            (100, 112),
+        ];
+        let targets = draw_targets(&writes, &draws);
+        for (first, end) in [(0, 200), (28, 70), (50, 101), (90, 120), (0, 10)] {
+            let own: Vec<(u32, u32)> = draws
+                .iter()
+                .copied()
+                .filter(|&(start, _)| (first..end).contains(&start))
+                .collect();
+            let within: Vec<_> = targets
+                .iter()
+                .copied()
+                .filter(|&(start, _, _)| (first..end).contains(&start))
+                .collect();
+            assert_eq!(
+                runs_of(&within),
+                colour_target_runs(&writes, &own),
+                "segment {first}..{end}"
+            );
+        }
     }
 
     #[test]

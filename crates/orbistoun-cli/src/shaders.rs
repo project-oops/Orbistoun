@@ -96,16 +96,35 @@ fn write_shader_summary(corpus: &std::path::Path, summary: &orbistoun_shader::co
     }
 }
 
-/// Whether a shader translates at any stage, and every distinct refusal if not.
+/// The stage a binary's file name says ran it, as a run's dumps name their programs and a census
+/// of them keeps: `fragment-`, `vertex-` (a primitive shader) or `dispatch-` first. `None` for a
+/// name that says none.
+fn stage_named(name: &str) -> Option<orbistoun_translate::wavefront::Stage> {
+    use orbistoun_translate::wavefront::Stage;
+    [
+        ("fragment-", Stage::Fragment),
+        ("vertex-", Stage::Mesh),
+        ("dispatch-", Stage::Compute),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| name.starts_with(prefix))
+    .map(|(_, stage)| stage)
+}
+
+/// Whether a shader translates at the stage its name says ran it, or at any stage where it says
+/// none, and every distinct refusal if not.
 ///
-/// A binary does not say which stage ran it, and the stage matters: an export has nowhere to go in
-/// a compute dispatch, and a guest vertex program is a primitive shader refused as compute. So
-/// every stage is tried, at wavefront fidelity, which is correct unconditionally. Every distinct
+/// A bare binary does not say which stage ran it, and the stage matters: an export has nowhere to
+/// go in a compute dispatch, and a guest vertex program is a primitive shader refused as compute.
+/// So every stage is tried, at wavefront fidelity, which is correct unconditionally. Every distinct
 /// refusal is returned, because the last stage's reason says nothing about why the stage that could
-/// have run the shader refused it; identical refusals collapse to one line.
+/// have run the shader refused it; identical refusals collapse to one line. One whose stage is
+/// known is tried at that stage alone: a pixel shader that would pass as a compute program is
+/// refused all the same where it ran.
 fn translates(
     decoded: &orbistoun_shader::Decode,
     encodings: &orbistoun_shader::EncodingTable,
+    named: Option<orbistoun_translate::wavefront::Stage>,
 ) -> Result<(), Vec<String>> {
     use orbistoun_translate::Width;
     use orbistoun_translate::wavefront::{Stage, Window, translate_for};
@@ -114,9 +133,39 @@ fn translates(
     // affects only what the translated module reads, not whether translation succeeds.
     let window = Window::default();
     let mut refused: Vec<String> = Vec::new();
-    for stage in [Stage::Compute, Stage::Fragment, Stage::Mesh] {
-        match translate_for(decoded, encodings, Width::Wave64, stage, window) {
-            Ok(_) => return Ok(()),
+    let stages = named.map_or_else(
+        || vec![Stage::Compute, Stage::Fragment, Stage::Mesh],
+        |stage| vec![stage],
+    );
+    for stage in stages {
+        // A stage the name gives is translated as a draw or dispatch would translate it: with its
+        // user data where the stage's lands - `s8` for a primitive shader - every word of it, and
+        // `DX10_CLAMP` set, as every one of Grand Theft Auto V's draws sets it. What only a run
+        // knows - the draw's geometry, the program's load address - stays unknown.
+        let translated = if named.is_some() {
+            let user_data = orbistoun_translate::wavefront::UserData {
+                first_register: if stage == Stage::Mesh { 8 } else { 0 },
+                count: if stage == Stage::Mesh { 24 } else { 32 },
+                dx10_clamp: Some(true),
+                ..orbistoun_translate::wavefront::UserData::default()
+            };
+            orbistoun_translate::wavefront::translate_with_user_data(
+                decoded,
+                encodings,
+                Width::Wave64,
+                (
+                    stage,
+                    orbistoun_translate::wavefront::MeshPrimitive::default(),
+                ),
+                window,
+                user_data,
+            )
+            .map(|_| ())
+        } else {
+            translate_for(decoded, encodings, Width::Wave64, stage, window).map(|_| ())
+        };
+        match translated {
+            Ok(()) => return Ok(()),
             Err(e) => {
                 let said = e.to_string();
                 if !refused.iter().any(|seen| seen.ends_with(&said)) {
@@ -242,7 +291,7 @@ pub(crate) fn cmd_shaders(path: &std::path::Path, top: Option<usize>, sources: b
         if sources {
             print_texture_sources(name, &decoded, &encodings);
         }
-        let verdict = translates(&decoded, &encodings);
+        let verdict = translates(&decoded, &encodings, stage_named(name));
         if let Err(reasons) = &verdict {
             refusals.push((name.to_owned(), reasons.clone()));
         }

@@ -1946,6 +1946,11 @@ pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = {
 /// `maxPerStageDescriptorSamplers`); the desktop devices this runs on allow far more.
 pub const MAX_TEXTURES: usize = 32;
 
+/// The first slot a primitive shader's fetched images take: the last eight, which a pixel shader's
+/// own - at most twenty-four beside them - leave free, so the two modules a draw binds never share
+/// one (D690).
+pub const PRIMITIVE_FIRST_TEXTURE: usize = 24;
+
 /// Which binding a compute module reaches the global data share at: six, after the draw data
 /// (D789). Declared only by a module that accesses it.
 pub const GDS_BINDING: u32 = 6;
