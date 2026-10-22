@@ -730,6 +730,26 @@ fn refused_submission() -> &'static Mutex<Option<Submission>> {
 /// as needing the GPU and keeps no reason, and every submission after it waits behind it, so a
 /// run whose later frames are all empty is explained by this one line.
 fn keeping_refused(submission: &Submission, drawn: Result<(), String>) -> Result<(), String> {
+    // Named with the targets it would have drawn into, so what a passed-over refusal leaves
+    // unwritten is found by address.
+    let drawn = drawn.map_err(|why| {
+        let targets: Vec<String> = submission
+            .colour_target
+            .iter()
+            .chain(
+                submission
+                    .more_colour_targets
+                    .iter()
+                    .filter_map(|more| more.target.as_ref()),
+            )
+            .map(|target| format!("{:#x}", target.base))
+            .collect();
+        if targets.is_empty() {
+            why
+        } else {
+            format!("{why} [drawing into {}]", targets.join(", "))
+        }
+    });
     if let Err(why) = &drawn {
         let mut kept = refused_submission()
             .lock()
@@ -1767,6 +1787,11 @@ pub struct DispatchWrites {
     pub fetched: Option<(u64, u64)>,
     /// Where the last of them stored its image, as (first byte, bytes).
     pub stored: Option<(u64, u64)>,
+    /// Where the last of them stored each image after its first (D893), as (first byte, bytes).
+    pub stored_more: Vec<(u64, u64)>,
+    /// The span every one of them wrote through its window or images in runs covers, as (first
+    /// byte, end): what a write nothing names lands in.
+    pub written_span: Option<(u64, u64)>,
     /// The buffers the last of them bound, each as (first byte, bytes, whether any word it read is
     /// not zero) - `None` for one it only stores to, which is not read.
     pub buffers: Vec<(u64, u64, Option<bool>)>,
@@ -1807,6 +1832,14 @@ fn note_dispatch_writes(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let entry = kept.entry(module).or_default();
     entry.dispatches += 1;
+    for index in 0..writes.runs.len() {
+        let (at, run) = writes.run(index);
+        let end = at + run.len() as u64;
+        entry.written_span = Some(match entry.written_span {
+            Some((first, last)) => (first.min(at), last.max(end)),
+            None => (at, end),
+        });
+    }
     entry.bytes += bytes;
     entry.lit |= lit;
     entry.program = Some(program);
@@ -1816,6 +1849,15 @@ fn note_dispatch_writes(
         .first()
         .and_then(crate::pipeline::StoredImage::span)
         .or(entry.stored);
+    let more: Vec<(u64, u64)> = images
+        .stored
+        .iter()
+        .skip(1)
+        .filter_map(crate::pipeline::StoredImage::span)
+        .collect();
+    if !more.is_empty() {
+        entry.stored_more = more;
+    }
     entry.buffers = ranges
         .iter()
         .zip(read)

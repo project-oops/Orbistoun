@@ -251,6 +251,17 @@ pub const FRAME_DIR: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// A texture to watch for guest writes, instead of the first one the flipped frame sampled that
+/// nothing tracked filled: what fills a texture a frame reads further back than that is found.
+pub const WATCH_TEXTURE: Var = Var {
+    name: "ORBISTOUN_WATCH_TEXTURE",
+    kind: Kind::Diagnostic,
+    summary: "a texture's guest address to watch for guest writes, naming who fills it, instead of the first unfilled one the flipped frame sampled",
+    example: "0x7400849a0000",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// Keep where each draw's first vertices land, as clip positions in the per-draw lines.
 ///
 /// A draw that changes nothing either rasterised no fragments or wrote what was already there;
@@ -838,6 +849,7 @@ pub const REGISTRY: &[Var] = &[
     FRAME_EVERY,
     FRAME_AT,
     FRAME_DIR,
+    WATCH_TEXTURE,
     CAPTURE_POSITIONS,
     LIMIT,
     COMMIT,
@@ -933,6 +945,7 @@ mod tests {
         super::FRAME_EVERY,
         super::FRAME_AT,
         super::FRAME_DIR,
+        super::WATCH_TEXTURE,
         super::CAPTURE_POSITIONS,
         super::LIMIT,
         super::COMMIT,

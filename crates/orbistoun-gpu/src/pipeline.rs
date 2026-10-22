@@ -1083,6 +1083,8 @@ pub struct SubmissionReport {
     /// Each texture the draws bind, by its descriptor, once: where it lies in guest memory, its
     /// format and layout - what a texture that reads as one value is traced to.
     pub bound_textures: Vec<ImageDescriptor>,
+    /// Each sampled slot's image as (slot, guest address), once each, in the order bound.
+    pub bound_slots: Vec<(u32, u64)>,
     /// Draws' sampled texture slots nothing could be bound to - an unreadable descriptor, or one
     /// this does not read - so the backend would sample its placeholder.
     pub unbound_textures: usize,
@@ -5773,7 +5775,10 @@ impl Pipeline {
         }
         span(Span::TextureBind, || {
             let stencil = stencil_plane(&submission.commands, submission.depth_bases);
-            submission.report.bound_textures = bind_textures(
+            (
+                submission.report.bound_textures,
+                submission.report.bound_slots,
+            ) = bind_textures_noting(
                 &mut submission.commands,
                 (&self.texture_sources, &mut self.texels),
                 memory,
@@ -7598,13 +7603,26 @@ fn user_data_bound(
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
 /// table names a texture read exactly, so the draws that follow sample the guest's own texels; and
 /// answers each texture bound, by its descriptor, once.
+#[cfg(test)]
 fn bind_textures(
+    commands: &mut Vec<RenderCommand>,
+    sources: (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
+    memory: &impl GuestMemory,
+    stencil: Option<StencilPlane>,
+    unbound: (&mut usize, &mut Option<String>),
+) -> Vec<ImageDescriptor> {
+    bind_textures_noting(commands, sources, memory, stencil, unbound).0
+}
+
+/// What `bind_textures` does, and each slot's image as (slot, guest address), in the order bound: what a
+/// submission's dump names a sampled slot by.
+fn bind_textures_noting(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
     stencil: Option<StencilPlane>,
     (unbound, first_unbound): (&mut usize, &mut Option<String>),
-) -> Vec<ImageDescriptor> {
+) -> (Vec<ImageDescriptor>, Vec<(u32, u64)>) {
     let mut named = NamedTextures::default();
     // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
     // module samples, the descriptor at that slot's table offset (zero for a module whose texture
@@ -7713,7 +7731,7 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
-    named.0
+    (named.0, named.1)
 }
 
 /// What a source whose descriptor is in a table binds - the table where its program formed the
@@ -7959,7 +7977,7 @@ fn stencil_texture(
 
 /// The textures [`bind_textures`] bound, each by its descriptor, once.
 #[derive(Default)]
-struct NamedTextures(Vec<ImageDescriptor>);
+struct NamedTextures(Vec<ImageDescriptor>, Vec<(u32, u64)>);
 
 impl NamedTextures {
     /// Names the texture the descriptor `words` reads describes, where it was bound; `words` is
@@ -7967,6 +7985,12 @@ impl NamedTextures {
     fn note(&mut self, bound: Option<&RenderCommand>, words: impl FnOnce() -> Option<[u32; 8]>) {
         if let Some(words) = bound.and_then(|_| words()) {
             let descriptor = decode_image_descriptor(words);
+            if let Some(RenderCommand::BindTexture { slot, .. }) = bound {
+                let named = (*slot, descriptor.base);
+                if !self.1.contains(&named) {
+                    self.1.push(named);
+                }
+            }
             if !self.0.contains(&descriptor) {
                 self.0.push(descriptor);
             }

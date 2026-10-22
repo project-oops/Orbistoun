@@ -2224,6 +2224,14 @@ fn ask_for_unfilled_texture(shown: u64) {
     if !crate::waits::texture_wanted() {
         return;
     }
+    // A texture the run names is watched rather than one found.
+    if let Some(named) = orbistoun_env::WATCH_TEXTURE
+        .get()
+        .and_then(|value| u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok())
+    {
+        crate::waits::watch_texture(named);
+        return;
+    }
     let Some(by) = orbistoun_gpu::agc_driver::last_drawn_into(shown) else {
         return;
     };
@@ -2326,6 +2334,7 @@ fn stored_by(
     let covers = |(at, bytes): (u64, u64)| (at..at.saturating_add(bytes)).contains(&address);
     let (_, writes) = census.iter().find(|(_, writes)| {
         writes.stored.is_some_and(covers)
+            || writes.stored_more.iter().any(|&span| covers(span))
             || writes
                 .buffers
                 .iter()
@@ -2468,6 +2477,34 @@ fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
 
 /// A dumped submission's colour target: its base in hexadecimal and its size in pixels, in
 /// decimal. Printed whole as hexadecimal, a 1920 x 1080 target read as `780 x 438`.
+/// A kept submission's lines for what its draws were prepared under and what its stream wrote: each
+/// draw's input topology and output primitive, the primitive registers' writes, and the packets
+/// that write memory.
+fn primitive_and_packet_lines(
+    text: &mut String,
+    report: &orbistoun_gpu::pipeline::SubmissionReport,
+) {
+    // And what each draw was prepared under: its input topology and the output primitive chosen.
+    for ((input, output), draws, first) in &report.draw_primitives {
+        let _ = writeln!(
+            text,
+            "  {draws} draw(s), the first at byte {first:#x}: input topology {input:?}, output primitive {output:?}"
+        );
+    }
+    for (at, register, value) in &report.primitive_writes {
+        let _ = writeln!(
+            text,
+            "  register {register:#x} = {value:#x} at byte {at:#x}"
+        );
+    }
+    for (at, opcode, words) in &report.memory_packets {
+        let _ = writeln!(
+            text,
+            "memory packet {opcode:#04x} at byte {at:#x}: {words:08x?}"
+        );
+    }
+}
+
 fn colour_target_line(
     target: Option<&orbistoun_gpu::registers::ColourTarget>,
     tiling: Option<orbistoun_gpu::registers::SwizzleMode>,
@@ -2567,25 +2604,7 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
         "primitive topology {:?}",
         submission.report.primitive_topology
     );
-    // And what each draw was prepared under: its input topology and the output primitive chosen.
-    for ((input, output), draws, first) in &submission.report.draw_primitives {
-        let _ = writeln!(
-            text,
-            "  {draws} draw(s), the first at byte {first:#x}: input topology {input:?}, output primitive {output:?}"
-        );
-    }
-    for (at, register, value) in &submission.report.primitive_writes {
-        let _ = writeln!(
-            text,
-            "  register {register:#x} = {value:#x} at byte {at:#x}"
-        );
-    }
-    for (at, opcode, words) in &submission.report.memory_packets {
-        let _ = writeln!(
-            text,
-            "memory packet {opcode:#04x} at byte {at:#x}: {words:08x?}"
-        );
-    }
+    primitive_and_packet_lines(&mut text, &submission.report);
     // Each texture the draws bind, and where it lies: what a texture of one value is traced by.
     for texture in &submission.report.bound_textures {
         let _ = writeln!(
@@ -2593,6 +2612,9 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
             "bound texture {}x{}, format {}, tiling {:?}, at {:#x}",
             texture.width, texture.height, texture.format, texture.tiling, texture.base
         );
+    }
+    for (slot, base) in &submission.report.bound_slots {
+        let _ = writeln!(text, "slot {slot} samples the image at {base:#x}");
     }
     let listing = dir.join(format!("{name}-submission.txt"));
     let window: Vec<u8> = submission
@@ -2938,6 +2960,15 @@ fn log_dispatch_writes() {
         if let Some((at, bytes)) = writes.stored {
             tracing::info!(
                 "  the image it stores: {}",
+                consumed_by(at, bytes, &frames, &census)
+            );
+        }
+        if let Some((first, end)) = writes.written_span {
+            tracing::info!("  what it wrote in runs spans {first:#x}..{end:#x}");
+        }
+        for &(at, bytes) in &writes.stored_more {
+            tracing::info!(
+                "  it stores a further image at {at:#x} ({bytes} bytes): {}",
                 consumed_by(at, bytes, &frames, &census)
             );
         }
