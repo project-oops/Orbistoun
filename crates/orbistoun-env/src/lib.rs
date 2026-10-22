@@ -231,7 +231,7 @@ pub const FRAME_EVERY: Var = Var {
 pub const FRAME_AT: Var = Var {
     name: "ORBISTOUN_FRAME_AT",
     kind: Kind::Diagnostic,
-    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba, with the submissions before each as flip-<n>-submission-<k>.txt",
+    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba, with the submissions before each as flip-<n>-submission-<k>.txt; busy:N keeps the flip after the first frame of at least N draws",
     example: "1,30,60",
     effect: Effect::Observes,
     read_by: "orbistoun-worker",

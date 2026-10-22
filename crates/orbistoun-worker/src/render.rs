@@ -1196,7 +1196,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     if number < DUMPED_SUBMISSIONS {
         write_submission(submission, &format!("drawn-{number:02}"));
     }
-    keep_submission_before_named_flip(submission);
+    let kept_as = keep_submission_before_named_flip(submission);
     let Some((&target, extent)) = submission.targets.iter().next() else {
         tracing::warn!("a submission's draws name no colour target to draw into");
         return None;
@@ -1292,6 +1292,11 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
             return None;
         };
         snapshot_frame(number, frame);
+    }
+    // A submission kept before a named flip keeps what it drew too, so a frame's passes can be
+    // looked at one by one.
+    if let Some(name) = kept_as {
+        snapshot_kept(backend, &name);
     }
     if let Err(e) = perf::span(perf::Span::SubmitDraws, || backend.submit_draws()) {
         tracing::warn!("a submission's draws could not be sent to the device: {e:?}");
@@ -1450,24 +1455,79 @@ struct KeptFlips {
     every: Option<u64>,
     /// These flips exactly.
     at: Vec<u64>,
+    /// `busy:N` among them: the flip after the first frame that drew at least N draws, so a
+    /// title's first busy frame is kept wherever its flip index falls.
+    busy: Option<u64>,
 }
 
 impl KeptFlips {
     /// From the two variables' values; anything that is not a positive number is ignored.
     fn parse(every: Option<&str>, at: Option<&str>) -> Self {
         let positive = |value: &str| value.trim().parse::<u64>().ok().filter(|&n| n > 0);
+        let busy = at.and_then(|list| {
+            list.split(',')
+                .find_map(|entry| entry.trim().strip_prefix("busy:").and_then(positive))
+        });
         Self {
             every: every.and_then(positive),
             at: at
                 .map(|list| list.split(',').filter_map(positive).collect())
                 .unwrap_or_default(),
+            busy,
         }
+    }
+
+    /// Whether flip `flip` is kept with its submissions: one named, or the one a busy frame armed.
+    fn names(&self, flip: u64) -> bool {
+        self.at.contains(&flip) || armed_busy_flip() == Some(flip)
     }
 
     /// Whether the frame drawn before guest flip `flip` (counted from 1) is kept.
     fn wants(&self, flip: u64) -> bool {
-        flip > 0
-            && (self.every.is_some_and(|every| (flip - 1) % every == 0) || self.at.contains(&flip))
+        flip > 0 && (self.every.is_some_and(|every| (flip - 1) % every == 0) || self.names(flip))
+    }
+}
+
+/// Draws carried out since the last flip, and the flip a busy frame armed to be kept.
+static BUSY: Mutex<(u64, Option<u64>)> = Mutex::new((0, None));
+
+/// The flip `ORBISTOUN_FRAME_AT=busy:N` armed, once a frame drew that many.
+fn armed_busy_flip() -> Option<u64> {
+    BUSY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .1
+}
+
+/// Counts a submission's draws towards the frame being drawn.
+fn count_frame_draws(submission: &Submission) {
+    let draws = submission
+        .commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                orbistoun_gpu::RenderCommand::Draw { .. }
+                    | orbistoun_gpu::RenderCommand::DrawIndexed { .. }
+                    | orbistoun_gpu::RenderCommand::DrawChunks { .. }
+            )
+        })
+        .count() as u64;
+    BUSY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .0 += draws;
+}
+
+/// The flip to keep once flip `flip` closed a frame of `draws` draws: the next one, the first time
+/// a frame reaches `threshold`; what was armed otherwise.
+fn arm_after_busy(
+    threshold: Option<u64>,
+    draws: u64,
+    flip: u64,
+    armed: Option<u64>,
+) -> Option<u64> {
+    match (armed, threshold) {
+        (None, Some(threshold)) if draws >= threshold => Some(flip + 1),
+        _ => armed,
     }
 }
 
@@ -1492,9 +1552,10 @@ fn kept_frames_dir() -> Option<&'static Path> {
         .or_else(frames_dir)
 }
 
-/// The most submissions kept before one flip: a frame is several, and a bound keeps a flip that
-/// submits without end from filling the disk.
-const MOST_KEPT_PER_FLIP: usize = 64;
+/// The most submissions kept before one flip: a frame is several - Grand Theft Auto V's in-world
+/// frame passes sixty-four before it composes its picture - and a bound keeps a flip that submits
+/// without end from filling the disk.
+const MOST_KEPT_PER_FLIP: usize = 256;
 
 /// The name a submission carried out after guest flip `last_flip` is kept under, when the next
 /// flip is one `ORBISTOUN_FRAME_AT` names: `flip-<next>-submission-<k>`, `k` counting the
@@ -1506,7 +1567,7 @@ fn kept_submission_name(
     seen: &mut (u64, usize),
 ) -> Option<String> {
     let next = last_flip.unwrap_or(0) + 1;
-    if !asked.at.contains(&next) {
+    if !asked.names(next) {
         return None;
     }
     if seen.0 != next {
@@ -1523,11 +1584,13 @@ fn kept_submission_name(
 /// Keeps `submission` beside the frame of the flip after it, when that flip is one
 /// `ORBISTOUN_FRAME_AT` names: the per-draw lines see only the run's last submission, and this is
 /// what drew a frame mid-run.
-fn keep_submission_before_named_flip(submission: &Submission) {
+fn keep_submission_before_named_flip(submission: &Submission) -> Option<String> {
     static SEEN: Mutex<(u64, usize)> = Mutex::new((0, 0));
+    // Its draws count towards the frame a busy flip is armed by.
+    count_frame_draws(submission);
     let asked = kept_flips();
-    if asked.at.is_empty() {
-        return;
+    if asked.at.is_empty() && asked.busy.is_none() {
+        return None;
     }
     let name = kept_submission_name(
         asked,
@@ -1536,13 +1599,13 @@ fn keep_submission_before_named_flip(submission: &Submission) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    if let (Some(name), Some(dir)) = (name, kept_frames_dir()) {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::warn!("a kept submission could not be written: {e}");
-            return;
-        }
-        write_submission_to(dir, submission, &name);
+    let (name, dir) = (name?, kept_frames_dir()?);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("a kept submission could not be written: {e}");
+        return None;
     }
+    write_submission_to(dir, submission, &name);
+    Some(name)
 }
 
 /// Keeps the frame drawn before this flip when `ORBISTOUN_FRAME_EVERY` or `ORBISTOUN_FRAME_AT`
@@ -1552,6 +1615,14 @@ fn keep_frame_at_this_flip() {
     let Some(flip) = orbistoun_video::last_flip_index() else {
         return;
     };
+    // A frame's draws are counted to the flip that closes it, and a busy one arms the next.
+    if let Some(threshold) = kept_flips().busy {
+        let mut busy = BUSY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        busy.1 = arm_after_busy(Some(threshold), busy.0, flip, busy.1);
+        busy.0 = 0;
+    }
     if !kept_flips().wants(flip) {
         return;
     }
@@ -1592,26 +1663,70 @@ fn keep_latest_frame(frame: &Pixels) {
     }
 }
 
+/// Reads back what a kept submission drew and keeps its snapshot beside its listing.
+fn snapshot_kept(backend: &mut VulkanBackend, name: &str) {
+    let Some(dir) = kept_frames_dir() else {
+        return;
+    };
+    if let Some(frame) = perf::measure(perf::Phase::ReadBack, || backend.last_frame()) {
+        snapshot_frame_to(dir, name, frame);
+    } else {
+        tracing::warn!("a kept submission's frame could not be read back");
+    }
+}
+
+/// A kept submission's frame as [`snapshot_frame`] keeps a dumped one's, beside its listing in
+/// `dir`, as `<name>-frame-<w>x<h>.rgba`.
+fn snapshot_frame_to(dir: &Path, name: &str, frame: &Pixels) {
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    // A half-float target's eight bytes a pixel are written as four, each channel clamped to one.
+    let bytes = frame.bytes.len() / (width * height).max(1);
+    let mut small = Vec::with_capacity((width / 4) * (height / 4) * 4);
+    for row in (0..height).step_by(4) {
+        for column in (0..width).step_by(4) {
+            let at = (row * width + column) * bytes;
+            match frame.bytes.get(at..at + bytes) {
+                Some(pixel) if bytes == 4 => small.extend_from_slice(pixel),
+                Some(wide) if bytes == 8 => small.extend(
+                    wide.chunks_exact(2)
+                        .map(|half| half_to_byte(u16::from_le_bytes([half[0], half[1]]))),
+                ),
+                _ => small.extend_from_slice(&[0; 4]),
+            }
+        }
+    }
+    let file = format!(
+        "{name}-frame-{}x{}.rgba",
+        width.div_ceil(4),
+        height.div_ceil(4)
+    );
+    if let Err(e) = std::fs::write(dir.join(file), small) {
+        tracing::warn!("a kept submission's frame could not be written: {e}");
+    }
+}
+
+/// A half float as a byte: its value clamped to `[0, 1]` and scaled to 255.
+fn half_to_byte(half: u16) -> u8 {
+    let (exponent, mantissa) = (i32::from(half >> 10 & 0x1F), f32::from(half & 0x3FF));
+    let magnitude = match exponent {
+        0 => mantissa / 1024.0 * 2f32.powi(-14),
+        0x1F => f32::INFINITY,
+        _ => (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15),
+    };
+    if half & 0x8000 != 0 {
+        return 0;
+    }
+    // Clamped to [0, 1] first, so the cast cannot truncate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = (magnitude.min(1.0) * 255.0).round() as u8;
+    byte
+}
+
 /// A dumped submission's frame as a quarter-scale `Rgba8` snapshot (every fourth pixel of every
 /// fourth row), so a run's frames can be looked at in sequence cheaply.
 fn snapshot_frame(number: u64, frame: &Pixels) {
     if let Some(dir) = frames_dir() {
-        let (w, h) = (frame.width as usize, frame.height as usize);
-        let mut small = Vec::with_capacity((w / 4) * (h / 4) * 4);
-        for y in (0..h).step_by(4) {
-            for x in (0..w).step_by(4) {
-                let at = (y * w + x) * 4;
-                small.extend_from_slice(&frame.bytes[at..at + 4]);
-            }
-        }
-        let name = format!(
-            "drawn-{number:02}-frame-{}x{}.rgba",
-            w.div_ceil(4),
-            h.div_ceil(4)
-        );
-        if let Err(e) = std::fs::write(dir.join(name), small) {
-            tracing::warn!("the drawn frame snapshot could not be kept: {e}");
-        }
+        snapshot_frame_to(dir, &format!("drawn-{number:02}"), frame);
     }
 }
 
@@ -2428,6 +2543,15 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
             submission.colour_target_bases,
         )
     );
+    // And each attachment after the first, so a target a later pass samples is found by address.
+    for more in &submission.more_colour_targets {
+        let _ = writeln!(
+            text,
+            "CB_COLOR{} {}",
+            more.buffer,
+            colour_target_line(more.target.as_ref(), more.tiling, more.format, 1)
+        );
+    }
     // Where its depth and stencil tests read and write: a depth target the draws only read is
     // named by its read bases.
     if let Some(bases) = submission.depth_bases {
@@ -2443,6 +2567,25 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
         "primitive topology {:?}",
         submission.report.primitive_topology
     );
+    // And what each draw was prepared under: its input topology and the output primitive chosen.
+    for ((input, output), draws, first) in &submission.report.draw_primitives {
+        let _ = writeln!(
+            text,
+            "  {draws} draw(s), the first at byte {first:#x}: input topology {input:?}, output primitive {output:?}"
+        );
+    }
+    for (at, register, value) in &submission.report.primitive_writes {
+        let _ = writeln!(
+            text,
+            "  register {register:#x} = {value:#x} at byte {at:#x}"
+        );
+    }
+    for (at, opcode, words) in &submission.report.memory_packets {
+        let _ = writeln!(
+            text,
+            "memory packet {opcode:#04x} at byte {at:#x}: {words:08x?}"
+        );
+    }
     // Each texture the draws bind, and where it lies: what a texture of one value is traced by.
     for texture in &submission.report.bound_textures {
         let _ = writeln!(
@@ -3723,6 +3866,16 @@ mod tests {
         assert_eq!(kept, [1, 30, 51, 101], "every N and the list together");
 
         assert_eq!(KeptFlips::parse(Some("0"), Some("")), KeptFlips::default());
+        assert_eq!(
+            KeptFlips::parse(None, Some("busy:10000, 30")).busy,
+            Some(10000),
+            "a busy threshold beside named flips"
+        );
+        // The first frame of at least the threshold arms the flip after it, once.
+        assert_eq!(super::arm_after_busy(Some(100), 99, 7, None), None);
+        assert_eq!(super::arm_after_busy(Some(100), 100, 7, None), Some(8));
+        assert_eq!(super::arm_after_busy(Some(100), 500, 9, Some(8)), Some(8));
+        assert_eq!(super::arm_after_busy(None, 500, 9, None), None);
         assert!(
             !KeptFlips::default().wants(1),
             "nothing asked, nothing kept"

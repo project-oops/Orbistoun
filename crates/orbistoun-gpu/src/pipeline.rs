@@ -1025,6 +1025,17 @@ pub struct SubmissionReport {
     /// `None` when the stream set it nowhere. The input-assembly register reads `TRILIST` for both
     /// point and triangle draws, so this is what tells them apart.
     pub primitive_topology: Option<PrimitiveTopology>,
+    /// Each distinct pair a draw was prepared under: its input topology (`VGT_PRIMITIVE_TYPE`,
+    /// low six bits) and the output primitive its modules emit (`VGT_GS_OUT_PRIM_TYPE`'s code), with
+    /// how many draws took it and the packet offset of the first.
+    pub draw_primitives: Vec<DrawPrimitives>,
+    /// Every write in the submission of the input topology and the output primitive registers, as
+    /// (packet offset, register, value): what the draws' pairs were read from.
+    pub primitive_writes: Vec<(u32, u32, u32)>,
+    /// Every packet of the submission that writes memory - `WRITE_DATA`, `COPY_DATA`, `DMA_DATA` -
+    /// as (packet offset, opcode, its first body words): what the command processor writes between
+    /// draws, which a draw prepared from memory as it stood at the submit does not see.
+    pub memory_packets: Vec<(u32, u8, Vec<u32>)>,
     /// Which stages the stream declared thirty-two lanes wide, from `VGT_SHADER_STAGES_EN` and
     /// `SPI_PS_IN_CONTROL`. The primitive and pixel shaders are translated at these widths.
     pub wave_widths: WaveWidths,
@@ -1823,6 +1834,55 @@ fn rectangle_input_primitive(input: Option<u32>, output: Option<u32>) -> Option<
         _ => output,
     }
 }
+
+/// Records in `report` what a submission's dump lists of its stream: its writes of the primitive
+/// registers and its packets that write memory.
+fn note_stream_packets(
+    report: &mut SubmissionReport,
+    (writes, walked, stream): (&[RegisterWrite], &PacketWalk, &[u8]),
+) {
+    report.memory_packets = walked
+        .packets
+        .iter()
+        .filter_map(|packet| match packet.kind {
+            crate::packet::PacketKind::Command { opcode }
+                if matches!(
+                    opcode,
+                    WRITE_DATA | COPY_DATA | crate::packet::build::measured::DMA_DATA
+                ) =>
+            {
+                let at = packet.body_offset() as usize;
+                let end = (at + packet.body_length().min(24) as usize).min(stream.len());
+                let words = stream
+                    .get(at..end)
+                    .unwrap_or_default()
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect();
+                Some((packet.offset, opcode, words))
+            }
+            _ => None,
+        })
+        .collect();
+    report.primitive_writes = writes
+        .iter()
+        .filter(|write| {
+            write.register == VGT_PRIMITIVE_TYPE
+                || write.register == crate::registers::VGT_GS_OUT_PRIM_TYPE
+        })
+        .map(|write| (write.packet_offset, write.register, write.value))
+        .collect();
+}
+
+/// One pair a submission's draws were prepared under ([`SubmissionReport::draw_primitives`]):
+/// the input topology and output primitive, how many draws took it, and the first one's offset.
+pub type DrawPrimitives = ((Option<u32>, Option<u32>), usize, u32);
+
+/// `WRITE_DATA` and `COPY_DATA` (Mesa `sid.h`, `0x37` and `0x40`): command-processor writes to
+/// memory, between the draws of a stream.
+const WRITE_DATA: u8 = 0x37;
+/// See [`WRITE_DATA`].
+const COPY_DATA: u8 = 0x40;
 
 /// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
 /// input primitives of three vertices each, the second radeonsi's blits.
@@ -3156,6 +3216,7 @@ impl Pipeline {
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&first);
         submission.report.primitive_topology = self.note_primitives(&writes, &walked);
+        note_stream_packets(&mut submission.report, (&writes, &walked, stream));
         // Each stage's wave width: the encodings are identical at either width, so the stream's
         // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
@@ -5181,6 +5242,19 @@ impl Pipeline {
             let key = (!same_terms || sweep.noted_changed(draw.packet_offset))
                 .then(|| self.draw_key((&mut sweep, draw.packet_offset), &shader_registers, terms))
                 .filter(|key| !same_terms || previous_writes.as_ref() != Some(&key.written));
+            if key.is_some() {
+                let pair = (
+                    sweep
+                        .latest(draw.packet_offset, VGT_PRIMITIVE_TYPE)
+                        .map(|value| value & 0x3F),
+                    self.draw_primitive,
+                );
+                let primitives = &mut submission.report.draw_primitives;
+                match primitives.iter_mut().find(|(held, ..)| *held == pair) {
+                    Some((_, draws, _)) => *draws += 1,
+                    None => primitives.push((pair, 1, draw.packet_offset)),
+                }
+            }
             let Some(DrawKey {
                 written,
                 window_space,
