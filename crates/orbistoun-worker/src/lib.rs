@@ -602,6 +602,17 @@ fn install_presentation() {
         render::seed_more_targets,
         render::read_target_frame,
     );
+    // The texels the run asked to see a dispatch fetch, written where its frames go.
+    if let Some(list) = orbistoun_env::DUMP_IMAGE.get() {
+        let addresses: Vec<u64> = list
+            .split(',')
+            .filter_map(|value| u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok())
+            .collect();
+        let dir = orbistoun_env::FRAME_DIR
+            .get()
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        orbistoun_gpu::pipeline::set_image_dump(addresses, dir);
+    }
     // What a pixel shader stored through its buffers, read back after its draw.
     orbistoun_gpu::agc_driver::install_pixel_store_reader(render::read_pixel_stores);
     // The z-pass counters a `ZPASS_DONE` dumps, from the device's occlusion queries (D827).

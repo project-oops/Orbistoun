@@ -2360,7 +2360,12 @@ impl GuestCp<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pipeline = live.as_mut().ok_or("no pipeline is live")?;
-        pipeline.prepare_dispatch(state, &self.memory)
+        // Read as a draw segment's tables are: a frame a draw left on the device, held or deferred
+        // onto its target's pages (D719, D885), is carried out before its texels are read. Read
+        // raw, a compute pass over a target drawn earlier in the frame reads what the target held
+        // before - Grand Theft Auto V's chain from a 640x360 target into its ray-tracing tile
+        // classifier read zeros at every step, so the ray-traced passes were handed no work.
+        pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
     }
 
     /// Carries out a segment's streamout draws (D861): each `DRAW_INDEX_AUTO` as its legacy vertex
@@ -5085,6 +5090,14 @@ impl cp::CpMemory for GuestCp<'_> {
 
     fn unready_dispatch(&mut self) -> Option<u64> {
         unready_dispatch().lock().ok()?.take()
+    }
+
+    fn dispatch_program(&mut self, stream: &[u8], offset: u32) -> Option<u64> {
+        self.with_registers(stream, |writes| {
+            Ok(crate::dispatch::program_at(writes, offset))
+        })
+        .ok()
+        .flatten()
     }
 
     fn holds(&self, address: u64, expected: &[u8]) -> bool {

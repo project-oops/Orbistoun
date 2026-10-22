@@ -174,7 +174,11 @@ pub fn refused_shader_programs() -> Vec<(u64, Vec<u8>)> {
         .collect()
 }
 
-/// The programs the run's dispatches ran, by address, at most [`REFUSED_SHADERS_KEPT`]: what it
+/// How many dispatch programs a run lists: every one a frame runs - Grand Theft Auto V's in-world
+/// frame runs some thirty.
+const DISPATCH_PROGRAMS_KEPT: usize = 64;
+
+/// The programs the run's dispatches ran, by address, at most [`DISPATCH_PROGRAMS_KEPT`]: what it
 /// lists beside its report, so what a dispatch did can be read against its code.
 fn dispatch_programs() -> &'static std::sync::Mutex<BTreeMap<u64, Vec<u8>>> {
     static PROGRAMS: std::sync::Mutex<BTreeMap<u64, Vec<u8>>> =
@@ -187,7 +191,7 @@ fn keep_dispatch_program(address: u64, program: &[u8]) {
     let mut kept = dispatch_programs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !kept.contains_key(&address) && kept.len() < REFUSED_SHADERS_KEPT {
+    if !kept.contains_key(&address) && kept.len() < DISPATCH_PROGRAMS_KEPT {
         kept.insert(address, program.to_vec());
     }
 }
@@ -1029,7 +1033,8 @@ pub struct SubmissionReport {
     /// low six bits) and the output primitive its modules emit (`VGT_GS_OUT_PRIM_TYPE`'s code), with
     /// how many draws took it and the packet offset of the first.
     pub draw_primitives: Vec<DrawPrimitives>,
-    /// Every write in the submission of the input topology and the output primitive registers, as
+    /// Every write in the submission of the input topology, the output primitive and the index offset
+    /// (`GE_INDX_OFFSET`) registers, as
     /// (packet offset, register, value): what the draws' pairs were read from.
     pub primitive_writes: Vec<(u32, u32, u32)>,
     /// Every packet of the submission that writes memory - `WRITE_DATA`, `COPY_DATA`, `DMA_DATA` -
@@ -1871,6 +1876,7 @@ fn note_stream_packets(
         .filter(|write| {
             write.register == VGT_PRIMITIVE_TYPE
                 || write.register == crate::registers::VGT_GS_OUT_PRIM_TYPE
+                || write.register == GE_INDX_OFFSET
         })
         .map(|write| (write.packet_offset, write.register, write.value))
         .collect();
@@ -1973,11 +1979,12 @@ fn draw_geometry(
     let legacy = crate::registers::legacy_vertex(stages);
     // `SPI_SHADER_PGM_RSRC2_VS.SO_EN`, bit 12: its stores are its streamout (D881).
     let streamout = legacy && latest(0x2C4B).is_some_and(|value| value & 1 << 12 != 0);
-    // The offset is added to each index an indexed draw fetches; an auto draw's ids count up from
-    // zero whatever it holds (D843, obSCEne ix01).
+    // The offset is added to every vertex index: each one an indexed draw fetches, and each one an
+    // auto draw generates, which count up from it (D843, assumed: the measurement that said
+    // otherwise never reached the GPU).
     let offset = latest(GE_INDX_OFFSET).unwrap_or(0);
     Ok(GeometryInputs {
-        first_vertex: if indices.is_some() { offset } else { 0 },
+        first_vertex: offset,
         vertices,
         primitives,
         assembly,
@@ -3860,6 +3867,34 @@ const fn surface_layers(surface: &DispatchSurface) -> Option<u32> {
     }
 }
 
+/// The images a run asked for the fetched texels of, and the directory they go to.
+static IMAGE_DUMP: std::sync::OnceLock<(Vec<u64>, std::path::PathBuf)> = std::sync::OnceLock::new();
+
+/// Asks for the texels each dispatch fetches from the images at `addresses`, written into `dir` as
+/// `image-<address>-<w>x<h>.bin`, a texel a little-endian word, the last fetch kept. First ask wins.
+pub fn set_image_dump(addresses: Vec<u64>, dir: std::path::PathBuf) {
+    let _ = IMAGE_DUMP.set((addresses, dir));
+}
+
+/// Writes `texels` where the run asked for the image at `base`.
+fn dump_fetched(base: u64, texels: &DispatchTexels) {
+    let Some((addresses, dir)) = IMAGE_DUMP.get() else {
+        return;
+    };
+    if !addresses.contains(&base) {
+        return;
+    }
+    let bytes: Vec<u8> = texels
+        .texels
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let name = format!("image-{base:x}-{}x{}.bin", texels.width, texels.height);
+    if let Err(e) = std::fs::write(dir.join(name), bytes) {
+        tracing::warn!("the fetched image could not be written: {e}");
+    }
+}
+
 /// Reads a dispatch's images from guest memory, by where its module said each descriptor came
 /// from: its user data, or a table its user data and constants address.
 ///
@@ -3907,6 +3942,7 @@ fn dispatch_images(
             }
             (None, None) => fetched_image(state, source, memory, detiled)?,
         };
+        dump_fetched(span.0, &texels);
         if slot == 0 {
             images.fetched = Some(texels);
             images.fetched_span = Some(span);
@@ -16534,11 +16570,10 @@ mod tests {
         }
     }
 
-    /// An index offset moves an indexed draw's fetched indices and not an auto draw's ids (D843,
-    /// measured by obSCEne ix01: offset 5 gave an auto draw ids 0, 1, 2 and an indexed one 5, 6,
-    /// 7).
+    /// An index offset moves an auto draw's ids and an indexed draw's fetched indices alike (D843):
+    /// under offset 5 a three-vertex auto draw's ids are 5, 6 and 7.
     #[test]
-    fn an_index_offset_moves_fetched_indices_only() {
+    fn an_index_offset_moves_every_vertex_index() {
         use super::{DI_PT_RECTLIST, GE_INDX_OFFSET, VGT_PRIMITIVE_TYPE, draw_geometry};
         use crate::registers::{DrawCall, DrawKind};
         let auto = DrawCall {
@@ -16553,8 +16588,8 @@ mod tests {
         };
         assert_eq!(
             draw_geometry(&auto, registers).map(|g| (g.first_vertex, g.vertices)),
-            Ok((0, 3)),
-            "the ids are 0, 1 and 2"
+            Ok((5, 3)),
+            "the ids are 5, 6 and 7"
         );
         let indexed = DrawCall {
             kind: DrawKind::Indexed {

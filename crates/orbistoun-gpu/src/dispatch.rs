@@ -156,6 +156,20 @@ fn thread_groups(
     Ok((groups, partial))
 }
 
+/// The program a dispatch at `packet_offset` runs, from `COMPUTE_PGM_LO`/`HI` in force there: `None`
+/// when either was never written.
+#[must_use]
+pub fn program_at(writes: &[RegisterWrite], packet_offset: u32) -> Option<u64> {
+    let latest = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|w| crate::registers::in_force_at(w, packet_offset) && w.register == register)
+            .map(|w| w.value)
+    };
+    Some((u64::from(latest(PGM_LO)?) << 8) | (u64::from(latest(PGM_HI)? & 0xFF) << 40))
+}
+
 /// Reads the dispatch at `packet_offset` from the writes before it.
 ///
 /// # Errors
@@ -178,10 +192,9 @@ pub fn state_at(
     };
     check_initiator(initiator_word, &latest)?;
 
-    let (Some(low), Some(high)) = (latest(PGM_LO), latest(PGM_HI)) else {
+    let Some(program) = program_at(writes, packet_offset) else {
         return Err("COMPUTE_PGM_LO/HI were never written, so there is no program");
     };
-    let program = (u64::from(low) << 8) | (u64::from(high & 0xFF) << 40);
     let Some(rsrc2_word) = latest(PGM_RSRC2) else {
         return Err("COMPUTE_PGM_RSRC2 was never written, so the wave's inputs are unknown");
     };
@@ -488,6 +501,16 @@ mod tests {
             register,
             value,
         }
+    }
+
+    /// The program an indirect dispatch would run is named where its grid holds no groups: Grand
+    /// Theft Auto V's starved passes are found by it. Read from `COMPUTE_PGM_LO`/`HI` as
+    /// `state_at` reads them, and unknown where either is unwritten.
+    #[test]
+    fn the_program_in_force_is_named_from_its_registers() {
+        let writes = [write(PGM_LO, 0x005b_854a), write(PGM_HI, 0x74)];
+        assert_eq!(program_at(&writes, 8), Some(0x7400_5b85_4a00));
+        assert_eq!(program_at(&writes[..1], 8), None);
     }
 
     /// The registers radeonsi's compute clear sets before its dispatch, as the port's first

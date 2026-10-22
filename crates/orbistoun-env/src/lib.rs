@@ -251,6 +251,17 @@ pub const FRAME_DIR: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// An image whose texels every dispatch that fetches it writes out, as the dispatch read them, so a
+/// compute pass's input is seen as the pass saw it.
+pub const DUMP_IMAGE: Var = Var {
+    name: "ORBISTOUN_DUMP_IMAGE",
+    kind: Kind::Diagnostic,
+    summary: "a comma-separated list of image guest addresses: each dispatch that fetches it writes its texels to image-<addr>-<w>x<h>.bin in ORBISTOUN_FRAME_DIR, the last one kept",
+    example: "0x74005a3c0000",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// A texture to watch for guest writes, instead of the first one the flipped frame sampled that
 /// nothing tracked filled: what fills a texture a frame reads further back than that is found.
 pub const WATCH_TEXTURE: Var = Var {
@@ -850,6 +861,7 @@ pub const REGISTRY: &[Var] = &[
     FRAME_AT,
     FRAME_DIR,
     WATCH_TEXTURE,
+    DUMP_IMAGE,
     CAPTURE_POSITIONS,
     LIMIT,
     COMMIT,
@@ -946,6 +958,7 @@ mod tests {
         super::FRAME_AT,
         super::FRAME_DIR,
         super::WATCH_TEXTURE,
+        super::DUMP_IMAGE,
         super::CAPTURE_POSITIONS,
         super::LIMIT,
         super::COMMIT,

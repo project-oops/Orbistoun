@@ -159,6 +159,12 @@ pub trait CpMemory {
     fn unready_dispatch(&mut self) -> Option<u64> {
         None
     }
+    /// The program a dispatch at byte `offset` of `stream` would run, from the registers in force
+    /// there: named where a dispatch runs nothing, so what it waited for is found. `None` when it
+    /// cannot be told.
+    fn dispatch_program(&mut self, _stream: &[u8], _offset: u32) -> Option<u64> {
+        None
+    }
     /// The samples the draws carried out so far passed while they counted them (D827): what the
     /// depth block's z-pass counters stand at for a `ZPASS_DONE` to write. `None` when nothing
     /// counts them exactly, which leaves the event as a stop.
@@ -269,6 +275,8 @@ fn dispatch_indirect(
         *group = u32::from_le_bytes(word.try_into().map_err(|_| Stop::Malformed)?);
     }
     if groups.contains(&0) {
+        let program = memory.dispatch_program(stream, offset);
+        note_empty_indirect(at, program);
         return Ok(());
     }
     let dispatch = Dispatch {
@@ -282,6 +290,43 @@ fn dispatch_indirect(
     }
     result.dispatches += 1;
     Ok(())
+}
+
+/// An empty grid's address and the program its dispatch would have run, if known.
+type EmptyIndirect = (u64, Option<u64>);
+
+/// Indirect dispatches that ran nothing, their grid read as no groups, by where the grid was read
+/// and the program they would have run, with how many: a grid an earlier pass should have filled
+/// is found by its address, and the pass it starves by its program.
+fn empty_indirect() -> &'static std::sync::Mutex<std::collections::BTreeMap<EmptyIndirect, u64>> {
+    static EMPTY: std::sync::Mutex<std::collections::BTreeMap<EmptyIndirect, u64>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    &EMPTY
+}
+
+/// How many grid addresses [`empty_indirect`] keeps.
+const EMPTY_INDIRECT_MOST: usize = 64;
+
+fn note_empty_indirect(at: u64, program: Option<u64>) {
+    let mut empty = empty_indirect()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (at, program);
+    if empty.len() < EMPTY_INDIRECT_MOST || empty.contains_key(&key) {
+        *empty.entry(key).or_default() += 1;
+    }
+}
+
+/// The indirect dispatches this run that read a grid of no groups and so ran nothing, as (where the
+/// grid was read, the program they would have run if it is known, how many times).
+#[must_use]
+pub fn empty_indirect_dispatches() -> Vec<(u64, Option<u64>, u64)> {
+    empty_indirect()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|(&(at, program), &count)| (at, program, count))
+        .collect()
 }
 
 /// The address the last `SET_BASE` before byte `before` set for the indirect arguments (base index

@@ -2932,6 +2932,16 @@ fn write_dispatch_listings() {
 
 /// What each compute program's dispatches wrote, and who read what they stored.
 fn log_dispatch_writes() {
+    // The indirect dispatches that ran nothing: a grid an earlier pass should have filled.
+    for (at, program, count) in orbistoun_gpu::cp::empty_indirect_dispatches() {
+        let program = program.map_or_else(
+            || "a program not known".to_owned(),
+            |program| format!("the program at {program:#x}"),
+        );
+        tracing::info!(
+            "an indirect dispatch of {program} read a grid of no groups at {at:#x} and ran nothing, {count} time(s)"
+        );
+    }
     // What each program's dispatches wrote: one that writes only zeros produces nothing, and what
     // nothing reads is not seen.
     let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();

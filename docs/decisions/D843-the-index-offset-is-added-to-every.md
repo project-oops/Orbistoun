@@ -2,9 +2,18 @@
 
 **Status:** decided
 **Date:** 2026-10-14
-**known_by:** measured
+**known_by:** assumed
 
-**Correction (2026-10-14):** measured by obSCEne `REQ-20261014T0415Z-ix01`
+**Second correction (2026-10-22): the first correction is withdrawn.** Its rows
+(`report-20261014-batch4.log`, `000-boot/ge-indx-offset`) are not a GPU measurement: the same arm
+records `fn-create-queue-bound 0x0` and `queue-create-rc 0xffffffff`, and every
+`sceAgcDcbDrawIndexOffset` emit answered `-1` with no dword written, so no draw reached the GPU and
+the stored ids it reports came from no draw. The decision stands as first written below: the offset
+is added to every vertex index, an auto draw's ids included, on the r600 grounding below, as
+prosper also applies it. Grand Theft Auto V's in-world frames write the offset as 0, so they do not
+decide it. A re-measurement is filed with obSCEne (`REQ-20261022T2100Z-gt26`).
+
+**Correction (2026-10-14, withdrawn above):** measured by obSCEne `REQ-20261014T0415Z-ix01`
 (`report-20261014-batch4.log`, `000-boot/ge-indx-offset`): the offset moves only the indices an
 indexed draw fetches. A three-vertex `DRAW_INDEX_AUTO` stored ids 0, 1, 2 under offsets 0, 5 and
 `0x10000`; a `DRAW_INDEX_2` of `{0, 1, 2}` stored 5, 6, 7 under offset 5; and the register keeps
