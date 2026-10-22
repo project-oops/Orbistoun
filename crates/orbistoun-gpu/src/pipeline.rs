@@ -1804,6 +1804,26 @@ fn legacy_output_primitive(primitive_type: Option<u32>) -> Option<u32> {
     }
 }
 
+/// The output primitive a primitive shader's draw assembles, given its input topology and the
+/// `VGT_GS_OUT_PRIM_TYPE` live at it: a rectangle list's input - three corners a rectangle -
+/// under a triangle-strip output is drawn as rectangles, as radeonsi programs a rectangle draw's
+/// output (`si_pipe.h:2110`). Grand Theft Auto V's full-screen composite draws three corners of a
+/// rectangle list (`(1,1)`, `(1,0)`, `(0,1)` of its position buffer) with the output its prim state
+/// left at triangle strip, and on hardware covers the screen (assumed; obSCEne
+/// `REQ-20261022T1240Z-gt25` asks).
+fn rectangle_input_primitive(input: Option<u32>, output: Option<u32>) -> Option<u32> {
+    /// `VGT_GS_OUT_PRIM_TYPE`'s `TRISTRIP` ([`decode_primitive_topology`]).
+    ///
+    /// [`decode_primitive_topology`]: crate::registers::decode_primitive_topology
+    const TRISTRIP: u32 = 2;
+    /// gfx103's `RECTLIST`, as [`TRISTRIP`] is named.
+    const RECTLIST: u32 = 3;
+    match (input.map(|value| value & 0x3F), output) {
+        (Some(DI_PT_RECTLIST | DI_PT_2D_RECTANGLE), Some(TRISTRIP)) => Some(RECTLIST),
+        _ => output,
+    }
+}
+
 /// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
 /// input primitives of three vertices each, the second radeonsi's blits.
 const DI_PT_TRILIST: u32 = 4;
@@ -5366,6 +5386,11 @@ impl Pipeline {
         written.push(self.draw_stages);
         if crate::registers::legacy_vertex(self.draw_stages) {
             self.draw_primitive = legacy_output_primitive(sweep.latest(at, VGT_PRIMITIVE_TYPE));
+        } else {
+            self.draw_primitive = rectangle_input_primitive(
+                sweep.latest(at, VGT_PRIMITIVE_TYPE),
+                self.draw_primitive,
+            );
         }
         written.push(self.draw_primitive);
         // The vertex stage's user data, which names the buffers whose formats a format load
@@ -8095,8 +8120,16 @@ fn unbound_reason(
         } else {
             String::new()
         };
+        // And which check kept a compare from binding it exactly.
+        let refused = match sampler {
+            NamedSampler::Read(decoded) if source.compare => format!(
+                " - not bound as a compared image: {}",
+                depth_compare_refusal(words, source, decoded, memory)
+            ),
+            _ => String::new(),
+        };
         return format!(
-            "it reads as {}, where the module samples {}{compares}{named}",
+            "it reads as {}, where the module samples {}{compares}{named}{refused}",
             shape_read(&bound),
             shape_sampled(source)
         );
@@ -8688,6 +8721,51 @@ fn linear_depth_compare(
         faces: 1,
         levels: 1,
     })
+}
+
+/// The first check [`linear_depth_compare`] refuses `words` by, in its order.
+fn depth_compare_refusal(
+    words: [u32; 8],
+    source: &TextureSource,
+    sampling: crate::registers::TextureSampling,
+    memory: &impl GuestMemory,
+) -> String {
+    let descriptor = decode_image_descriptor(words);
+    let unorm = descriptor.format == FORMAT_8_8_8_8_UNORM;
+    if source.cube || source.volume {
+        return "the module samples a cube or a volume".to_owned();
+    }
+    if !(descriptor.format == FORMAT_32_FLOAT || unorm) {
+        return format!(
+            "its format {} is neither 32_FLOAT nor 8_8_8_8_UNORM",
+            descriptor.format
+        );
+    }
+    if words[3] >> 28 != IMAGE_TYPE_2D {
+        return format!("its type {} is not 2D", words[3] >> 28);
+    }
+    if descriptor.levels > 1 {
+        return format!("it has {} levels", descriptor.levels);
+    }
+    if sampling.saturated() != source.saturated || sampling.mirrored() != source.mirrored {
+        return format!(
+            "its sampler clamps {:?} / mirrors {:?} where the module saturates {:?} / mirrors {:?} (D743)",
+            sampling.saturated(),
+            sampling.mirrored(),
+            source.saturated,
+            source.mirrored
+        );
+    }
+    if unorm && descriptor.tiling == SwizzleMode::Linear {
+        return "a linear 8_8_8_8_UNORM image".to_owned();
+    }
+    if descriptor.tiling != SwizzleMode::Linear && untargeted_depth(words, 1, memory).is_none() {
+        return format!(
+            "its {:?} surface at {:#x}, {}x{}, was not read and detiled",
+            descriptor.tiling, descriptor.base, descriptor.width, descriptor.height
+        );
+    }
+    "its linear surface was not readable".to_owned()
 }
 
 /// What a source samples when its descriptor is a flat depth surface - a depth swizzle and a depth
@@ -16889,5 +16967,36 @@ mod pixel_store_tests {
         assert_eq!(binds, [vec![false, true], vec![false, true]]);
         assert_eq!(commands.len(), 5);
         assert!(matches!(commands[3], RenderCommand::BindDrawBuffers { .. }));
+    }
+}
+
+#[cfg(test)]
+mod rectangle_input_tests {
+    /// A rectangle list's three corners under a triangle-strip output are drawn as a rectangle; a
+    /// triangle list's are not, and an output already a rectangle or a point stays.
+    #[test]
+    fn a_rectangle_list_input_draws_rectangles() {
+        use super::{DI_PT_2D_RECTANGLE, DI_PT_RECTLIST, DI_PT_TRILIST, rectangle_input_primitive};
+        assert_eq!(
+            rectangle_input_primitive(Some(DI_PT_RECTLIST), Some(2)),
+            Some(3)
+        );
+        assert_eq!(
+            rectangle_input_primitive(Some(DI_PT_2D_RECTANGLE), Some(2)),
+            Some(3)
+        );
+        assert_eq!(
+            rectangle_input_primitive(Some(DI_PT_TRILIST), Some(2)),
+            Some(2)
+        );
+        assert_eq!(
+            rectangle_input_primitive(Some(DI_PT_RECTLIST), Some(0)),
+            Some(0)
+        );
+        assert_eq!(
+            rectangle_input_primitive(Some(DI_PT_RECTLIST), Some(4)),
+            Some(4)
+        );
+        assert_eq!(rectangle_input_primitive(None, Some(2)), Some(2));
     }
 }
