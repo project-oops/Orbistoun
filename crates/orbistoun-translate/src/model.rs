@@ -391,6 +391,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshrrev_b16",
     "v_sub_nc_i16",
     "v_rcp_f16_e32",
+    "v_pk_fmac_f16",
     "v_cmp_lt_f16_e32",
     "v_cmp_eq_f16_e32",
     "v_cmp_le_f16_e32",
@@ -9695,7 +9696,8 @@ const OP_SEL_SHIFT: u32 = 11;
 
 /// One sixteen-bit operand as a 32-bit value, zero above: its register's low half, or its high half
 /// when `high`. An inline float is a half here and a constant's high half is not established, so
-/// both are refused.
+/// both are refused; a named register - the condition or execution mask's half, `m0` - is a word
+/// as any register is (Grand Theft Auto V's `v_mul_f16_sdwa v16, vcc_lo, v17`).
 fn read_half<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -9707,11 +9709,17 @@ fn read_half<M: Model + ?Sized>(
     // register's is (ACO reads a packed operand's high select as `SubdwordSel::uword1` whatever
     // the operand, `aco_optimizer.cpp:1314-1320`; LLVM prints `0x20001` as the halves 1 and 2).
     // What an inline constant's high half holds is not established, so it stays refused.
-    let whole_word = matches!(
+    let named_register = matches!(
         operand,
-        Operand::Vector(_) | Operand::Scalar(_) | Operand::Literal(_)
+        Operand::Named(name)
+            if matches!(name.as_str(), "vcc_lo" | "vcc_hi" | "exec_lo" | "exec_hi" | "m0")
     );
-    if matches!(operand, Operand::Named(_)) || (high && !whole_word) {
+    let whole_word = named_register
+        || matches!(
+            operand,
+            Operand::Vector(_) | Operand::Scalar(_) | Operand::Literal(_)
+        );
+    if (matches!(operand, Operand::Named(_)) && !named_register) || (high && !whole_word) {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
@@ -11013,7 +11021,10 @@ fn is_sixteen_bit(name: &str) -> bool {
     (name.starts_with("v_cmp_") && name.ends_with("_f16_e32"))
         || PACKED_HALF_FLOATS.contains(&name)
         || LONG_HALF_FLOATS.contains(&name)
-        || matches!(name, "v_lshrrev_b16" | "v_sub_nc_i16" | "v_rcp_f16_e32")
+        || matches!(
+            name,
+            "v_lshrrev_b16" | "v_sub_nc_i16" | "v_rcp_f16_e32" | "v_pk_fmac_f16"
+        )
 }
 
 /// The sixteen-bit forms: packed and long-form float arithmetic, the sixteen-bit shift and
@@ -11029,6 +11040,8 @@ fn sixteen_bit<M: Model + ?Sized>(
         long_half_float(model, instruction, name)
     } else if name == "v_rcp_f16_e32" {
         half_float_reciprocal(model, instruction)
+    } else if name == "v_pk_fmac_f16" {
+        packed_half_accumulate(model, instruction)
     } else if name.starts_with("v_cmp_") {
         half_compare(model, instruction, name, None)
     } else {
@@ -11263,6 +11276,42 @@ fn packed_half_float<M: Model + ?Sized>(
                 operands.push(model.half_to_float_bits(bits));
             }
             let result = half_float_operation(model, name, &operands);
+            halves[half] = model.float_bits_to_half(result);
+        }
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
+        let word = model.binary(op::BITWISE_OR, halves[0], high);
+        model.write_vector_lane(u32::from(*destination), lane, word);
+    }
+    model.count();
+    Ok(())
+}
+
+/// The packed sixteen-bit fused multiply-accumulate in its short form (`v_pk_fmac_f16`, `VOP2`
+/// opcode 60, ACO's `aco_opcodes.py:1009`): each half of the destination becomes the first
+/// source's half times the second's plus its own, low with low and high with high - no selects and
+/// no modifiers in this form - computed in single precision and rounded back to a half. Grand Theft
+/// Auto V's scene compute program does `v_pk_fmac_f16 v12, v46, v6` (word `0x78180d2e`).
+fn packed_half_accumulate<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [Operand::Vector(destination), first, second] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a packed multiply-accumulate without a vector destination and two sources",
+        });
+    };
+    let accumulator = Operand::Vector(*destination);
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut halves = [model.constant(0); 2];
+        for (half, high) in [false, true].into_iter().enumerate() {
+            let mut operands = Vec::with_capacity(3);
+            for source in [first, second, &accumulator] {
+                let bits = read_half_float(model, instruction, source, lane, high)?;
+                operands.push(model.half_to_float_bits(bits));
+            }
+            let result = half_float_operation(model, "v_pk_fma_f16", &operands);
             halves[half] = model.float_bits_to_half(result);
         }
         let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);

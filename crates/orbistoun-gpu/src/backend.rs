@@ -436,6 +436,9 @@ pub struct DrawBuffer {
     /// The guest address the first byte was read from, which a global load's address is read
     /// against (D758); zero for bytes no guest range holds, such as a chunk's counting indices.
     pub base: u64,
+    /// The pixel shader reading it stores through it too: it is bound on its own for its one draw,
+    /// and what the draw stored is written back to [`Self::base`] after it ran.
+    pub stored: bool,
 }
 
 /// Why a backend could not carry out what it was given.

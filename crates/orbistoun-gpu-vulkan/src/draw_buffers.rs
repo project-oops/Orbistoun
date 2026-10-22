@@ -6,12 +6,19 @@
 //! run - when they pass their limits. A buffer is a range of a large mapped arena and a set comes
 //! from a shared pool, so a frame of tens of thousands of draws makes no allocation per draw, and a
 //! release rewinds the arenas and resets the pools rather than freeing them.
+//!
+//! A pixel shader's buffer it stores through is the exception: placed on its own for its one draw,
+//! with a write mask beside it, and read back once the draw ran, so what the draw stored is written
+//! into guest memory as a dispatch's stores are (D746, D809).
 
 use std::collections::HashMap;
 
 use ash::vk;
 use orbistoun_gpu::DrawBuffer;
-use orbistoun_spirv::{DRAW_BUFFERS_PER_STAGE, GEOMETRY_BUFFERS_BINDING, PIXEL_BUFFERS_BINDING};
+use orbistoun_gpu::agc_driver::PixelStore;
+use orbistoun_spirv::{
+    DRAW_BUFFERS_PER_STAGE, GEOMETRY_BUFFERS_BINDING, PIXEL_BUFFERS_BINDING, PIXEL_WRITTEN_BINDING,
+};
 
 use crate::compute::{DispatchBuffer, DispatchError, Session};
 
@@ -56,6 +63,17 @@ struct Arena {
     used: vk::DeviceSize,
 }
 
+/// A pixel shader's stored buffer whose draw has not been read back: where its words and its write
+/// mask lie in their arenas' mappings, how many words, and the guest address they were read from.
+struct PendingStore {
+    base: u64,
+    words: usize,
+    /// The mapped addresses of the buffer's first word and of its mask's, kept as integers so the
+    /// cache can sit in a `static`.
+    data: usize,
+    mask: usize,
+}
+
 /// What the draw buffers hold on the device.
 struct Held {
     layout: vk::DescriptorSetLayout,
@@ -72,6 +90,10 @@ struct Held {
     pool_sets: u32,
     pool_index: usize,
     sets: HashMap<[StageKey; 2], vk::DescriptorSet>,
+    /// The stored buffers of draws recorded since they were last read back.
+    pending: Vec<PendingStore>,
+    /// Stored buffers read back at a release, before their arenas were rewound, and not yet taken.
+    collected: Vec<PixelStore>,
 }
 
 /// The process's one device's draw buffers.
@@ -123,6 +145,8 @@ fn held_for<'a>(
             pool_sets: 0,
             pool_index: 0,
             sets: HashMap::new(),
+            pending: Vec::new(),
+            collected: Vec::new(),
         });
     }
     held.as_mut().ok_or_else(|| {
@@ -207,7 +231,7 @@ fn pooled_set(session: &Session, held: &mut Held) -> Result<vk::DescriptorSet, D
         if held.pool_index == held.pools.len() {
             let sizes = [vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(2 * DRAW_BUFFERS_PER_STAGE * SETS_PER_POOL)];
+                .descriptor_count(3 * DRAW_BUFFERS_PER_STAGE * SETS_PER_POOL)];
             let pool_info = vk::DescriptorPoolCreateInfo::default()
                 .pool_sizes(&sizes)
                 .max_sets(SETS_PER_POOL);
@@ -250,13 +274,12 @@ fn create_layout(session: &Session) -> Result<vk::DescriptorSetLayout, DispatchE
             crate::framebuffer::USER_DATA_BLOCK_BYTES
         )));
     }
-    if limits.max_per_stage_descriptor_storage_buffers
-        < DRAW_BUFFERS_PER_STAGE + PIPELINE_STORAGE_BUFFERS
-    {
+    // A pixel shader's buffers and their write masks.
+    let per_stage = 2 * DRAW_BUFFERS_PER_STAGE + PIPELINE_STORAGE_BUFFERS;
+    if limits.max_per_stage_descriptor_storage_buffers < per_stage {
         return Err(DispatchError::Unsupported(format!(
             "the device binds {} storage buffers per stage, and a draw's buffers need {} (D733)",
-            limits.max_per_stage_descriptor_storage_buffers,
-            DRAW_BUFFERS_PER_STAGE + PIPELINE_STORAGE_BUFFERS
+            limits.max_per_stage_descriptor_storage_buffers, per_stage,
         )));
     }
     let bindings = [
@@ -267,6 +290,11 @@ fn create_layout(session: &Session) -> Result<vk::DescriptorSetLayout, DispatchE
             .stage_flags(vk::ShaderStageFlags::MESH_EXT),
         vk::DescriptorSetLayoutBinding::default()
             .binding(PIXEL_BUFFERS_BINDING)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(DRAW_BUFFERS_PER_STAGE)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(PIXEL_WRITTEN_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(DRAW_BUFFERS_PER_STAGE)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -346,6 +374,11 @@ pub(crate) fn descriptor_set(
             buffer.base as u32,
         ];
     }
+    // A pixel shader that stores binds its stored buffers on their own, so a set of its own.
+    if stages[1].iter().any(|buffer| buffer.stored) {
+        let set = storing_set(session, held, stages[1])?;
+        return Ok((set, places));
+    }
     // The geometry binding is the arenas, so the set is the pixel stage's buffers' and how many
     // arenas there are (D747).
     let key = [
@@ -379,60 +412,167 @@ fn place_all(
     Ok(true)
 }
 
+/// One element of a binding: a whole buffer.
+fn whole(buffer: vk::Buffer) -> vk::DescriptorBufferInfo {
+    vk::DescriptorBufferInfo::default()
+        .buffer(buffer)
+        .offset(0)
+        .range(vk::WHOLE_SIZE)
+}
+
+/// One element of a binding: a placed range.
+fn ranged(placed: Placed) -> vk::DescriptorBufferInfo {
+    vk::DescriptorBufferInfo::default()
+        .buffer(placed.buffer)
+        .offset(placed.offset)
+        .range(placed.range)
+}
+
+/// One binding's elements, by slot.
+type Elements = [vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize];
+
 /// Allocates and writes the set for `key`, whose buffers are all uploaded.
 fn allocate(
     session: &Session,
     held: &mut Held,
     key: &[StageKey; 2],
 ) -> Result<vk::DescriptorSet, DispatchError> {
-    let device = &session.device;
-    let set = pooled_set(session, held)?;
-    // Every element of both bindings: the geometry binding's arenas (D747), and the pixel stage's
-    // buffer where a slot has one; the placeholder elsewhere.
-    let whole = |buffer: vk::Buffer| {
-        vk::DescriptorBufferInfo::default()
-            .buffer(buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)
-    };
-    let geometry: [vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize] =
-        std::array::from_fn(|slot| {
-            whole(
-                held.arenas
-                    .get(slot)
-                    .map_or(held.placeholder.buffer, |arena| arena.held.buffer),
-            )
-        });
-    let pixel: [vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize] = std::array::from_fn(
-        |slot| match key[1].get(slot).and_then(|id| held.buffers.get(id)) {
-            Some(placed) => vk::DescriptorBufferInfo::default()
-                .buffer(placed.buffer)
-                .offset(placed.offset)
-                .range(placed.range),
-            None => whole(held.placeholder.buffer),
-        },
-    );
-    let infos = [geometry, pixel];
-    let writes: Vec<vk::WriteDescriptorSet<'_>> = [GEOMETRY_BUFFERS_BINDING, PIXEL_BUFFERS_BINDING]
-        .into_iter()
-        .zip(&infos)
-        .map(|(binding, info)| {
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(binding)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(info)
-        })
-        .collect();
-    // SAFETY: the set is new and unused, and every buffer outlives the call.
-    unsafe { device.update_descriptor_sets(&writes, &[]) };
+    // The pixel stage's buffer where a slot has one; the placeholder elsewhere, and at every mask.
+    let pixel: Elements = std::array::from_fn(|slot| {
+        key[1]
+            .get(slot)
+            .and_then(|id| held.buffers.get(id))
+            .map_or_else(|| whole(held.placeholder.buffer), |&placed| ranged(placed))
+    });
+    let masks: Elements = std::array::from_fn(|_| whole(held.placeholder.buffer));
+    let set = write_set(session, held, (&pixel, &masks))?;
     held.sets.insert(key.clone(), set);
     Ok(set)
 }
 
+/// A set from the pools with every element of its three bindings written: the geometry binding's
+/// arenas (D747), the placeholder past them, and `pixel` and `masks` as given.
+fn write_set(
+    session: &Session,
+    held: &mut Held,
+    (pixel, masks): (&Elements, &Elements),
+) -> Result<vk::DescriptorSet, DispatchError> {
+    let set = pooled_set(session, held)?;
+    let geometry: Elements = std::array::from_fn(|slot| {
+        whole(
+            held.arenas
+                .get(slot)
+                .map_or(held.placeholder.buffer, |arena| arena.held.buffer),
+        )
+    });
+    let writes: Vec<vk::WriteDescriptorSet<'_>> = [
+        (GEOMETRY_BUFFERS_BINDING, &geometry),
+        (PIXEL_BUFFERS_BINDING, pixel),
+        (PIXEL_WRITTEN_BINDING, masks),
+    ]
+    .into_iter()
+    .map(|(binding, info)| {
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(binding)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(info)
+    })
+    .collect();
+    // SAFETY: the set is new and unused, and every buffer outlives the call.
+    unsafe { session.device.update_descriptor_sets(&writes, &[]) };
+    Ok(set)
+}
+
+/// The set for a draw whose pixel shader stores through `pixel`'s stored buffers: each placed anew
+/// with a zeroed write mask beside it, noted to be read back once the draw ran; the rest as any
+/// draw binds them. Never kept: the next draw's stores land in buffers of their own.
+fn storing_set(
+    session: &Session,
+    held: &mut Held,
+    pixel: &[DrawBuffer],
+) -> Result<vk::DescriptorSet, DispatchError> {
+    let full = || {
+        DispatchError::Unsupported(
+            "a pixel shader's stored buffers fill more arenas than the geometry binding holds"
+                .to_owned(),
+        )
+    };
+    let mut buffers: Elements = std::array::from_fn(|_| whole(held.placeholder.buffer));
+    let mut masks = buffers;
+    for (slot, buffer) in pixel.iter().enumerate() {
+        if !buffer.stored {
+            if let Some(&placed) = held.buffers.get(&(buffer.hash, buffer.bytes.len())) {
+                buffers[slot] = ranged(placed);
+            }
+            continue;
+        }
+        let data = place(session, held, &buffer.bytes)?.ok_or_else(full)?;
+        let mask = place(session, held, &vec![0; buffer.bytes.len()])?.ok_or_else(full)?;
+        held.bytes += 2 * buffer.bytes.len();
+        let mapped = |placed: Placed| {
+            held.arenas
+                .iter()
+                .find(|arena| arena.held.buffer == placed.buffer)
+                .map(|arena| arena.mapped + usize::try_from(placed.offset).unwrap_or(usize::MAX))
+        };
+        let (Some(data_at), Some(mask_at)) = (mapped(data), mapped(mask)) else {
+            return Err(full());
+        };
+        held.pending.push(PendingStore {
+            base: buffer.base,
+            words: buffer.bytes.len().div_ceil(4),
+            data: data_at,
+            mask: mask_at,
+        });
+        buffers[slot] = ranged(data);
+        masks[slot] = ranged(mask);
+    }
+    write_set(session, held, (&buffers, &masks))
+}
+
+/// Reads every pending stored buffer out of its arena: what its draw left there, and its mask. The
+/// caller has waited for every recorded draw.
+fn collect(held: &mut Held) {
+    for pending in held.pending.drain(..) {
+        let read = |address: usize| {
+            // SAFETY: the words lie within an arena's mapping, which stays mapped while the cache
+            // lives and is not rewound before this read; every draw that wrote them has run.
+            unsafe { std::slice::from_raw_parts(address as *const u32, pending.words) }.to_vec()
+        };
+        held.collected.push(PixelStore {
+            base: pending.base,
+            words: read(pending.data),
+            written: read(pending.mask),
+        });
+    }
+}
+
+/// What the pixel shaders of the draws recorded since the last call stored, each buffer's words
+/// after its draw with its write mask, once every recorded draw has run.
+///
+/// # Errors
+///
+/// When the draws could not be waited for.
+pub(crate) fn take_pixel_stores(session: &Session) -> Result<Vec<PixelStore>, DispatchError> {
+    let mut guard = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(held) = guard.as_mut() else {
+        return Ok(Vec::new());
+    };
+    if !held.pending.is_empty() {
+        crate::framebuffer::settle(session)?;
+        collect(held);
+    }
+    Ok(std::mem::take(&mut held.collected))
+}
+
 /// Releases every set and buffer: the pools are reset and the arenas rewound, kept for the next
-/// frame's; the layout and placeholder stay. The caller has waited for every recorded draw.
+/// frame's; the layout and placeholder stay. The caller has waited for every recorded draw. A
+/// stored buffer still to be read back is read first.
 fn release(device: &ash::Device, held: &mut Held) {
+    collect(held);
     for &pool in &held.pools {
         // SAFETY: no recorded draw uses a set from the pool any more.
         let _ =

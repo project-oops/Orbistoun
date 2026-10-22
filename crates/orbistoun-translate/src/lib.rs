@@ -1335,6 +1335,86 @@ mod tests {
         );
     }
 
+    /// A pixel shader's buffer store is traced, as a dispatch's is, and translates through a
+    /// writable buffer its draw writes back: Grand Theft Auto V's prologue pixel shaders store so,
+    /// and a store once kept every one of a draw's buffers from being traced.
+    #[test]
+    fn a_pixel_shader_s_buffer_store_is_traced_and_translates() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        // v_mov_b32 v1, 7; buffer_store_dword v1, off, s[0:3], 0; s_endpgm.
+        let words = [0x7E02_0287, 0xE070_0000, 0x8000_0100, 0xBF81_0000];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let user_data = UserData {
+            count: 4,
+            draw_buffers: true,
+            ..UserData::default()
+        };
+        let buffers =
+            crate::wavefront::draw_buffers_for(&decoded, &table, Stage::Fragment, user_data)
+                .expect("traced");
+        assert_eq!(buffers.untraced_by, None, "a store keeps nothing untraced");
+        assert!(!buffers.stored.is_empty(), "its store is recorded");
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            user_data,
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
+    }
+
+    /// The short packed multiply-accumulate translates, as Grand Theft Auto V's scene compute program
+    /// uses it (`v_pk_fmac_f16 v12, v46, v6`, word 0x78180d2e).
+    #[test]
+    fn a_packed_multiply_accumulate_translates() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        // v_pk_fmac_f16 v12, v46, v6; s_endpgm.
+        let words = [0x7818_0D2E, 0xBF81_0000];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData::default(),
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
+    }
+
+    /// A sixteen-bit SDWA multiply reads a named scalar's half as a register's: Grand Theft Auto V's
+    /// scene compute program does `v_mul_f16_sdwa v16, vcc_lo, v17 dst_sel:WORD_1
+    /// dst_unused:UNUSED_PRESERVE` (words 0x6a2022f9 0x0686156a).
+    #[test]
+    fn a_half_float_sdwa_form_reads_the_condition_mask() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let words = [0x6A20_22F9, 0x0686_156A, 0xBF81_0000];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData::default(),
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
+    }
+
     /// A primitive shader samples through a sampler at a named level, as Grand Theft Auto V's do
     /// with `image_sample_lz v0, v2, s[8:15], s[16:19]` (words 0xf09c0308 0x00820002), at its own
     /// slots; one sampling at the level derivatives choose is refused, having none (D904).

@@ -831,6 +831,12 @@ pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u3
     .unwrap_or(false)
 }
 
+/// What the pixel shaders of the draws carried out since the last call stored, once they ran: the
+/// [`orbistoun_gpu::agc_driver::PixelStoreReader`] the worker installs. On the device thread.
+pub fn read_pixel_stores() -> Option<Vec<orbistoun_gpu::agc_driver::PixelStore>> {
+    on_device(|| orbistoun_gpu_vulkan::take_pixel_stores().ok()).flatten()
+}
+
 /// The samples every draw that counts them has passed so far (D827): the
 /// [`orbistoun_gpu::agc_driver::SampleCounter`] the worker installs. On the device thread.
 pub fn samples_passed() -> Option<u64> {
@@ -3214,6 +3220,7 @@ mod tests {
                     bytes: words.into(),
                     hash: 0,
                     base: 0x7400_1000,
+                    stored: false,
                 }],
             },
         ];
@@ -3239,6 +3246,7 @@ mod tests {
                 bytes: vec![0; 16].into(),
                 hash: 0,
                 base,
+                stored: false,
             }],
         };
         let listing = super::buffers_listing_within(&[bind(0x1000), bind(0x2000)], 1);

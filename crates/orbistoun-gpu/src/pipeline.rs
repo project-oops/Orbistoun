@@ -276,9 +276,9 @@ fn vertex_formats()
 /// Records the formats the vertex shader at `address` was prepared with for a draw.
 fn note_vertex_formats(
     address: u64,
-    formats: Option<orbistoun_translate::wavefront::BufferFormats>,
+    formats: Option<&orbistoun_translate::wavefront::BufferFormats>,
 ) {
-    if let Some(formats) = formats {
+    if let Some(&formats) = formats {
         vertex_formats()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -479,7 +479,7 @@ mod refusal_tests {
         let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
         // FORMAT 24 (`BUF_FMT_16_16_SNORM`) in bits 18:12, selects x, y, 0, 1.
         formats.set(2, Some(24 << 12 | 1 << 9 | 5 << 3 | 4));
-        super::note_vertex_formats(0x7400_7000, Some(formats));
+        super::note_vertex_formats(0x7400_7000, Some(&formats));
         assert_eq!(
             super::vertex_formats_line(0x7400_7000).as_deref(),
             Some("slot 2 BUF_FMT_16_16_SNORM (x y 0 1)")
@@ -2294,6 +2294,12 @@ pub struct Pipeline {
     texels: TexelCache,
     /// Each translated module's draw buffers, in slot order (D733).
     buffer_sources: BTreeMap<ResourceId, Vec<orbistoun_translate::draw_buffers::BufferSource>>,
+    /// The slots of the buffers each pixel shader stores through, by its module: written back
+    /// after each of its draws.
+    pixel_stores: BTreeMap<ResourceId, std::collections::BTreeSet<u32>>,
+    /// The program each translated draw module was translated from, by its resource: what a
+    /// refusal naming the module says it is.
+    module_programs: BTreeMap<ResourceId, u64>,
     /// Bytes read for draw buffers, shared across submissions while unwritten.
     buffers: crate::draw_buffers::BufferCache,
     next_resource: u64,
@@ -2418,6 +2424,8 @@ impl Pipeline {
             colour_channels: BTreeMap::new(),
             texels: TexelCache::new(),
             buffer_sources: BTreeMap::new(),
+            pixel_stores: BTreeMap::new(),
+            module_programs: BTreeMap::new(),
             buffers: crate::draw_buffers::BufferCache::default(),
             next_resource: 1,
             store: None,
@@ -5691,6 +5699,22 @@ impl Pipeline {
                 memory,
                 &mut submission.report.unbound_buffers,
             );
+            mark_pixel_stores(&mut submission.commands, &self.pixel_stores);
+            // The module a refusal names, by the program it was translated from.
+            if let Some(why) = submission.report.unbound_buffers.1.as_mut()
+                && let Some((module, program)) = self
+                    .module_programs
+                    .iter()
+                    .find(|(module, _)| why.contains(&format!("{module:?}:")))
+            {
+                *why = why
+                    .replacen(
+                        &format!("{module:?}:"),
+                        &format!("{module:?} (the program at {program:#x}):"),
+                        1,
+                    )
+                    .into();
+            }
         });
     }
 
@@ -5793,6 +5817,10 @@ impl Pipeline {
                 resource,
                 orbistoun_translate::wavefront::exported_target_channels(decoded, &self.encodings),
             );
+        }
+        self.module_programs.insert(resource, address);
+        if stage == Stage::Fragment && !buffers.stored.is_empty() {
+            self.pixel_stores.insert(resource, buffers.stored.clone());
         }
         if !buffers.sources.is_empty() {
             self.buffer_sources.insert(resource, buffers.sources);
@@ -5989,11 +6017,11 @@ impl Pipeline {
                 self.draw_buffer_formats(candidate.address, (words, &system), memory)
             })
             .flatten();
-        note_vertex_formats(candidate.address, buffer_formats);
+        note_vertex_formats(candidate.address, buffer_formats.as_ref());
         self.prepare_with_geometry(
             candidate,
             (memory, Some(geometry.clone()), needs, window_space),
-            buffer_formats,
+            buffer_formats.as_ref(),
             by_geometry,
             submission,
         )
@@ -6096,7 +6124,7 @@ impl Pipeline {
             String,
             WindowSpace,
         ),
-        buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
+        buffer_formats: Option<&orbistoun_translate::wavefront::BufferFormats>,
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
     ) -> Option<ResourceId> {
@@ -6153,7 +6181,7 @@ impl Pipeline {
         let for_draw = ForDraw {
             geometry,
             window_space,
-            buffer_formats,
+            buffer_formats: buffer_formats.copied(),
             flat_twins,
             saturated,
             mirrored,
@@ -11578,6 +11606,58 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
     }
 }
 
+/// Marks the buffers each pixel shader in `stores` stores through, and binds them again before every
+/// draw of such a shader: each draw's stores land in buffers of its own, written back after it ran.
+fn mark_pixel_stores(
+    commands: &mut Vec<RenderCommand>,
+    stores: &BTreeMap<ResourceId, std::collections::BTreeSet<u32>>,
+) {
+    if stores.is_empty() {
+        return;
+    }
+    let mut storing: Option<&std::collections::BTreeSet<u32>> = None;
+    let mut last: Option<Vec<crate::DrawBuffer>> = None;
+    let mut bound_since_draw = false;
+    let mut out = Vec::with_capacity(commands.len());
+    for mut command in commands.drain(..) {
+        match &mut command {
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader,
+            } => storing = stores.get(shader),
+            RenderCommand::BindDrawBuffers {
+                stage: ShaderStage::Fragment,
+                buffers,
+            } => {
+                for (slot, buffer) in buffers.iter_mut().enumerate() {
+                    buffer.stored = storing.is_some_and(|slots| {
+                        u32::try_from(slot).is_ok_and(|slot| slots.contains(&slot))
+                    });
+                }
+                last = Some(buffers.clone());
+                bound_since_draw = true;
+            }
+            RenderCommand::Draw { .. }
+            | RenderCommand::DrawIndexed { .. }
+            | RenderCommand::DrawChunks { .. } => {
+                if storing.is_some()
+                    && !bound_since_draw
+                    && let Some(buffers) = &last
+                {
+                    out.push(RenderCommand::BindDrawBuffers {
+                        stage: ShaderStage::Fragment,
+                        buffers: buffers.clone(),
+                    });
+                }
+                bound_since_draw = false;
+            }
+            _ => {}
+        }
+        out.push(command);
+    }
+    *commands = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cached, ResourceId};
@@ -16758,5 +16838,56 @@ mod tests {
             .expect("the extent matches");
         assert_eq!(surface.detile(&spanned), written);
         assert_eq!(spanned[32], 32, "a row's padding texel is left alone");
+    }
+}
+
+#[cfg(test)]
+mod pixel_store_tests {
+    use crate::backend::{DrawBuffer, RenderCommand, ResourceId, ShaderStage};
+
+    fn buffer(base: u64) -> DrawBuffer {
+        DrawBuffer {
+            bytes: vec![0; 8].into(),
+            hash: base,
+            base,
+            stored: false,
+        }
+    }
+
+    /// A pixel shader's stored slot is marked, and its buffers are bound again before each of its
+    /// draws, so every draw's stores land in buffers of their own.
+    #[test]
+    fn a_storing_pixel_shader_binds_its_buffers_for_each_draw() {
+        let draw = || RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        };
+        let mut commands = vec![
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader: ResourceId(5),
+            },
+            RenderCommand::BindDrawBuffers {
+                stage: ShaderStage::Fragment,
+                buffers: vec![buffer(0x1000), buffer(0x2000)],
+            },
+            draw(),
+            draw(),
+        ];
+        let stores = std::collections::BTreeMap::from([(ResourceId(5), [1].into())]);
+        super::mark_pixel_stores(&mut commands, &stores);
+        let binds: Vec<Vec<bool>> = commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::BindDrawBuffers { buffers, .. } => {
+                    Some(buffers.iter().map(|buffer| buffer.stored).collect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(binds, [vec![false, true], vec![false, true]]);
+        assert_eq!(commands.len(), 5);
+        assert!(matches!(commands[3], RenderCommand::BindDrawBuffers { .. }));
     }
 }

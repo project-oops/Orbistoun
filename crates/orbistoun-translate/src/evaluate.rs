@@ -1444,10 +1444,10 @@ fn crosses_lanes(decode: &Decode, encodings: &EncodingTable, kept: &[bool]) -> b
                     masks.extend([written, written + 1]);
                 }
             }
+            // From GFX10 a `v_cmpx` writes the execution mask alone (`aco_assembler.cpp:1111`).
             if name.starts_with("v_cmpx") {
                 masks.extend([EXEC as u32, EXEC as u32 + 1]);
-            }
-            if family == "VOPC" {
+            } else if family == "VOPC" {
                 masks.extend([VCC as u32, VCC as u32 + 1]);
             }
         } else if let Some(written) = instruction.operands.first().and_then(code) {
@@ -2371,8 +2371,10 @@ impl<'a> Concrete<'a> {
             self.forget(EXEC, 2);
         }
         // A short compare writes the condition mask, unless its SDWA word names the pair it writes
-        // instead.
-        if name.starts_with("v_cmp") && !into_pair {
+        // instead; a `v_cmpx` writes the execution mask alone from GFX10 (ACO's
+        // `aco_assembler.cpp:1111`), so Grand Theft Auto V's waterfall loop leaves the condition
+        // mask its fetch shader patches a descriptor's format through.
+        if name.starts_with("v_cmp") && !name.starts_with("v_cmpx") && !into_pair {
             self.forget(VCC, 2);
         }
     }
@@ -2764,6 +2766,47 @@ mod tests {
         .expect("evaluated")
         .expect("reached");
         assert_eq!(scalars[4], Some(1), "s4 read, not written");
+    }
+
+    /// A `v_cmpx` leaves the condition mask: `s_mov_b32 vcc_lo, s5; v_cmpx_gt_i32_e32 s4, v0;
+    /// s_mov_b32 s4, vcc_lo` before a load through `s[4:7]` gives `s4` what `s5` held, as Grand
+    /// Theft Auto V's fetch shader at `0x74005ab5de00` carries a format through `vcc_lo` across a
+    /// waterfall loop.
+    #[test]
+    fn a_compare_into_the_execution_mask_leaves_the_condition_mask() {
+        use super::scalar_prefix_explained;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("v_cmpx_gt_i32_e32")
+            .expect("v_cmpx_gt_i32_e32");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        let words = [
+            0xbeea_0305,
+            encoding.value | (opcode << encoding.opcode.shift) | 4,
+            0xbe84_036a,
+            0xf420_0002,
+            0xfa00_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[3].offset;
+        let (scalars, _) = scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (4, &[1, 2, 3, 4]),
+            &[],
+            &mut |_| None,
+        )
+        .expect("evaluated")
+        .expect("reached");
+        assert_eq!(scalars[4], Some(2), "vcc_lo kept through the compare");
     }
 
     /// A scalar spilled into a lane and read back keeps its value through a prefix: `v_writelane_b32

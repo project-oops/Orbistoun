@@ -602,6 +602,8 @@ fn install_presentation() {
         render::seed_more_targets,
         render::read_target_frame,
     );
+    // What a pixel shader stored through its buffers, read back after its draw.
+    orbistoun_gpu::agc_driver::install_pixel_store_reader(render::read_pixel_stores);
     // The z-pass counters a `ZPASS_DONE` dumps, from the device's occlusion queries (D827).
     orbistoun_gpu::agc_driver::install_sample_counter(render::samples_passed);
     // Work the host refuses passed over, when the run asks, to see every wall at once (D896).

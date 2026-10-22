@@ -2123,6 +2123,11 @@ pub const COMPUTE_BUFFERS_BINDING: u32 = 2;
 /// dispatch stored, slot for slot.
 pub const COMPUTE_WRITTEN_BINDING: u32 = 3;
 
+/// Where a pixel shader's write masks are bound in the draw-buffer set: as
+/// [`COMPUTE_WRITTEN_BINDING`] is a dispatch's, for a pixel shader that stores through its buffers
+/// at [`PIXEL_BUFFERS_BINDING`], which its draw writes back.
+pub const PIXEL_WRITTEN_BINDING: u32 = 4;
+
 /// How many buffers one stage of a draw or a dispatch binds: the length of each binding's array.
 /// Sixty-four: a retail vertex shader traces eleven, its descriptors, a table and the streams its
 /// fetch forms, PPSA03416's nineteen, seventeen of them descriptors its fetch computes (D733), and

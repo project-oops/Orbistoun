@@ -30,6 +30,20 @@ use orbistoun_gpu::{
     BackendError, Rect, RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage,
 };
 
+/// What the pixel shaders of the draws recorded since the last call stored through their buffers,
+/// once those draws ran: each stored buffer's words after its draw, with its write mask.
+///
+/// # Errors
+///
+/// When no device is available, or the draws could not be waited for.
+pub fn take_pixel_stores() -> Result<Vec<orbistoun_gpu::agc_driver::PixelStore>, DispatchError> {
+    let session = compute::session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    draw_buffers::take_pixel_stores(&session)
+}
+
 /// The width of a compute dispatch's output buffer when no resident buffer is bound, in `u32`s.
 const DISPATCH_WORDS: usize = 64;
 

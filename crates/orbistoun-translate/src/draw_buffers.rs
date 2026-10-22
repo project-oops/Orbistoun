@@ -213,8 +213,21 @@ pub struct DrawBuffers {
 pub fn trace(
     decode: &Decode,
     encodings: &EncodingTable,
-    (first_register, count): (u32, u32),
+    registers: (u32, u32),
     (stores, globals): (bool, bool),
+) -> DrawBuffers {
+    trace_with(decode, encodings, registers, (stores, globals, stores))
+}
+
+/// [`trace`] with whether the program is a dispatch's apart from whether its stores are traced: a
+/// pixel shader's stores are written back after its draw, as a dispatch's are, while its global
+/// loads stay a draw's.
+#[must_use]
+pub fn trace_with(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+    (stores, globals, dispatch): (bool, bool, bool),
 ) -> DrawBuffers {
     let named: Vec<Option<(&str, &str)>> = decode
         .instructions
@@ -235,8 +248,10 @@ pub fn trace(
         .zip(&named)
         .find_map(|(instruction, named)| {
             let (_, name) = (*named)?;
+            // A pixel shader's image store reaches a harness image, not the guest's: still untraced.
             (writes_memory(name)
-                && !(stores && (bound_buffer_store(name) || bound_image_access(name))))
+                && !(stores
+                    && (bound_buffer_store(name) || (dispatch && bound_image_access(name)))))
             .then(|| (instruction.offset, name.to_owned()))
         });
     if untraced_by.is_some() {
@@ -265,7 +280,6 @@ pub fn trace(
     // every load through them has been seen.
     let mut accesses: Vec<(u32, Access)> = Vec::new();
     // A dispatch's global loads are traced as a primitive shader's are (D883).
-    let dispatch = stores;
     let mut stores: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for ((block, state), lanes) in blocks.iter().zip(reached).zip(indices) {
         let Some(mut held) = state else {

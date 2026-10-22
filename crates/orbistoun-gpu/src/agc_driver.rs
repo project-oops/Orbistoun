@@ -338,6 +338,41 @@ impl Before<'_> {
     }
 }
 
+/// A buffer a pixel shader stored through, after its draw: its words, and its write mask - word `i`
+/// non-zero where the draw stored word `i` - for the guest range from `base` it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PixelStore {
+    /// The guest address of its first word.
+    pub base: u64,
+    /// Its words after the draw.
+    pub words: Vec<u32>,
+    /// Non-zero where the draw stored.
+    pub written: Vec<u32>,
+}
+
+/// What the pixel shaders of the draws carried out since the last call stored, once those draws
+/// ran; `None` when the device could not say.
+pub type PixelStoreReader = fn() -> Option<Vec<PixelStore>>;
+
+fn pixel_store_reader() -> &'static OnceLock<PixelStoreReader> {
+    static READER: OnceLock<PixelStoreReader> = OnceLock::new();
+    &READER
+}
+
+/// Installs how what a pixel shader stored through its buffers comes back from the device. Without
+/// one, a draw whose pixel shader stores is refused. First install wins.
+pub fn install_pixel_store_reader(reader: PixelStoreReader) {
+    let _ = pixel_store_reader().set(reader);
+}
+
+/// Whether any draw of `submission` binds a buffer its pixel shader stores through.
+fn stores_from_pixels(submission: &Submission) -> bool {
+    submission.commands.iter().any(|command| {
+        matches!(command, crate::RenderCommand::BindDrawBuffers { buffers, .. }
+            if buffers.iter().any(|buffer| buffer.stored))
+    })
+}
+
 fn draw_executor() -> &'static OnceLock<DrawExecutor> {
     static EXECUTOR: OnceLock<DrawExecutor> = OnceLock::new();
     &EXECUTOR
@@ -888,11 +923,52 @@ impl GuestCp<'_> {
 
     /// [`Self::draw_into_target`], and when it drew, the modules it carried are the backend's.
     fn draw_noting_delivery(&mut self, submission: &Submission) -> Result<(), String> {
+        let stores = stores_from_pixels(submission);
+        if stores && pixel_store_reader().get().is_none() {
+            return Err(
+                "its pixel shader stores, and no device is installed to read back".to_owned(),
+            );
+        }
         let drawn = self.draw_into_target(submission);
         if drawn.is_ok() {
             note_delivered(submission);
+            if stores {
+                self.write_back_pixel_stores()?;
+            }
         }
         drawn
+    }
+
+    /// Writes what the pixel shaders of the draws just carried out stored into guest memory: each
+    /// stored buffer's words where its mask says the draw stored, in runs, as a dispatch's stores
+    /// are written (D809).
+    fn write_back_pixel_stores(&mut self) -> Result<(), String> {
+        let stores = pixel_store_reader()
+            .get()
+            .and_then(|read| read())
+            .ok_or("what its pixel shader stored could not be read back")?;
+        let mut writes = GuestWrites::spare();
+        for store in &stores {
+            let mut word = 0;
+            while word < store.words.len() {
+                if store.written.get(word).is_none_or(|&mark| mark == 0) {
+                    word += 1;
+                    continue;
+                }
+                let first = word;
+                while store.written.get(word).is_some_and(|&mark| mark != 0) {
+                    word += 1;
+                }
+                writes.push_words(
+                    store.base + first as u64 * 4,
+                    &store.words[first..word.min(store.words.len())],
+                    usize::MAX,
+                );
+            }
+        }
+        let written = self.write_back_dispatch(&writes, &[], &[]);
+        writes.keep();
+        written
     }
 
     /// Leaves every block of a DCC target stored uncompressed, with its key saying so, before its

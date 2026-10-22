@@ -181,6 +181,7 @@ fn padded_buffer(address: u64, bytes: &[u8]) -> DrawBuffer {
         hash: hasher.finish(),
         bytes: padded,
         base: address,
+        stored: false,
     }
 }
 
@@ -214,6 +215,7 @@ impl BufferCache {
                 hash: crate::ContentHasher::new(0).finish(),
                 bytes: Vec::new().into(),
                 base: address,
+                stored: false,
             });
         }
         let span_of = length as u64;
@@ -1566,6 +1568,7 @@ fn chunk_indices(
         hash: hasher.finish(),
         bytes: bytes.into(),
         base: 0,
+        stored: false,
     })
 }
 
@@ -1743,6 +1746,7 @@ mod cache_tests {
             hash: bytes as u64,
             bytes: vec![0u8; bytes].into(),
             base: 0,
+            stored: false,
         }
     }
 

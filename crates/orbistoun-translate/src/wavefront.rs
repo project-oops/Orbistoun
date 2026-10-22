@@ -624,10 +624,13 @@ impl FlatTwins {
     }
 }
 
-/// The slots [`BufferFormats`] keeps a format for: the first thirty-two of a stage's
-/// [`orbistoun_spirv::DRAW_BUFFERS_PER_STAGE`], a bit each in its mask. A typed access through a later
-/// slot finds no format, as for a slot the draw did not resolve, and is refused.
-const FORMATTED_SLOTS: usize = 32;
+/// The slots [`BufferFormats`] keeps a format for: every one of a stage's
+/// [`orbistoun_spirv::DRAW_BUFFERS_PER_STAGE`], a bit each in its mask. Grand Theft Auto V's fetch
+/// shader at `0x74005ab5de00` converts through slot 36.
+const FORMATTED_SLOTS: usize = orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize;
+
+/// How many slots one half of [`BufferFormats`]'s words holds: an array a derive serialises.
+const FORMATTED_HALF: usize = FORMATTED_SLOTS / 2;
 
 /// Each draw buffer's descriptor's fourth word at one draw, by slot (D738). `None` for a slot whose
 /// buffer is not a descriptor the draw resolved.
@@ -645,34 +648,40 @@ const FORMATTED_SLOTS: usize = 32;
     serde::Deserialize,
 )]
 pub struct BufferFormats {
-    /// Each slot's word, zero where none was resolved.
-    words: [u32; FORMATTED_SLOTS],
-    /// Which slots were resolved, a bit each: the words packed, so the draw state a module is
-    /// translated for stays small enough to pass by value.
-    resolved: u32,
+    /// Each slot's word, zero where none was resolved: the first half's slots, then the second's.
+    words: [[u32; FORMATTED_HALF]; 2],
+    /// Which slots were resolved, a bit each.
+    resolved: u64,
 }
 
 impl BufferFormats {
     /// Records `slot`'s word, or that the draw resolved none; a slot past a stage's buffers is
     /// none of a draw's.
     pub fn set(&mut self, slot: usize, word: Option<u32>) {
-        let Some(at) = self.words.get_mut(slot) else {
+        let Some(at) = self
+            .words
+            .get_mut(slot / FORMATTED_HALF)
+            .and_then(|half| half.get_mut(slot % FORMATTED_HALF))
+        else {
             return;
         };
         *at = word.unwrap_or(0);
-        self.resolved = self.resolved & !(1 << slot) | u32::from(word.is_some()) << slot;
+        self.resolved = self.resolved & !(1 << slot) | u64::from(word.is_some()) << slot;
     }
 
     /// `slot`'s word, `None` where the draw resolved none.
     #[must_use]
     pub fn get(&self, slot: usize) -> Option<u32> {
-        let word = *self.words.get(slot)?;
+        let word = *self
+            .words
+            .get(slot / FORMATTED_HALF)?
+            .get(slot % FORMATTED_HALF)?;
         (self.resolved >> slot & 1 == 1).then_some(word)
     }
 
     /// Every slot's word in order, `None` where the draw resolved none.
     pub fn slots(&self) -> impl Iterator<Item = Option<u32>> + '_ {
-        (0..self.words.len()).map(|slot| self.get(slot))
+        (0..FORMATTED_SLOTS).map(|slot| self.get(slot))
     }
 }
 
@@ -2303,7 +2312,8 @@ pub struct Wavefront<'a> {
     /// program only stores to, set where a store lands, so the host writes back what the program
     /// stored and never reads such a buffer.
     write_mask: Option<buffer::DrawBufferArray>,
-    /// The slots of the buffers the program only stores to, which [`Self::write_mask`] marks.
+    /// The slots of the buffers the program only stores to - a pixel shader's, every one it stores
+    /// to - which [`Self::write_mask`] marks.
     unread_slots: std::collections::BTreeSet<u32>,
     /// The store that kept the program's buffers from being traced, by offset and name.
     untraced_by: Option<(u32, String)>,
@@ -2820,7 +2830,11 @@ fn declare_draw_buffers(
         // An indexed primitive shader reads its index buffer through them (D740).
         _ if buffers.served.is_empty() && !indexed => return None,
         Stage::Mesh => (orbistoun_spirv::GEOMETRY_BUFFERS_BINDING, false),
-        Stage::Fragment => (orbistoun_spirv::PIXEL_BUFFERS_BINDING, false),
+        // A pixel shader that stores through them has them written back after its draw.
+        Stage::Fragment => (
+            orbistoun_spirv::PIXEL_BUFFERS_BINDING,
+            !buffers.stored.is_empty(),
+        ),
         // A dispatch stores through its buffers, which are written back (D746).
         Stage::Compute => (orbistoun_spirv::COMPUTE_BUFFERS_BINDING, true),
     };
@@ -3084,13 +3098,17 @@ impl<'a> Wavefront<'a> {
             &user_data,
         );
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
-        let write_mask = (stage == Stage::Compute && draw_buffers.is_some()).then(|| {
-            buffer::declare_draw_buffers(
-                &mut b,
-                u32_type,
-                (orbistoun_spirv::COMPUTE_WRITTEN_BINDING, true),
-            )
-        });
+        // A dispatch's write masks, and a pixel shader's that stores.
+        let written_binding = match stage {
+            Stage::Compute => Some(orbistoun_spirv::COMPUTE_WRITTEN_BINDING),
+            Stage::Fragment if !buffers.stored.is_empty() => {
+                Some(orbistoun_spirv::PIXEL_WRITTEN_BINDING)
+            }
+            _ => None,
+        };
+        let write_mask = written_binding
+            .filter(|_| draw_buffers.is_some())
+            .map(|binding| buffer::declare_draw_buffers(&mut b, u32_type, (binding, true)));
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
@@ -3220,7 +3238,12 @@ impl<'a> Wavefront<'a> {
             push_block: None,
             draw_buffers,
             write_mask,
-            unread_slots: buffers.stored_only.clone(),
+            // A pixel shader's buffers are bound for many fragments, so every store is marked.
+            unread_slots: if stage == Stage::Fragment {
+                buffers.stored.clone()
+            } else {
+                buffers.stored_only.clone()
+            },
             untraced_by: buffers.untraced_by.clone(),
             global_share: None,
             scalar_copies: BTreeMap::new(),
@@ -7556,12 +7579,17 @@ pub fn draw_buffers_for(
         return Ok(crate::draw_buffers::DrawBuffers::default());
     }
     // A dispatch's buffers are bound writable and written back, so its stores are traced too
-    // (D746); a draw's are snapshots.
-    let buffers = crate::draw_buffers::trace(
+    // (D746), and a pixel shader's, written back after its draw; a primitive shader's are
+    // snapshots.
+    let buffers = crate::draw_buffers::trace_with(
         decode,
         encodings,
         (user_data.first_register, user_data.count),
-        (stage == Stage::Compute, stage == Stage::Mesh),
+        (
+            matches!(stage, Stage::Compute | Stage::Fragment),
+            stage == Stage::Mesh,
+            stage == Stage::Compute,
+        ),
     );
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
         return Err(TranslateError::TooManyBuffers {
@@ -8472,5 +8500,23 @@ mod capture_tests {
         let stores = |module: &[u32]| module.iter().filter(|&&w| w == (3 << 16) | 0x3e).count();
         let (without, with) = (translate(false), translate(true));
         assert!(stores(&with) > stores(&without), "the capture's stores");
+    }
+}
+
+#[cfg(test)]
+mod buffer_format_tests {
+    /// Every slot a stage binds keeps its format: Grand Theft Auto V's fetch shader converts
+    /// through slot 36.
+    #[test]
+    fn a_format_past_the_thirty_second_slot_is_kept() {
+        let mut formats = super::BufferFormats::default();
+        formats.set(36, Some(0x2f33_cfac));
+        formats.set(63, Some(7));
+        formats.set(2, None);
+        assert_eq!(formats.get(36), Some(0x2f33_cfac));
+        assert_eq!(formats.get(63), Some(7));
+        assert_eq!(formats.get(2), None);
+        assert_eq!(formats.get(64), None, "past a stage's slots");
+        assert_eq!(formats.slots().flatten().count(), 2);
     }
 }
