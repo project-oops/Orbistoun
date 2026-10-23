@@ -25,6 +25,8 @@ use crate::registers::decode_buffer_descriptor;
 /// Why a draw buffer could not be bound: a fixed reason, or one naming what the program did.
 type Refusal = std::borrow::Cow<'static, str>;
 
+mod resolved;
+
 /// The bytes from a descriptor's base every read the program makes through it can reach, as the
 /// descriptor's bounds rules admit them, or why nothing bounds them.
 ///
@@ -1322,7 +1324,7 @@ fn resolve_draw_range(
 }
 
 /// The last vertex id and instance id a non-indexed draw's vertex lanes hold (D879).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DrawIds {
     vertex: u32,
     instance: u32,
@@ -1629,6 +1631,9 @@ pub fn bind_draw_buffers(
     let mut bound: [Option<Vec<(u64, usize, u64)>>; 2] = [None, None];
     // Ranges read this submission: guest memory does not change while it is prepared.
     let mut read: BTreeMap<(u64, u64), Result<DrawBuffer, Refusal>> = BTreeMap::new();
+    // And for the same reason, each descriptor's range is resolved once for the words it is formed
+    // from, not once a draw.
+    let mut resolved = resolved::Resolved::default();
     let mut out = Vec::with_capacity(commands.len());
     for command in commands.drain(..) {
         match &command {
@@ -1671,7 +1676,8 @@ pub fn bind_draw_buffers(
                     let ranges = list
                         .iter()
                         .map(|source| {
-                            resolve_draw_range(source, (&words[at], vertices, &system), ids, memory)
+                            resolved
+                                .range(source, (&words[at], vertices, &system), ids, memory)
                                 .map(Some)
                         })
                         .chain(indices.map(|found| {
