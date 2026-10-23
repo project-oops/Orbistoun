@@ -439,14 +439,34 @@ pub fn summarise() {
     tracing::info!("{}", lines.join("\n"));
 }
 
-/// The register snapshot an execute breakpoint captured, as lines, or nothing if none fired.
+/// One line per execute breakpoint, `(address, hits)`, with its own count; one that never fired
+/// says so - a run where none fired still names each, since code never reached is the finding.
+fn slot_lines(slots: &[(u64, u64)]) -> Vec<String> {
+    slots
+        .iter()
+        .filter(|(at, _)| *at != 0)
+        .map(|&(at, hits)| match hits {
+            0 => format!("  execute breakpoint at {}: never hit", located(at)),
+            n => format!("  execute breakpoint at {} hit {n} time(s)", located(at)),
+        })
+        .collect()
+}
+
+/// The execute breakpoints' counts and the register snapshot the first to fire captured, as
+/// lines; nothing when no execute breakpoint was armed.
 ///
 /// The state a function was entered with, so a value the guest computed and passed is read off
 /// the arguments (D458).
 fn execute_snapshot() -> Vec<String> {
+    let slots: Vec<(u64, u64)> = EXEC_SLOT_AT
+        .iter()
+        .zip(&EXEC_SLOT_HITS)
+        .map(|(at, hits)| (at.load(Ordering::Relaxed), hits.load(Ordering::Relaxed)))
+        .collect();
+    let mut lines = slot_lines(&slots);
     let rip = EXEC_RIP.load(Ordering::Relaxed);
     if rip == 0 {
-        return Vec::new();
+        return lines;
     }
     let registers = Registers {
         rax: EXEC_REGS[0].load(Ordering::Relaxed),
@@ -466,18 +486,6 @@ fn execute_snapshot() -> Vec<String> {
         r14: EXEC_REGS[14].load(Ordering::Relaxed),
         r15: EXEC_REGS[15].load(Ordering::Relaxed),
     };
-    // One line per execute breakpoint, with its own count; one that never fired says so.
-    let mut lines: Vec<String> = EXEC_SLOT_AT
-        .iter()
-        .zip(&EXEC_SLOT_HITS)
-        .filter_map(|(at, hits)| {
-            let at = at.load(Ordering::Relaxed);
-            (at != 0).then(|| match hits.load(Ordering::Relaxed) {
-                0 => format!("  execute breakpoint at {}: never hit", located(at)),
-                n => format!("  execute breakpoint at {} hit {n} time(s)", located(at)),
-            })
-        })
-        .collect();
     lines.push(format!(
         "  registers at the first execute hit anywhere, {} (arguments in rdi, rsi, rdx, rcx, r8, r9):",
         located(rip.wrapping_sub(1))
@@ -1075,6 +1083,16 @@ mod tests {
         let lines = execute_snapshot().join("\n");
         assert!(lines.contains("0x400000000010") && lines.contains("hit 1 time(s)"));
         assert!(lines.contains("0x4000000000b2") && lines.contains("hit 2 time(s)"));
+    }
+
+    /// A run where no execute breakpoint fired still names each one as never hit: code never
+    /// reached is the finding (GTA V's ray-tracing query printed only a bare header).
+    #[test]
+    fn breakpoints_that_never_fired_are_each_named() {
+        let lines = super::slot_lines(&[(0x4000_0196_eef0, 0), (0, 0), (0x4000_0196_ef29, 3)]);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("0x40000196eef0") && lines[0].ends_with("never hit"));
+        assert!(lines[1].contains("0x40000196ef29") && lines[1].ends_with("hit 3 time(s)"));
     }
 
     /// An execute breakpoint encodes as R/W=00, LEN=00, the part of the control word a data
