@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 /// The guest's part of the address space: its image from `0x4000_0000_0000` and the memory it
 /// maps above, below where the host keeps its own image.
+#[cfg(windows)]
 const GUEST: (u64, u64) = (0x4000_0000_0000, 0x7f00_0000_0000);
 /// How many places one search reports.
 const MOST_HITS: usize = 64;
