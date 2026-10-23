@@ -3023,6 +3023,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-mem",
  "orbistoun-systemservice",
+ "orbistoun-thunk",
  "symphonia-bundle-mp3",
  "symphonia-core",
 ]

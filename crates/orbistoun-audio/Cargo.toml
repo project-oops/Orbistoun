@@ -17,5 +17,6 @@ orbistoun-core = { workspace = true }
 orbistoun-hle = { workspace = true }
 orbistoun-mem = { workspace = true }
 orbistoun-systemservice = { workspace = true }
+orbistoun-thunk = { workspace = true }
 symphonia-bundle-mp3 = { workspace = true }
 symphonia-core = { workspace = true }

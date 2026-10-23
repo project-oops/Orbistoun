@@ -95,6 +95,7 @@ returns = "status"
 edge_cases = [
     "MEASURED (070-user/oneshot-setup-calls, PPSA04263's shape: one 960-byte MPEG audio frame into a 9216-byte output on a 0x40-byte batch, and on a 0x1000-byte one): 0x0, a 56-byte job written into the batch buffer, the output untouched until the batch runs. A second job on the 0x40-byte batch faulted the process.",
     "orbistoun answers 0x0 for the first job on a batch it initialised, naming an instance some context holds, and does not write the job: not every field of it is named by the rows, and no title was seen to read it. A second job, a batch never initialised and an instance not held are unmeasured and answer the placeholder.",
+    "ASSUMED (guest-observed layout): PPSA04263 passes a seventh argument on the stack, a result block it reads after sceAjmBatchWait (image+0x2ad25b8 on): the word at +0 tested against 0x80000002, the bytes consumed at +8 added to its read cursor, the bytes written at +0xc, the samples at +0x10 added to its stream position. orbistoun writes 0, 0, the bytes of the whole frames decoded, the PCM bytes written and the samples per channel when the batch runs; without them every stream decodes its first frames again.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261015T1522Z-ai02, reports/hardware/20261015-164000-eboot.log lines 11337-11355."

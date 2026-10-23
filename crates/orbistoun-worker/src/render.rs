@@ -575,7 +575,12 @@ struct RunPerf {
     /// The windows by their frames' shape - draws a flip - each shape's milliseconds, flips and
     /// phases summed.
     shapes: std::collections::BTreeMap<u64, Stretch>,
+    /// The last [`TAIL_MS`] of windows, flipped or not, oldest first: milliseconds, flips, draws.
+    tail: std::collections::VecDeque<(f64, u64, u64)>,
 }
+
+/// How much of the run's end [`RunPerf::describe_tail`] covers: a minute of windows.
+const TAIL_MS: f64 = 60_000.0;
 
 /// Windows summed: their milliseconds, flips and each phase's milliseconds.
 type Stretch = (f64, u64, Vec<(String, f64)>);
@@ -596,6 +601,11 @@ fn add_phases(into: &mut Vec<(String, f64)>, phases: &[(String, f64)]) {
 impl RunPerf {
     /// Adds a window, when it flipped: a window with no flip is not part of any frame's time.
     fn add(&mut self, report: &orbistoun_proto::PerfReport) {
+        self.tail
+            .push_back((report.window_ms, report.flips, report.draws));
+        while self.tail.iter().map(|w| w.0).sum::<f64>() > TAIL_MS && self.tail.len() > 1 {
+            self.tail.pop_front();
+        }
         if report.flips == 0 {
             return;
         }
@@ -619,6 +629,30 @@ impl RunPerf {
             (self.window_ms, self.flips),
             &self.phases,
         )
+    }
+
+    /// The run's end, every window counted, flipped or not: how many flips its last minute made,
+    /// how long each took and how many draws each held. The per-flip lines leave out windows that
+    /// did not flip, so a phase drawing one heavy frame every few seconds - GTA V in its world at
+    /// about one every 8 s - is otherwise missing from the report. `None` before any window.
+    #[allow(clippy::cast_precision_loss)] // a minute's flips and draws are far below 2^52
+    fn describe_tail(&self) -> Option<String> {
+        let ms: f64 = self.tail.iter().map(|w| w.0).sum();
+        if ms <= 0.0 {
+            return None;
+        }
+        let flips: u64 = self.tail.iter().map(|w| w.1).sum();
+        let draws: u64 = self.tail.iter().map(|w| w.2).sum();
+        let seconds = ms / 1000.0;
+        Some(if flips == 0 {
+            format!("the run's last {seconds:.0} s: no flip, {draws} draw(s)")
+        } else {
+            format!(
+                "the run's last {seconds:.0} s: {flips} flip(s), {:.2} s each, {} draws a flip",
+                seconds / flips as f64,
+                draws / flips
+            )
+        })
     }
 
     /// The same for each frame shape - windows of the same draws a flip - of the
@@ -2091,7 +2125,12 @@ fn log_flip_origins() {
         tracing::info!("{line}");
     }
     if let Ok(run) = run_perf().lock() {
-        for line in run.describe().into_iter().chain(run.describe_shapes()) {
+        for line in run
+            .describe_tail()
+            .into_iter()
+            .chain(run.describe())
+            .chain(run.describe_shapes())
+        {
             tracing::info!("{line}");
         }
     }
@@ -3295,6 +3334,32 @@ mod tests {
             ))
         );
         assert_eq!(super::RunPerf::default().describe(), None);
+    }
+
+    /// The run's end counts every window of its last minute, flipped or not, so a phase that
+    /// flips once in several windows still shows how long its frames take.
+    #[test]
+    fn the_run_s_end_counts_windows_that_did_not_flip() {
+        let mut run = super::RunPerf::default();
+        let window = |flips: u64, draws: u64| orbistoun_proto::PerfReport {
+            window_ms: 1000.0,
+            flips,
+            submissions: flips,
+            draws,
+            phases: Vec::new(),
+            spans: Vec::new(),
+        };
+        assert_eq!(run.describe_tail(), None);
+        for _ in 0..100 {
+            run.add(&window(30, 30));
+        }
+        for second in 0..64 {
+            run.add(&window(u64::from(second % 8 == 0), 3000));
+        }
+        assert_eq!(
+            run.describe_tail().as_deref(),
+            Some("the run's last 60 s: 7 flip(s), 8.57 s each, 25714 draws a flip")
+        );
     }
 
     /// Windows are grouped by their frames' shape - draws a flip - and the shapes with the most

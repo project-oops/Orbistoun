@@ -104,6 +104,8 @@ struct Job {
     input: (u64, u64),
     /// Where the decoded samples go.
     output: (u64, u64),
+    /// Where the job's result goes - the seventh argument, from the stack - or 0 for none.
+    sideband: u64,
 }
 
 /// The smallest batch buffer measured: PPSA04263's 0x40 bytes, which holds one job (REQ-ai02).
@@ -349,8 +351,47 @@ pub(crate) fn ajm_batch_job_decode(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         instance: args[1] as u32,
         input: (args[2], args[3]),
         output: (args[4], args[5]),
+        sideband: seventh_argument(),
     };
     with_registry(|r, _| r.job_decode(buffer, job))
+}
+
+/// The seventh argument of the call in progress, from the guest's stack, or 0 when the dispatch
+/// published no stack area (a direct call, as in a test).
+fn seventh_argument() -> u64 {
+    let spilled = orbistoun_thunk::stack_arguments();
+    if spilled == 0 {
+        return 0;
+    }
+    // SAFETY: the dispatch published this as the words above the return address the guest's call
+    // pushed, on the calling thread's live stack.
+    unsafe { orbistoun_mem::guest::read_u64(spilled) }.unwrap_or_default()
+}
+
+/// A decode job's result as the title reads it back after `sceAjmBatchWait`: the result word and
+/// an internal one (0, 0), then the input bytes consumed, the output bytes written and the samples
+/// decoded per channel. PPSA04263 tests the result word against `0x80000002`, adds the bytes
+/// consumed to its read cursor and the samples to its stream position (`image+0x2ad25b8` on);
+/// without them each stream decodes its first frames again for as long as it plays. The layout
+/// is the title's reads, `assumed` for the fields it does not read.
+fn sideband(consumed: u32, written: u32, samples: u64) -> [u8; 24] {
+    let mut bytes = [0_u8; 24];
+    bytes[8..12].copy_from_slice(&consumed.to_le_bytes());
+    bytes[12..16].copy_from_slice(&written.to_le_bytes());
+    bytes[16..24].copy_from_slice(&samples.to_le_bytes());
+    bytes
+}
+
+/// What decoding a job's input made: the interleaved samples, how many channels they hold, and how
+/// many input bytes the whole frames decoded took.
+#[derive(Debug, PartialEq, Eq)]
+struct Decoded {
+    /// Interleaved 16-bit PCM.
+    samples: Vec<i16>,
+    /// Channels in each sample frame.
+    channels: usize,
+    /// Input bytes up to the end of the last frame read.
+    consumed: usize,
 }
 
 /// Layer III bitrates in kbit/s by header index, MPEG-1 then MPEG-2 and 2.5 (ISO/IEC 11172-3
@@ -413,10 +454,12 @@ fn new_decoder() -> Option<symphonia_bundle_mp3::MpaDecoder> {
 /// Decodes the Layer III frames in `input` with `decoder`, to interleaved 16-bit PCM, every frame
 /// in turn (D889); `None` if no frame decodes. A frame is found by its header and measured by
 /// [`frame_length`], and the bytes from one that does not parse to the next sync are skipped.
-fn decode_frames(decoder: &mut symphonia_bundle_mp3::MpaDecoder, input: &[u8]) -> Option<Vec<i16>> {
+fn decode_frames(decoder: &mut symphonia_bundle_mp3::MpaDecoder, input: &[u8]) -> Option<Decoded> {
     use symphonia_core::codecs::Decoder as _;
 
     let mut samples = Vec::new();
+    let mut channels = 1;
+    let mut consumed = 0;
     let mut at = 0;
     while let Some(header) = input.get(at..at + 4) {
         let length = frame_length([header[0], header[1], header[2], header[3]]);
@@ -425,16 +468,22 @@ fn decode_frames(decoder: &mut symphonia_bundle_mp3::MpaDecoder, input: &[u8]) -
             continue;
         };
         at += frame.len();
+        consumed = at;
         let packet = symphonia_core::formats::Packet::new_from_slice(0, 0, 0, frame);
         let Ok(pcm) = decoder.decode(&packet) else {
             continue;
         };
         let mut buffer =
             symphonia_core::audio::SampleBuffer::<i16>::new(pcm.capacity() as u64, *pcm.spec());
+        channels = pcm.spec().channels.count().max(1);
         buffer.copy_interleaved_ref(pcm);
         samples.extend_from_slice(buffer.samples());
     }
-    (!samples.is_empty()).then_some(samples)
+    (!samples.is_empty()).then_some(Decoded {
+        samples,
+        channels,
+        consumed,
+    })
 }
 
 /// Runs one decode job: reads its input from guest memory, decodes it, and writes as much of the
@@ -465,10 +514,11 @@ fn run_job(job: &Job) {
         };
         decode_frames(decoder, &input)
     };
-    let Some(samples) = samples else {
+    let Some(decoded) = samples else {
         return;
     };
-    let pcm: Vec<u8> = samples
+    let pcm: Vec<u8> = decoded
+        .samples
         .iter()
         .flat_map(|sample| sample.to_le_bytes())
         .take(output_size)
@@ -476,6 +526,17 @@ fn run_job(job: &Job) {
     // SAFETY: the guest's output, `output_size` bytes by the job's contract, and no more written;
     // through the checked accessor.
     let _ = unsafe { orbistoun_mem::guest::write_bytes(job.output.0, &pcm) };
+    if job.sideband != 0 {
+        let frame = 2 * decoded.channels;
+        let result = sideband(
+            u32::try_from(decoded.consumed).unwrap_or(u32::MAX),
+            u32::try_from(pcm.len()).unwrap_or(u32::MAX),
+            (pcm.len() / frame) as u64,
+        );
+        // SAFETY: the result block the title passed with the job; written through the checked
+        // accessor.
+        let _ = unsafe { orbistoun_mem::guest::write_bytes(job.sideband, &result) };
+    }
 }
 
 /// `sceAjmBatchStart(ctx, &batch, priority, 0, &out, ...)`: runs the batch's decode job to
@@ -574,6 +635,7 @@ mod tests {
             instance,
             input: (0x1_0000, 960),
             output: (0x2_0000, 9216),
+            sideband: 0,
         }
     }
 
@@ -589,14 +651,26 @@ mod tests {
             input.extend_from_slice(&frame);
         }
         let mut decoder = super::new_decoder().expect("a Layer III decoder");
-        let samples = super::decode_frames(&mut decoder, &input).expect("the frames decode");
-        assert_eq!(samples.len() * 2, 9216);
-        assert!(samples.iter().all(|&s| s == 0));
+        let frames = super::decode_frames(&mut decoder, &input).expect("the frames decode");
+        assert_eq!(frames.samples.len() * 2, 9216);
+        assert!(frames.samples.iter().all(|&s| s == 0));
+        assert_eq!((frames.channels, frames.consumed), (1, 960));
         assert_eq!(
             super::decode_frames(&mut decoder, &[0_u8; 960]),
             None,
             "no frame in it"
         );
+    }
+
+    /// A job's result says what it took and made, at the offsets PPSA04263 reads: the result word
+    /// 0, then bytes consumed at 8, bytes written at 12 and samples at 16.
+    #[test]
+    fn a_result_says_what_the_job_took_and_made() {
+        let bytes = super::sideband(960, 9216, 4608);
+        assert_eq!(bytes[..8], [0; 8]);
+        assert_eq!(bytes[8..12], 960_u32.to_le_bytes());
+        assert_eq!(bytes[12..16], 9216_u32.to_le_bytes());
+        assert_eq!(bytes[16..24], 4608_u64.to_le_bytes());
     }
 
     /// A frame's length comes from its header (ISO/IEC 11172-3 2.4.3.1, 13818-3 2.4.2.3): 144
