@@ -315,7 +315,7 @@ fn start_video(
         _ => Codec::H264,
     };
     // Opened here as well as on the thread, so a host with no decoder refuses at open.
-    drop(Decoder::open(codec)?);
+    Decoder::open(codec).map(|_decoder| ())?;
     let (sender, frames) = sync_channel(AHEAD);
     let thread = std::thread::Builder::new()
         .name("media video".to_owned())
@@ -393,7 +393,7 @@ fn start_audio(
     else {
         return Err(MediaError::NoAudioDecoder("this").into());
     };
-    drop(AacDecoder::open(channels, sample_rate, &config)?);
+    AacDecoder::open(channels, sample_rate, &config).map(|_decoder| ())?;
     let (sender, frames) = sync_channel(AHEAD);
     let thread = std::thread::Builder::new()
         .name("media audio".to_owned())

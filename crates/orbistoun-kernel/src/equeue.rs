@@ -1119,12 +1119,12 @@ mod tests {
     #[test]
     fn a_deleted_queue_leaves_its_waiter_waiting_and_refuses_after() {
         let queue = super::create_equeue("deleted");
-        let until =
-            Blocking::Until(std::time::Instant::now() + std::time::Duration::from_millis(200));
-        let waiter = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            (super::wait_events(queue, 1, until), start.elapsed())
-        });
+        // Timed from the instant the deadline was taken, not from when the thread began: a waiter
+        // started a moment later times out a moment sooner by its own clock.
+        let start = std::time::Instant::now();
+        let until = Blocking::Until(start + std::time::Duration::from_millis(200));
+        let waiter =
+            std::thread::spawn(move || (super::wait_events(queue, 1, until), start.elapsed()));
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(super::delete_equeue(queue));
         let (outcome, took) = waiter.join().expect("returns");

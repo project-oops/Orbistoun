@@ -126,7 +126,9 @@ std::arch::global_asm!(
 );
 
 unsafe extern "sysv64" {
-    /// The driver above.
+    /// The driver above. Named exactly as the assembly spells it (the `\u{1}` prefix): a Mach-O
+    /// host otherwise looks for `_orbistoun_rewrite_test_drive`, which the label does not define.
+    #[link_name = "\u{1}orbistoun_rewrite_test_drive"]
     fn orbistoun_rewrite_test_drive(state: *mut State);
 }
 
