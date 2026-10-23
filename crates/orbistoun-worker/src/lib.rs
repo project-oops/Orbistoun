@@ -24,6 +24,7 @@ pub mod fault;
 pub mod flip_origins;
 pub mod frame_region;
 mod media;
+mod memscan;
 pub mod page_guard;
 pub mod profile;
 pub mod render;
@@ -1873,6 +1874,8 @@ fn apply_memory_diagnostics(
         }
     }
 
+    hold_values(image, &experiments.hold);
+
     // Planted after relocation, so the loader cannot overwrite it, and before the entry jump, so
     // the guest reads it. Refused outside a writable segment, where the write would fault inside
     // the emulator.
@@ -1903,6 +1906,82 @@ fn apply_memory_diagnostics(
             // A poke that landed nowhere would otherwise read as a run that changed nothing.
             tracing::warn!("{at:#x} is not inside a writable segment - nothing poked");
         }
+    }
+}
+
+/// Holds each value the run asked for (`ORBISTOUN_HOLD`) from entry for the whole run: a value the
+/// guest sets again (a static initialiser, a per-frame store) is written back every few
+/// milliseconds, so the run shows what the value causes. In the image only inside a writable
+/// segment, as a poke; elsewhere (an object the guest allocates) only once a span the run publishes
+/// covers it, asked on every write.
+fn hold_values(image: &Image, holds: &[experiment::Hold]) {
+    let held: Vec<experiment::Hold> = holds
+        .iter()
+        .copied()
+        .filter(|&experiment::Hold { at, width, .. }| {
+            let end = at.saturating_add(u64::from(width));
+            let in_image = image
+                .segments()
+                .iter()
+                .find(|s| at >= s.address && at < s.address.saturating_add(s.memsz()));
+            let allowed = in_image
+                .is_none_or(|s| s.protection().write && end <= s.address.saturating_add(s.memsz()));
+            if !allowed {
+                tracing::warn!("{at:#x} is in a read-only image segment - not held");
+            }
+            allowed
+        })
+        .collect();
+    if !held.is_empty() {
+        tracing::info!("holding {} value(s) for the run", held.len());
+        let _ = std::thread::Builder::new()
+            .name("orbistoun-hold".to_owned())
+            .spawn(move || {
+                loop {
+                    for &experiment::Hold {
+                        at,
+                        value,
+                        width,
+                        guard,
+                    } in &held
+                    {
+                        let Ok(address) = usize::try_from(at) else {
+                            continue;
+                        };
+                        // Only while the guard word holds what it should: the object is there.
+                        if let Some((guard_at, expected)) = guard {
+                            if !orbistoun_thunk::readable_span(guard_at, 8) {
+                                continue;
+                            }
+                            // SAFETY: the span check just now found the eight bytes mapped for
+                            // the guest.
+                            let word = unsafe { orbistoun_mem::guest::read_u64(guard_at) };
+                            if word != Some(expected) {
+                                continue;
+                            }
+                        }
+                        // Not yet mapped (an allocation still to come), or let go: skipped
+                        // until a span covers it.
+                        if !orbistoun_thunk::readable_span(at, u64::from(width)) {
+                            continue;
+                        }
+                        let bytes = value.to_le_bytes();
+                        let width = usize::from(width);
+                        // SAFETY: the filter above refused read-only image text, and the span check
+                        // just now found `width` bytes from `at` in memory this run mapped for the
+                        // guest; a diagnostic store racing the guest's own is the intervention
+                        // asked for.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                bytes.as_ptr(),
+                                std::ptr::with_exposed_provenance_mut::<u8>(address),
+                                width,
+                            );
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
     }
 }
 

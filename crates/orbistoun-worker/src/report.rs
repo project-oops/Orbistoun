@@ -1943,7 +1943,7 @@ mod imp {
                 }
                 CONTINUE_EXECUTION
             }
-            crate::watchpoint::Trap::Execute { disarm } => {
+            crate::watchpoint::Trap::Execute { disarm, resume } => {
                 // An execute breakpoint is one-shot: clearing its enable bit lets the instruction
                 // run now instead of trapping again.
                 // SAFETY: the OS's context, live for this call; a field it owns.
@@ -1953,6 +1953,14 @@ mod imp {
                 // SAFETY: as above; clears the enable bits of the fired execute slots.
                 unsafe {
                     (*context).Dr7 &= !disarm;
+                }
+                if resume {
+                    // A trace stays armed: the resume flag (EFLAGS bit 16) lets the instruction
+                    // run once without re-trapping, and the processor clears it after.
+                    // SAFETY: as above; a field the context owns.
+                    unsafe {
+                        (*context).EFlags |= 0x1_0000;
+                    }
                 }
                 CONTINUE_EXECUTION
             }
@@ -2384,6 +2392,8 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         }
         tracing::info!("{said}");
     }
+    // What the run asked to find or keep of guest memory, read before the process goes.
+    crate::memscan::report();
 
     let mut counts: Vec<(usize, u64)> = orbistoun_thunk::call_counts()
         .into_iter()

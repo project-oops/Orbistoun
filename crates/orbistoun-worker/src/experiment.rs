@@ -80,6 +80,9 @@ pub struct Experiments {
     /// The absolute-address counterpart to [`Self::write`], reaching anything the loader mapped,
     /// including static objects. Applied after relocation and before the entry jump.
     pub poke: Option<(u64, u64)>,
+    /// Values rewritten at guest addresses for as long as the guest runs: whether a value the
+    /// guest keeps setting is the cause, answered in one run.
+    pub hold: Vec<Hold>,
     /// A region of guest memory to snapshot before the run and diff afterwards.
     ///
     /// The cheapest way to ask what the guest initialised; see [`crate::watch`].
@@ -119,6 +122,7 @@ impl Experiments {
             bss_fill: byte(&orbistoun_env::BSS_FILL.get().unwrap_or_default()),
             map: parse_region(&orbistoun_env::MAP.get().unwrap_or_default()),
             poke: parse_pair(&orbistoun_env::POKE.get().unwrap_or_default()),
+            hold: parse_holds(&orbistoun_env::HOLD.get().unwrap_or_default()),
             watch: parse_region(&orbistoun_env::WATCH.get().unwrap_or_default()),
             watchpoint: orbistoun_env::WATCHPOINT.get().unwrap_or_default(),
             mark_query: truthy(&orbistoun_env::MARK_QUERY.get().unwrap_or_default()),
@@ -185,6 +189,12 @@ impl Experiments {
         if let Some((base, len)) = self.map {
             parts.push(format!("{base:#x}+{len:#x} reserved"));
         }
+        for hold in &self.hold {
+            parts.push(format!(
+                "{:#x} held at {:#x} ({} byte(s))",
+                hold.value, hold.at, hold.width
+            ));
+        }
         if let Some((at, value)) = self.poke {
             parts.push(format!("{value:#x} poked into {at:#x}"));
         }
@@ -250,6 +260,47 @@ fn parse_pair(raw: &str) -> Option<(u64, u64)> {
     }
     let (at, value) = raw.split_once(':')?;
     Some((number(at.trim())?, number(value.trim())?))
+}
+
+/// One value held at a guest address for the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hold {
+    /// Where it is written.
+    pub at: u64,
+    /// What is written, little-endian, its low `width` bytes.
+    pub value: u64,
+    /// How many bytes: 1, 2, 4 or 8.
+    pub width: u8,
+    /// Written only while the 8-byte word at this address holds this value: an object the guest
+    /// allocates later is held only once it is there (its vtable), not the memory before it.
+    pub guard: Option<(u64, u64)>,
+}
+
+/// `<addr>:<value>[/<width>][?<guard-addr>=<guard-value>]`, comma-separated; a width other than
+/// 1, 2, 4 or 8, or a malformed entry, drops that entry.
+fn parse_holds(raw: &str) -> Vec<Hold> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let (entry, guard) = match entry.split_once('?') {
+                Some((entry, guard)) => {
+                    let (at, value) = guard.split_once('=')?;
+                    (entry, Some((number(at.trim())?, number(value.trim())?)))
+                }
+                None => (entry, None),
+            };
+            let (pair, width) = entry.split_once('/').unwrap_or((entry, "8"));
+            let (at, value) = parse_pair(pair)?;
+            let width = u8::try_from(number(width.trim())?).ok()?;
+            matches!(width, 1 | 2 | 4 | 8).then_some(Hold {
+                at,
+                value,
+                width,
+                guard,
+            })
+        })
+        .collect()
 }
 
 /// `<addr>` or `<addr>+<len>`, refused outright when it is neither.
@@ -366,7 +417,39 @@ fn any_intervenes(active: &[(&'static orbistoun_env::Var, String)]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Experiments, Target, byte, parse_returns, parse_write, targets, truthy};
+    use super::{
+        Experiments, Hold, Target, byte, parse_holds, parse_returns, parse_write, targets, truthy,
+    };
+
+    /// A held value names its width, eight bytes when it does not; a width no store has is
+    /// dropped rather than guessed.
+    #[test]
+    fn a_held_value_carries_its_width() {
+        let hold = |at, value, width, guard| Hold {
+            at,
+            value,
+            width,
+            guard,
+        };
+        assert_eq!(
+            parse_holds("0x40000416c528:0/1, 0x4000:0x11"),
+            vec![
+                hold(0x4000_0416_c528, 0, 1, None),
+                hold(0x4000, 0x11, 8, None)
+            ]
+        );
+        assert!(parse_holds("0x4000:1/3").is_empty());
+        // Held only while the object's first word is its vtable.
+        assert_eq!(
+            parse_holds("0x7400e73:1/1?0x7400a00=0x400003b9b180"),
+            vec![hold(
+                0x0740_0e73,
+                1,
+                1,
+                Some((0x0740_0a00, 0x4000_03b9_b180))
+            )]
+        );
+    }
 
     /// A library-qualified label can be asked for in a plant and a forced return.
     #[test]

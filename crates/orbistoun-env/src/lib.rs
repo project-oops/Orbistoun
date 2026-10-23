@@ -809,6 +809,36 @@ pub const POKE: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Keep values written at guest addresses for the whole run.
+pub const HOLD: Var = Var {
+    name: "ORBISTOUN_HOLD",
+    kind: Kind::Diagnostic,
+    summary: "rewrite <addr>:<value>[/<width>] (width 1, 2, 4 or 8 bytes, default 8), comma-separated, every few milliseconds while the guest runs - is this value the cause? One run instead of tracing back",
+    example: "0x40000416c528:0/1",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
+
+/// Search the guest's memory for text when the run ends.
+pub const FIND: Var = Var {
+    name: "ORBISTOUN_FIND",
+    kind: Kind::Diagnostic,
+    summary: "text to search the guest's readable memory for when the run ends, comma-separated: where a title's decrypted tables or loaded scripts landed",
+    example: "prologue1,7FPR",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
+/// Save regions of guest memory to files when the run ends.
+pub const SAVE: Var = Var {
+    name: "ORBISTOUN_SAVE",
+    kind: Kind::Diagnostic,
+    summary: "<addr>+<len>, comma-separated: written to mem-<addr>.bin in ORBISTOUN_FRAME_DIR when the run ends, for reading what a title built or decrypted offline",
+    example: "0x740021550000+0x10000",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
 /// Snapshot a region of guest memory and report what changed.
 pub const WATCH: Var = Var {
     name: "ORBISTOUN_WATCH",
@@ -897,6 +927,9 @@ pub const REGISTRY: &[Var] = &[
     WATCH,
     WATCHPOINT,
     POKE,
+    HOLD,
+    FIND,
+    SAVE,
     TAG_PLACEHOLDERS,
     MAP,
     MAP_SHAPE,
@@ -993,6 +1026,9 @@ mod tests {
         super::FINDINGS,
         super::WATCH,
         super::POKE,
+        super::HOLD,
+        super::FIND,
+        super::SAVE,
         super::TAG_PLACEHOLDERS,
         super::MAP,
         super::MAP_SHAPE,

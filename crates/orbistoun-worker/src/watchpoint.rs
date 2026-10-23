@@ -38,6 +38,11 @@ pub enum Kind {
     /// entered with (D458). It is one-shot: the first hit snapshots the registers and disarms, so
     /// the instruction runs and the guest carries on with no re-trap.
     Execute,
+    /// Execution reaching an address, every time: the breakpoint stays armed (the guest resumes
+    /// with the resume flag, which lets the instruction run once without re-trapping) and each hit
+    /// tallies the value of one register, by its index in [`Registers`] order. At a script VM's
+    /// native call that register holds the handler, so the tally is what the script called.
+    Trace(u8),
 }
 
 impl Kind {
@@ -48,7 +53,7 @@ impl Kind {
     const fn bits(self) -> u64 {
         match self {
             // Execute is `0b00`: a break on an instruction fetch at the address.
-            Self::Execute => 0b00,
+            Self::Execute | Self::Trace(_) => 0b00,
             Self::Write => 0b01,
             Self::Access => 0b11,
         }
@@ -60,6 +65,7 @@ impl Kind {
             Self::Write => "write",
             Self::Access => "read-or-write",
             Self::Execute => "execute",
+            Self::Trace(_) => "trace",
         }
     }
 
@@ -69,7 +75,11 @@ impl Kind {
             "w" | "write" => Some(Self::Write),
             "rw" | "access" => Some(Self::Access),
             "x" | "execute" => Some(Self::Execute),
-            _ => None,
+            _ => {
+                let register = raw.strip_prefix("trace@")?;
+                let index = REGISTER_NAMES.iter().position(|name| *name == register)?;
+                Some(Self::Trace(u8::try_from(index).ok()?))
+            }
         }
     }
 }
@@ -143,7 +153,11 @@ pub fn parse(raw: &str) -> Result<Vec<Request>, Error> {
         };
         // An execute breakpoint watches an instruction fetch, which the hardware encodes as LEN=00
         // whatever the instruction's length, so the length is forced to one.
-        let length = if kind == Kind::Execute { 1 } else { length };
+        let length = if matches!(kind, Kind::Execute | Kind::Trace(_)) {
+            1
+        } else {
+            length
+        };
         let request = Request {
             address: number(address)?,
             length,
@@ -186,6 +200,69 @@ static ARMED_EXECUTE: [AtomicU64; MAX_WATCHPOINTS] = [const { AtomicU64::new(0) 
 static EXEC_RIP: AtomicU64 = AtomicU64::new(0);
 /// The sixteen registers captured at that first hit, in [`Registers`] field order.
 static EXEC_REGS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+/// The register names, in [`Registers`] order: what `trace@<name>` tallies.
+const REGISTER_NAMES: [&str; 16] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+/// Which register each trace slot tallies, by [`REGISTER_NAMES`] index.
+static TRACE_REGISTER: [AtomicU64; MAX_WATCHPOINTS] =
+    [const { AtomicU64::new(0) }; MAX_WATCHPOINTS];
+/// How many distinct values the trace tally keeps; further ones are counted as overflow.
+const TRACE_VALUES: usize = 4096;
+/// The tallied values, `slot + 1` in [`TRACE_SLOT`] (zero free), each with its count: filled by
+/// linear probing from the exception handler, allocation-free.
+static TRACE_VALUE: [AtomicU64; TRACE_VALUES] = [const { AtomicU64::new(0) }; TRACE_VALUES];
+static TRACE_SLOT: [AtomicU64; TRACE_VALUES] = [const { AtomicU64::new(0) }; TRACE_VALUES];
+static TRACE_COUNT: [AtomicU64; TRACE_VALUES] = [const { AtomicU64::new(0) }; TRACE_VALUES];
+/// Hits whose value found no free entry.
+static TRACE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Tallies `value` for trace slot `slot`.
+fn tally(slot: usize, value: u64) {
+    use Ordering::Relaxed;
+    let tag = slot as u64 + 1;
+    let start = (value.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize % TRACE_VALUES;
+    for probe in 0..TRACE_VALUES {
+        let index = (start + probe) % TRACE_VALUES;
+        let owner = TRACE_SLOT[index].load(Relaxed);
+        if owner == tag && TRACE_VALUE[index].load(Relaxed) == value {
+            TRACE_COUNT[index].fetch_add(1, Relaxed);
+            return;
+        }
+        if owner == 0
+            && TRACE_SLOT[index]
+                .compare_exchange(0, tag, Relaxed, Relaxed)
+                .is_ok()
+        {
+            TRACE_VALUE[index].store(value, Relaxed);
+            TRACE_COUNT[index].fetch_add(1, Relaxed);
+            return;
+        }
+    }
+    TRACE_OVERFLOW.fetch_add(1, Relaxed);
+}
+
+/// What a trace slot tallied, most frequent first: `(value, count)`.
+fn tallied(slot: usize) -> Vec<(u64, u64)> {
+    let tag = slot as u64 + 1;
+    let mut values: Vec<(u64, u64)> = (0..TRACE_VALUES)
+        .filter(|&index| TRACE_SLOT[index].load(Ordering::Relaxed) == tag)
+        .map(|index| {
+            (
+                TRACE_VALUE[index].load(Ordering::Relaxed),
+                TRACE_COUNT[index].load(Ordering::Relaxed),
+            )
+        })
+        .collect();
+    values.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    values
+}
+
+/// The first eight words on the stack at that first hit: at a function's entry, `[rsp]` is the
+/// return address, which names the caller an indirect call (a script VM's native dispatch, a
+/// virtual call) hides from the static caller scan.
+static EXEC_STACK: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// How many times any execute breakpoint fired, which tells a function called once from a hot
 /// one.
 static EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -231,6 +308,18 @@ fn note_execute(rip: u64, registers: &Registers) {
         for (slot, value) in all.iter().enumerate() {
             EXEC_REGS[slot].store(*value, Relaxed);
         }
+        // No stack lives in the first 64 KiB, which the host never maps; a breakpoint attributed
+        // without a real thread behind it (a test) has none to read.
+        let stacked = registers.rsp >= 0x1_0000;
+        for (slot, word) in EXEC_STACK.iter().enumerate().filter(|_| stacked) {
+            let at = registers.rsp + slot as u64 * 8;
+            // SAFETY: the guest is executing with this stack pointer, so the words just above it
+            // are its mapped stack; a refused address reads as none and stores nothing.
+            let read = unsafe { orbistoun_mem::guest::read_u64(at) };
+            if let Some(value) = read {
+                word.store(value, Relaxed);
+            }
+        }
     }
 }
 
@@ -239,8 +328,16 @@ fn remember(requests: &[Request]) {
     for (slot, request) in requests.iter().enumerate().take(MAX_WATCHPOINTS) {
         ARMED_ADDRESS[slot].store(request.address, Ordering::Relaxed);
         ARMED_LENGTH[slot].store(request.length, Ordering::Relaxed);
-        ARMED_EXECUTE[slot].store(u64::from(request.kind == Kind::Execute), Ordering::Relaxed);
-        if request.kind == Kind::Execute {
+        let execute = match request.kind {
+            Kind::Execute => 1,
+            Kind::Trace(register) => {
+                TRACE_REGISTER[slot].store(u64::from(register), Ordering::Relaxed);
+                2
+            }
+            Kind::Write | Kind::Access => 0,
+        };
+        ARMED_EXECUTE[slot].store(execute, Ordering::Relaxed);
+        if execute != 0 {
             EXEC_SLOT_AT[slot].store(request.address, Ordering::Relaxed);
         }
     }
@@ -351,7 +448,7 @@ pub fn hits() -> Vec<Hit> {
     for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
         let address = armed_at.load(Ordering::Relaxed);
         // Execute slots report through `execute_snapshot`, with their own counts.
-        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
+        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) != 0 {
             continue;
         }
         let tag = slot as u64 + 1;
@@ -376,7 +473,7 @@ pub fn sites() -> Vec<String> {
     let all = hits();
     for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
         let address = armed_at.load(Ordering::Relaxed);
-        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
+        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) != 0 {
             continue;
         }
         let mut any = false;
@@ -464,6 +561,29 @@ fn execute_snapshot() -> Vec<String> {
         .map(|(at, hits)| (at.load(Ordering::Relaxed), hits.load(Ordering::Relaxed)))
         .collect();
     let mut lines = slot_lines(&slots);
+    // What each trace slot tallied, most frequent first.
+    for (slot, _) in slots.iter().enumerate() {
+        if ARMED_EXECUTE[slot].load(Ordering::Relaxed) != 2 {
+            continue;
+        }
+        let name = REGISTER_NAMES[TRACE_REGISTER[slot].load(Ordering::Relaxed) as usize % 16];
+        let values = tallied(slot);
+        lines.push(format!(
+            "  traced {name}: {} distinct value(s)",
+            values.len()
+        ));
+        lines.extend(
+            values
+                .iter()
+                .map(|&(value, count)| format!("    {count:>8} x {}", located(value))),
+        );
+    }
+    let overflow = TRACE_OVERFLOW.load(Ordering::Relaxed);
+    if overflow != 0 {
+        lines.push(format!(
+            "  {overflow} traced hit(s) found no free tally entry"
+        ));
+    }
     let rip = EXEC_RIP.load(Ordering::Relaxed);
     if rip == 0 {
         return lines;
@@ -495,6 +615,15 @@ fn execute_snapshot() -> Vec<String> {
             .lines()
             .into_iter()
             .map(|line| format!("  {line}")),
+    );
+    lines.push(
+        "  the stack at that hit, from rsp (the first is the return address at an entry):"
+            .to_owned(),
+    );
+    lines.extend(
+        EXEC_STACK
+            .iter()
+            .map(|word| format!("    {}", located(word.load(Ordering::Relaxed)))),
     );
     lines
 }
@@ -623,6 +752,9 @@ pub enum Trap {
     Execute {
         /// The bits to clear in `Dr7`: the `L` enable bit of each fired execute slot.
         disarm: u64,
+        /// Whether a trace slot fired: the handler resumes with the resume flag set, so the
+        /// instruction runs once untrapped and the breakpoint stays armed for the next time.
+        resume: bool,
     },
 }
 
@@ -649,12 +781,12 @@ pub fn note(debug_status: u64, after: u64, registers: &Registers) -> Trap {
     if REENTERED.swap(true, Ordering::Relaxed) {
         return Trap::Data;
     }
-    let (ours, disarm) = attribute(debug_status & FIRED, after, registers);
+    let (ours, disarm, resume) = attribute(debug_status & FIRED, after, registers);
     REENTERED.store(false, Ordering::Relaxed);
     if !ours {
         Trap::NotOurs
-    } else if disarm != 0 {
-        Trap::Execute { disarm }
+    } else if disarm != 0 || resume {
+        Trap::Execute { disarm, resume }
     } else {
         Trap::Data
     }
@@ -670,19 +802,31 @@ static OWNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::n
 /// writing the register back can fail halfway and leave watchpoints silently disarmed.
 static REENTERED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Charges one trap to the watchpoints that fired. Answers `(ours, disarm)`: whether any were
-/// ours, and the `Dr7` enable bits of the fired execute slots the handler must clear.
+/// Charges one trap to the watchpoints that fired. Answers `(ours, disarm, resume)`: whether any
+/// were ours, the `Dr7` enable bits of the fired execute slots the handler must clear, and whether
+/// a trace slot fired, which resumes with the resume flag instead of disarming.
 ///
 /// Split out so the re-entrancy flag in [`note`] is released in one place.
-fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
+fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64, bool) {
     if fired == 0 {
         UNATTRIBUTED.fetch_add(1, Ordering::Relaxed);
-        return (true, 0);
+        return (true, 0, false);
     }
     let mut ours = false;
     let mut disarm = 0;
+    let mut resume = false;
     for (slot, address) in ARMED_ADDRESS.iter().enumerate() {
         if fired >> slot & 1 == 0 {
+            continue;
+        }
+        if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 2 {
+            // Trace: counted and tallied every time, never disarmed.
+            ours = true;
+            resume = true;
+            EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
+            note_execute(after, registers);
+            let index = TRACE_REGISTER[slot].load(Ordering::Relaxed) as usize;
+            tally(slot, register_value(registers, index));
             continue;
         }
         if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
@@ -708,7 +852,29 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
             announce(slot, after);
         }
     }
-    (ours, disarm)
+    (ours, disarm, resume)
+}
+
+/// The value of the register at `index` in [`REGISTER_NAMES`] order.
+const fn register_value(registers: &Registers, index: usize) -> u64 {
+    match index {
+        0 => registers.rax,
+        1 => registers.rbx,
+        2 => registers.rcx,
+        3 => registers.rdx,
+        4 => registers.rsi,
+        5 => registers.rdi,
+        6 => registers.rbp,
+        7 => registers.rsp,
+        8 => registers.r8,
+        9 => registers.r9,
+        10 => registers.r10,
+        11 => registers.r11,
+        12 => registers.r12,
+        13 => registers.r13,
+        14 => registers.r14,
+        _ => registers.r15,
+    }
 }
 
 /// Says a new instruction touched a watched address, as it happens.
@@ -1069,20 +1235,32 @@ mod tests {
             hits.store(0, Ordering::Relaxed);
         }
         let registers = Registers::default();
-        assert_eq!(attribute(0b01, 0x4000_0000_0010, &registers), (true, 0b01));
         assert_eq!(
-            attribute(0b10, 0x4000_0000_00b2, &registers),
-            (true, 0b0100)
+            attribute(0b01, 0x4000_0000_0010, &registers),
+            (true, 0b01, false)
         );
         assert_eq!(
             attribute(0b10, 0x4000_0000_00b2, &registers),
-            (true, 0b0100)
+            (true, 0b0100, false)
+        );
+        assert_eq!(
+            attribute(0b10, 0x4000_0000_00b2, &registers),
+            (true, 0b0100, false)
         );
         assert_eq!(EXEC_SLOT_HITS[0].load(Ordering::Relaxed), 1);
         assert_eq!(EXEC_SLOT_HITS[1].load(Ordering::Relaxed), 2);
         let lines = execute_snapshot().join("\n");
         assert!(lines.contains("0x400000000010") && lines.contains("hit 1 time(s)"));
         assert!(lines.contains("0x4000000000b2") && lines.contains("hit 2 time(s)"));
+    }
+
+    /// A trace names the register it tallies, and arms as an execute breakpoint would.
+    #[test]
+    fn a_trace_names_its_register() {
+        let parsed = parse("0x4000016acfa0:trace@rax").expect("parses");
+        assert_eq!(parsed[0].kind, Kind::Trace(0));
+        assert_eq!(parsed[0].length, 1);
+        assert!(parse("0x4000:trace@rip").is_err());
     }
 
     /// A run where no execute breakpoint fired still names each one as never hit: code never
