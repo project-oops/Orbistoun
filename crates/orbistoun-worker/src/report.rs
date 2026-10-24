@@ -1798,6 +1798,15 @@ mod imp {
             return CONTINUE_EXECUTION;
         }
 
+        // The first touch of guest memory not yet committed commits it, as the console backs a
+        // mapping as it is used, and the access runs again ([`orbistoun_mem::lazy`]).
+        if code == ACCESS_VIOLATION
+            && count >= 2
+            && orbistoun_mem::lazy::commit_on_touch(parameters[1] as u64)
+        {
+            return CONTINUE_EXECUTION;
+        }
+
         // A read or write of a deferred copy's destination carries the copy out (D717): the command
         // processor's copy of a colour target was left waiting with its destination guarded, and
         // this is the first touch. The bytes are written, the pages made accessible, and the access
@@ -2084,6 +2093,8 @@ mod imp {
         // A write-watch guard's first write faults, and only this handler answers it (D824).
         if !registered.is_null() {
             orbistoun_mem::watch::guard_marked_ranges();
+            // And only this handler commits a page of guest memory on its first touch.
+            orbistoun_mem::lazy::commit_lazily();
         }
         !registered.is_null()
     }
@@ -3152,6 +3163,28 @@ fn on_budget_reached() {
     // Not "after N calls": the count is already the second half of that line.
     summarise_calls("when its call budget ran out", &trace);
     std::process::exit(CALL_BUDGET_EXIT);
+}
+
+/// Exit status for a run ended by the loss of the graphics device: the host's failure, not the
+/// guest's and not a limit.
+pub const DEVICE_LOST_EXIT: i32 = 0x0B10;
+
+/// Ends the run once the graphics device is lost, since every later submission fails and a run that
+/// carries on only adds refusals the loss already explains. Called on the thread that met the loss
+/// while it holds the device, so the trace is written from a thread of its own and nothing here
+/// touches the device: the last submission is not rendered.
+pub fn end_on_device_loss() {
+    let _ = std::thread::Builder::new()
+        .name("orbistoun-device-lost".to_owned())
+        .spawn(|| {
+            let module = MODULE.get().map_or("unknown", String::as_str);
+            note_ended_by(orbistoun_report::trace::LOST_THE_DEVICE);
+            what_the_guest_asked_for();
+            let trace = collect_calls(module, "Entered");
+            persist(&trace);
+            summarise_calls("when the graphics device was lost", &trace);
+            std::process::exit(DEVICE_LOST_EXIT);
+        });
 }
 
 /// How many imports [`inside_line`] names.

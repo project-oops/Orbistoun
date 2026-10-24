@@ -6,12 +6,13 @@
 //! [`VulkanBackend`], presents flipped frames, and at the end of a run drives the last
 //! submission. Where no device is present it says so and the run still reports its reach.
 
-use crate::device_thread::on_device;
+use crate::device_thread::{self, on_device};
 use crate::frame_region::write_frame;
 use orbistoun_gpu::agc_driver::Before;
 use orbistoun_gpu::drive;
 use orbistoun_gpu::perf;
 use orbistoun_gpu::pipeline::Submission;
+use orbistoun_gpu::tally::Tallied;
 use orbistoun_gpu_vulkan::VulkanBackend;
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::Pixels;
@@ -270,6 +271,8 @@ pub fn any_frame_drawn() -> bool {
 pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     perf::count(perf::Count::Flips);
+    FLIPS.fetch_add(1, Ordering::Relaxed);
+    crate::watchpoint::flipped();
     // The user's mods' cheats, written at each flip (D836).
     crate::cheats::at_flip();
     if let Some(first) = perf::close_first_frame() {
@@ -542,10 +545,12 @@ fn report_perf(sink: Option<fn(&Event)>) {
             })
             .collect(),
         spans,
+        memory: crate::memory::sample_and_note(),
     };
     if let Ok(mut run) = run_perf().lock() {
         run.add(&report);
     }
+    crate::memory::log_breakdown(report.memory);
     if let Some(sink) = sink {
         sink(&Event::Perf(report));
     } else {
@@ -555,8 +560,15 @@ fn report_perf(sink: Option<fn(&Event)>) {
             .filter(|(_, ms)| *ms > 0.0)
             .map(|(name, ms)| format!("{name} {ms:.0}"))
             .collect();
+        let memory = report.memory.map_or_else(String::new, |memory| {
+            format!(
+                "; worker {} MiB private, {} MiB resident",
+                memory.private >> 20,
+                memory.working_set >> 20
+            )
+        });
         tracing::info!(
-            "perf over {:.0} ms: {} flips, {} submissions, {} draws; ms: {}",
+            "perf over {:.0} ms: {} flips, {} submissions, {} draws; ms: {}{memory}",
             report.window_ms,
             report.flips,
             report.submissions,
@@ -840,8 +852,16 @@ fn executed_frame() -> Option<ExecutedFrame> {
 
 /// Gives each colour attachment after the first what it holds before a submission's draws (D825):
 /// the [`orbistoun_gpu::agc_driver::MoreTargetsSeeder`] the worker installs. On the device thread,
-/// with the run's backend.
+/// with the run's backend. One given no words is kept as the backend holds it (D948); where the
+/// backend holds none of that extent, nothing is seeded and the command processor reads them all
+/// afresh.
 pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u32])]) -> bool {
+    held_again(
+        targets
+            .iter()
+            .filter(|(_, _, words)| !words.is_empty())
+            .map(|&(target, _, _)| target),
+    );
     on_device(|| {
         let Availability::Available { .. } = probe() else {
             return false;
@@ -850,7 +870,12 @@ pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u3
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let backend = held.get_or_insert_with(VulkanBackend::new);
-        for &(target, (width, height), words) in targets {
+        if !kept_ones_are_held(targets, |target, extent| {
+            backend.holds_target(target, extent)
+        }) {
+            return false;
+        }
+        for &(target, (width, height), words) in targets.iter().filter(|(_, _, w)| !w.is_empty()) {
             backend.seed_target(
                 target,
                 Pixels {
@@ -863,6 +888,18 @@ pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u3
         true
     })
     .unwrap_or(false)
+}
+
+/// Whether every attachment `targets` gives no words - one kept on the device (D948) - is one
+/// `holds` says the backend holds at its extent.
+fn kept_ones_are_held(
+    targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u32])],
+    holds: impl Fn(orbistoun_gpu::ResourceId, (u32, u32)) -> bool,
+) -> bool {
+    targets
+        .iter()
+        .filter(|(_, _, words)| words.is_empty())
+        .all(|&(target, extent, _)| holds(target, extent))
 }
 
 /// What the pixel shaders of the draws carried out since the last call stored, once they ran: the
@@ -913,11 +950,56 @@ pub fn read_target_frame(target: orbistoun_gpu::ResourceId) -> Option<Vec<u32>> 
 /// Runs on the device thread with the guest thread waiting: the submit that calls this runs on a
 /// guest stack the host's exception dispatch cannot walk, and a graphics driver raises and
 /// handles exceptions as ordinary business.
+///
+/// Where a refused segment is passed over (D896), the answer changes nothing the command processor
+/// does next, so it is not waited for (D948): the draws are handed over and the command processor
+/// goes on, preparing what follows while the device thread records them. Every later device call,
+/// whether a frame or attachment read back, a snapshot, a dispatch or a sample count, runs after
+/// them on the same thread, so nothing reads what they draw before they have drawn it. A segment
+/// the device then refuses is counted as passed over.
+///
+/// A target the backend let go of for being idle (`let_go_of_idle_targets`) is not held, whatever
+/// the command processor says: it is handed what guest memory holds instead, which is its frame.
 pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
+    let_go_of_idle_targets(submission);
+    let fetched;
+    let before = match before {
+        Before::Held if was_let_go(submission) => {
+            let Some(words) = orbistoun_gpu::agc_driver::target_in_memory(submission) else {
+                tracing::warn!(
+                    "a colour target let go of for being idle could not be read from guest memory"
+                );
+                return false;
+            };
+            fetched = words;
+            Before::Words(&fetched)
+        }
+        before => before,
+    };
+    if !matches!(before, Before::Held) {
+        // Handed over, so held again once these draws run, whichever thread runs them.
+        held_again(submission.targets.keys().copied());
+    }
+    if orbistoun_gpu::agc_driver::passing_refused() {
+        let (submission, before) = (submission.clone(), OwnedBefore::of(before));
+        let bytes = handed_over_bytes(&submission, &before);
+        return perf::span(perf::Span::ExecuteHandOff, || {
+            device_thread::on_device_later(bytes, move || {
+                let drawn = perf::span(perf::Span::ExecuteOnDevice, || {
+                    execute_draws_noted(&submission, before.as_before())
+                });
+                if drawn.is_none() {
+                    orbistoun_gpu::agc_driver::note_draws_passed_over(
+                        "the device did not draw them, after the command processor went on (D948)",
+                    );
+                }
+            })
+        });
+    }
     perf::span(perf::Span::ExecuteHandOff, || {
         on_device(|| {
             perf::span(perf::Span::ExecuteOnDevice, || {
-                execute_draws_here(submission, before)
+                execute_draws_noted(submission, before)
             })
         })
     })
@@ -925,10 +1007,147 @@ pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
     .is_some()
 }
 
+/// The guest's flips so far: the frames a target's idleness is counted in.
+static FLIPS: AtomicU64 = AtomicU64::new(0);
+
+/// The flip idle targets were last let go of at.
+static LET_GO_AT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Whether the backend's resident targets held more than their budget when it last drew.
+static OVER_BUDGET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The colour targets the backend let go of and has not been handed since: a [`Before::Held`] for
+/// one is answered from guest memory. Kept on the command processor's thread, which hands targets
+/// over, so it is current for the next submission whatever the device thread has yet to run.
+fn let_go() -> &'static Mutex<std::collections::BTreeSet<orbistoun_gpu::ResourceId>> {
+    static LET_GO: Mutex<std::collections::BTreeSet<orbistoun_gpu::ResourceId>> =
+        Mutex::new(std::collections::BTreeSet::new());
+    &LET_GO
+}
+
+/// Whether `submission`'s colour target is one the backend let go of.
+fn was_let_go(submission: &Submission) -> bool {
+    let Some(target) = submission.targets.keys().next() else {
+        return false;
+    };
+    let_go()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(target)
+}
+
+/// Notes `targets` handed to the backend again, so held once their seed runs.
+fn held_again(targets: impl IntoIterator<Item = orbistoun_gpu::ResourceId>) {
+    let mut let_go = let_go()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for target in targets {
+        let_go.remove(&target);
+    }
+}
+
+/// Once a flip, while the backend's resident targets are over their budget, has it let go of those
+/// idle for its frames, keeping `submission`'s own. On the device thread and waited for, on the
+/// command processor's thread before anything after it is handed over: every draw handed over
+/// earlier has run, and the next one is handed over knowing which were let go of.
+fn let_go_of_idle_targets(submission: &Submission) {
+    let flip = FLIPS.load(Ordering::Relaxed);
+    if !OVER_BUDGET.load(Ordering::Relaxed) || LET_GO_AT.swap(flip, Ordering::Relaxed) == flip {
+        return;
+    }
+    let keep: Vec<orbistoun_gpu::ResourceId> = submission
+        .targets
+        .keys()
+        .copied()
+        .chain(submission.more_colour_targets.iter().map(|more| more.id))
+        .collect();
+    let gone = on_device(move || {
+        let mut held = live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let backend = held.as_mut()?;
+        backend.set_frame(flip);
+        let gone = backend.evict_idle_targets(&keep);
+        OVER_BUDGET.store(backend.targets_over_budget(), Ordering::Relaxed);
+        Some(gone)
+    })
+    .flatten()
+    .unwrap_or_default();
+    if !gone.is_empty() {
+        tracing::debug!("let go of {} idle colour target(s)", gone.len());
+        let_go()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(gone);
+    }
+}
+
+/// [`execute_draws_here`], then the perf window, once the backend is let go.
+fn execute_draws_noted(submission: &Submission, before: Before<'_>) -> Option<()> {
+    // The frame its draws are stamped with, and whether they left the targets over their budget.
+    if let Some(backend) = live_backend()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        backend.set_frame(FLIPS.load(Ordering::Relaxed));
+    }
+    let drawn = execute_draws_here(submission, before);
+    if let Some(backend) = live_backend()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        OVER_BUDGET.store(backend.targets_over_budget(), Ordering::Relaxed);
+    }
+    // Reported from submissions as well as flips, for titles that submit many times per frame; here,
+    // with the backend let go, so the perf window's census runs holding nothing.
+    report_perf(LIVE_EVENTS.get().copied());
+    drawn
+}
+
+/// A target's contents before its draws, owned, for draws carried out after the command processor
+/// has gone on (D948): the words it was handed are its own until then.
+enum OwnedBefore {
+    Held,
+    Words(Vec<u32>),
+    Uniform(u32),
+}
+
+impl OwnedBefore {
+    fn of(before: Before<'_>) -> Self {
+        match before {
+            Before::Held => Self::Held,
+            Before::Words(words) => Self::Words(words.to_vec()),
+            Before::Uniform(word) => Self::Uniform(word),
+        }
+    }
+
+    fn as_before(&self) -> Before<'_> {
+        match self {
+            Self::Held => Before::Held,
+            Self::Words(words) => Before::Words(words),
+            Self::Uniform(word) => Before::Uniform(*word),
+        }
+    }
+}
+
+/// About how many bytes draws handed over to run later own: the target's words, the modules and
+/// the commands. Texels and buffer bytes the commands share with the pipeline's caches are not
+/// counted, since the copy did not make them.
+fn handed_over_bytes(submission: &Submission, before: &OwnedBefore) -> usize {
+    let words = match before {
+        OwnedBefore::Words(words) => words.len(),
+        OwnedBefore::Held | OwnedBefore::Uniform(_) => 0,
+    };
+    let modules: usize = submission.modules.values().map(Vec::len).sum();
+    (words + modules) * 4 + submission.commands.len() * size_of::<orbistoun_gpu::RenderCommand>()
+}
+
 /// Runs a guest compute dispatch on the device, on the device thread, for the command processor
 /// (installed as its dispatch executor).
 pub fn execute_dispatch(
-    module: (&[u32], u64),
+    (program, module, hash): (u64, &[u32], u64),
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
     (images, buffers): (
@@ -936,8 +1155,12 @@ pub fn execute_dispatch(
         &[orbistoun_gpu::dispatch::BufferBefore],
     ),
 ) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
-    on_device(|| execute_dispatch_here(module, memory, (push, groups), (images, buffers)))
-        .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
+    on_device(|| {
+        // Named for the submission it makes, so a device lost while it runs says which program.
+        orbistoun_gpu_vulkan::note_dispatch(program, groups);
+        execute_dispatch_here((module, hash), memory, (push, groups), (images, buffers))
+    })
+    .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
 }
 
 /// [`execute_dispatch`] on the device thread.
@@ -968,8 +1191,8 @@ fn execute_dispatch_here(
             orbistoun_gpu::dispatch::BufferBefore::Unread(words) => {
                 orbistoun_gpu_vulkan::BufferIn::Unread(*words)
             }
-            orbistoun_gpu::dispatch::BufferBefore::Alias(earlier) => {
-                orbistoun_gpu_vulkan::BufferIn::Alias(*earlier)
+            orbistoun_gpu::dispatch::BufferBefore::Alias(holder, offset) => {
+                orbistoun_gpu_vulkan::BufferIn::Alias(*holder, *offset)
             }
         })
         .collect();
@@ -1001,7 +1224,12 @@ fn execute_dispatch_here(
             whole: out.whole,
         })
         .collect();
-    Ok((done.memory, done.escaped, done.stored, buffers))
+    Ok((
+        done.memory,
+        (done.escaped, done.loop_cut),
+        done.stored,
+        buffers,
+    ))
 }
 
 /// The images a dispatch binds, fetched and stored to: each that is a depth target the host holds
@@ -1209,9 +1437,27 @@ fn dispatch_image(
     }
 }
 
-/// The backend a running guest's submissions are drawn on, kept for the run.
-fn live_backend() -> &'static Mutex<Option<VulkanBackend>> {
-    static LIVE: Mutex<Option<VulkanBackend>> = Mutex::new(None);
+/// What the live backend holds of the host's memory beside the device's, by holder, as it was
+/// when the backend was last let go; `None` before there is one. Takes no lock.
+pub(crate) fn backend_host_held() -> Option<[(&'static str, u64); 4]> {
+    let names = BACKEND_HELD.get()?;
+    let bytes = live_backend().tallies();
+    Some(std::array::from_fn(|at| (names[at], bytes[at])))
+}
+
+/// The names of what [`VulkanBackend::host_held`] measures, once it has measured.
+static BACKEND_HELD: OnceLock<[&'static str; 4]> = OnceLock::new();
+
+/// The backend a running guest's submissions are drawn on, kept for the run. What it holds of the
+/// host's memory is published each time it is let go.
+pub(crate) fn live_backend() -> &'static Tallied<Option<VulkanBackend>, 4> {
+    static LIVE: Tallied<Option<VulkanBackend>, 4> = Tallied::new(None, |live| {
+        live.as_ref().map_or([0; 4], |backend| {
+            let held = backend.host_held();
+            let _ = BACKEND_HELD.set(held.map(|(name, _)| name));
+            held.map(|(_, bytes)| bytes)
+        })
+    });
     &LIVE
 }
 
@@ -1284,8 +1530,6 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         }
     };
     perf::count(perf::Count::Submissions);
-    // Reported from submissions as well as flips, for titles that submit many times per frame.
-    report_perf(LIVE_EVENTS.get().copied());
     // Every submission's line only when asked (`ORBISTOUN_TRACE_SUBMITS`); a refusal is
     // always said, below.
     let trace = *TRACE.get_or_init(|| orbistoun_env::TRACE_SUBMITS.get().as_deref() == Some("1"));
@@ -2704,6 +2948,11 @@ pub fn render_and_log_last_submission() -> Option<Event> {
     }
     // The pipelines the run's last seconds compiled, kept for the next run (D744).
     on_device(orbistoun_gpu_vulkan::pipeline_cache::flush);
+    // And the translations made since the store was last written (D113).
+    orbistoun_gpu::agc_driver::flush_translations();
+    for line in crate::memory::describe_at_end() {
+        tracing::info!("{line}");
+    }
     log_execution();
     // How the asynchronous file reads fared: a read held by a buffer never submitted never lands.
     if let Some(line) = orbistoun_kernel::apr::read_summary().describe() {
@@ -3300,6 +3549,86 @@ fn report_released_labels() {
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
 
+    /// A target the backend let go of is known as let go of until it is handed over again, by its
+    /// own id and no other.
+    #[test]
+    fn a_target_let_go_of_is_known_until_handed_over_again() {
+        use orbistoun_gpu::ResourceId;
+        use orbistoun_gpu::pipeline::Submission;
+        use orbistoun_gpu::registers::ColourTargetExtent;
+        let id = ResourceId(0x8000_0000_7e7e_0001);
+        let mut submission = Submission::default();
+        submission.targets.insert(
+            id,
+            ColourTargetExtent {
+                width: 8,
+                height: 8,
+            },
+        );
+        assert!(!super::was_let_go(&submission));
+        super::let_go()
+            .lock()
+            .expect("the set")
+            .extend([id, ResourceId(0x8000_0000_7e7e_0002)]);
+        assert!(super::was_let_go(&submission));
+        super::held_again([id]);
+        assert!(!super::was_let_go(&submission), "handed over again");
+        assert!(
+            super::let_go()
+                .lock()
+                .expect("the set")
+                .contains(&ResourceId(0x8000_0000_7e7e_0002)),
+            "the other still let go of"
+        );
+        super::held_again([ResourceId(0x8000_0000_7e7e_0002)]);
+    }
+
+    /// A target's contents handed to draws carried out later are the same contents, owned (D948).
+    #[test]
+    fn contents_handed_over_for_later_are_the_same() {
+        use orbistoun_gpu::agc_driver::Before;
+        let words = [7u32, 8, 9];
+        for before in [Before::Held, Before::Words(&words), Before::Uniform(5)] {
+            assert_eq!(super::OwnedBefore::of(before).as_before(), before);
+        }
+    }
+
+    /// Draws handed over are weighed by the target words and modules they own, so a 4K target's
+    /// copy counts its 33 MB against the hand-off's bound.
+    #[test]
+    fn draws_handed_over_are_weighed_by_what_they_own() {
+        use super::{OwnedBefore, Submission, handed_over_bytes};
+        let mut submission = Submission::default();
+        submission
+            .modules
+            .insert(orbistoun_gpu::ResourceId(1), vec![0; 100]);
+        assert_eq!(handed_over_bytes(&submission, &OwnedBefore::Held), 400);
+        let target = OwnedBefore::Words(vec![0; 3840 * 2160]);
+        assert_eq!(
+            handed_over_bytes(&submission, &target),
+            400 + 3840 * 2160 * 4
+        );
+    }
+
+    /// An attachment given no words is one kept on the device, and only one the backend holds at
+    /// its extent may be; those given words are seeded whatever it holds (D948).
+    #[test]
+    fn only_attachments_the_backend_holds_are_kept() {
+        use orbistoun_gpu::ResourceId;
+        let words = [1u32, 2, 3, 4];
+        let holds =
+            |target: ResourceId, extent: (u32, u32)| target == ResourceId(1) && extent == (2, 2);
+        let kept_held: [(ResourceId, (u32, u32), &[u32]); 2] = [
+            (ResourceId(1), (2, 2), &[]),
+            (ResourceId(2), (2, 2), &words),
+        ];
+        assert!(super::kept_ones_are_held(&kept_held, holds));
+        let kept_elsewhere: [(ResourceId, (u32, u32), &[u32]); 1] = [(ResourceId(1), (4, 4), &[])];
+        assert!(!super::kept_ones_are_held(&kept_elsewhere, holds));
+        let kept_unheld: [(ResourceId, (u32, u32), &[u32]); 1] = [(ResourceId(3), (2, 2), &[])];
+        assert!(!super::kept_ones_are_held(&kept_unheld, holds));
+    }
+
     /// The run's host time per flip is each phase's milliseconds over its flips, costliest first,
     /// with the flips and the rate they came at: what a frame-bound stretch spends where, read at the
     /// run's end. Windows with no flip add nothing, and phases that took no time are left out.
@@ -3313,6 +3642,7 @@ mod tests {
             draws: 2 * flips,
             phases: phases.iter().map(|&(n, v)| (n.to_owned(), v)).collect(),
             spans: Vec::new(),
+            memory: None,
         };
         run.add(&window(
             1000.0,
@@ -3348,6 +3678,7 @@ mod tests {
             draws,
             phases: Vec::new(),
             spans: Vec::new(),
+            memory: None,
         };
         assert_eq!(run.describe_tail(), None);
         for _ in 0..100 {
@@ -3376,6 +3707,7 @@ mod tests {
             draws,
             phases: vec![("prepare".to_owned(), prepare)],
             spans: Vec::new(),
+            memory: None,
         };
         run.add(&window(1000.0, 100, 900, 100.0));
         run.add(&window(1000.0, 10, 20, 300.0));

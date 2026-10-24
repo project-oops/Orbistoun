@@ -14,6 +14,8 @@ use crate::{MemError, Protection};
 pub struct Reservation {
     base: u64,
     len: u64,
+    /// Whether its pages are committed as they are touched ([`crate::lazy`]), not all at once.
+    lazy: bool,
 }
 
 impl Reservation {
@@ -52,7 +54,7 @@ mod imp {
     /// Execute is never dropped: guest text segments carry `p_flags` of `0x1` (execute, read
     /// clear), and mapping that to `PAGE_NOACCESS` faults on the first instruction fetch. Granting
     /// read with execute is accurate, since x86-64 paging has no execute-without-read.
-    const fn protection_flags(p: Protection) -> u32 {
+    pub(crate) const fn protection_flags(p: Protection) -> u32 {
         match (p.read, p.write, p.execute) {
             (_, true, true) => PAGE_EXECUTE_READWRITE,
             (_, true, false) => PAGE_READWRITE,
@@ -62,12 +64,19 @@ mod imp {
         }
     }
 
-    pub(super) fn reserve(base: u64, len: u64, p: Protection) -> Result<Reservation, MemError> {
+    pub(super) fn reserve(
+        base: u64,
+        len: u64,
+        p: Protection,
+        lazy: bool,
+    ) -> Result<Reservation, MemError> {
         let addr = usize::try_from(base).map_err(|_| {
             MemError::HostRefused("base address does not fit in a pointer".to_owned())
         })?;
         let size = usize::try_from(len)
             .map_err(|_| MemError::HostRefused("length does not fit in a pointer".to_owned()))?;
+        // Committed on touch, or whole now.
+        let commit = if lazy { 0 } else { MEM_COMMIT };
 
         // SAFETY: `VirtualAlloc` validates any address and size itself and returns null on
         // failure; it never overwrites an existing reservation, so a conflict surfaces as null.
@@ -77,7 +86,7 @@ mod imp {
             VirtualAlloc(
                 addr as *const core::ffi::c_void,
                 size,
-                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                MEM_RESERVE | commit | MEM_WRITE_WATCH,
                 protection_flags(p),
             )
         };
@@ -107,7 +116,7 @@ mod imp {
                 got as usize
             )));
         }
-        Ok(Reservation { base, len })
+        Ok(Reservation { base, len, lazy })
     }
 
     pub(super) fn protect(base: u64, len: u64, p: Protection) -> Result<(), MemError> {
@@ -177,7 +186,13 @@ mod imp {
         f
     }
 
-    pub(super) fn reserve(base: u64, len: u64, p: Protection) -> Result<Reservation, MemError> {
+    /// The host commits an anonymous mapping as it is touched already, so `_lazy` changes nothing.
+    pub(super) fn reserve(
+        base: u64,
+        len: u64,
+        p: Protection,
+        _lazy: bool,
+    ) -> Result<Reservation, MemError> {
         let addr = usize::try_from(base)
             .map_err(|_| MemError::HostRefused("base does not fit in a pointer".to_owned()))?;
         let size = usize::try_from(len)
@@ -220,7 +235,11 @@ mod imp {
             }
             return Err(MemError::Conflict { base, len });
         }
-        Ok(Reservation { base, len })
+        Ok(Reservation {
+            base,
+            len,
+            lazy: false,
+        })
     }
 
     pub(super) fn protect(base: u64, len: u64, p: Protection) -> Result<(), MemError> {
@@ -270,26 +289,60 @@ pub fn allocation_granularity() -> u64 {
     imp::allocation_granularity()
 }
 
-/// Reserves `len` bytes at exactly `base`, or fails.
+/// Reserves `len` bytes at exactly `base`, or fails: committed as they are touched once
+/// [`crate::lazy::commit_lazily`] has been called, and whole before.
 pub fn reserve(base: u64, len: u64, protection: Protection) -> Result<Reservation, MemError> {
-    imp::reserve(base, len, protection)
+    if crate::lazy::lazily() {
+        return reserve_lazily(base, len, protection);
+    }
+    let held = imp::reserve(base, len, protection, false)?;
+    crate::lazy::note_eager(len);
+    Ok(held)
 }
+
+/// [`reserve`], committed as it is touched whatever [`crate::lazy::commit_lazily`] says: only
+/// where a fault handler asks [`crate::lazy::commit_on_touch`] first.
+pub fn reserve_lazily(
+    base: u64,
+    len: u64,
+    protection: Protection,
+) -> Result<Reservation, MemError> {
+    let held = imp::reserve(base, len, protection, cfg!(windows))?;
+    if held.lazy {
+        crate::lazy::register(base, len, protection);
+    } else {
+        crate::lazy::note_eager(len);
+    }
+    Ok(held)
+}
+
+#[cfg(windows)]
+pub(crate) use imp::protection_flags;
 
 /// Changes the protection of an already-reserved range.
 ///
 /// Separate from [`reserve`] because an image is written read-write and only then made
-/// executable, so text is never left writable.
+/// executable, so text is never left writable. Pages committed on touch and not yet touched keep
+/// the protection until they are.
 pub fn protect(base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
     // A write-watch guard on these pages would put its own protection back later (D824).
-    crate::watch::release_overlapping(base, len);
-    imp::protect(base, len, protection)
+    crate::watch::release_guards(base, len);
+    match crate::lazy::protect(base, len, protection) {
+        Some(applied) => applied.map_err(MemError::HostRefused),
+        None => imp::protect(base, len, protection),
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
         // A guard on memory going away must not answer for what is mapped there next (D824).
-        crate::watch::release_overlapping(self.base, self.len);
+        crate::watch::release_guards(self.base, self.len);
         imp::release(self);
+        if self.lazy {
+            crate::lazy::unregister(self.base);
+        } else {
+            crate::lazy::note_eager_released(self.len);
+        }
     }
 }
 

@@ -84,12 +84,21 @@ pub(crate) fn open(instance: &ash::Instance, physical: vk::PhysicalDevice, devic
     // uses, so a cache kept from older modules loads smaller than its file. Measured against the
     // file, it never grew past it and was never written again - STKT00001's stayed five days old
     // while every run compiled each compute pipeline afresh, 257 ms apiece.
-    let _ = KEPT.set(Mutex::new(Kept {
-        cache,
-        written: cache_size(device, cache).unwrap_or(0),
-        at: None,
-    }));
+    let written = cache_size(device, cache).unwrap_or(0);
+    if KEPT
+        .set(Mutex::new(Kept {
+            cache,
+            written,
+            at: None,
+        }))
+        .is_ok()
+    {
+        WRITTEN.store(written as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 }
+
+/// [`Kept::written`], published as it changes for [`held_bytes`], which reads it without the lock.
+static WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many bytes the driver would write for `cache` now.
 fn cache_size(device: &ash::Device, cache: vk::PipelineCache) -> Option<usize> {
@@ -105,6 +114,13 @@ fn cache_size(device: &ash::Device, cache: vk::PipelineCache) -> Option<usize> {
         )
     };
     (sized == vk::Result::SUCCESS).then_some(size)
+}
+
+/// The bytes of the cache's data as last measured: what the driver holds of it in host memory, at
+/// least. Zero with no cache. Takes no lock.
+#[must_use]
+pub fn held_bytes() -> u64 {
+    WRITTEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The cache a pipeline is created through: the session's, or none.
@@ -159,6 +175,7 @@ fn write_back(device: &ash::Device, now: bool) {
         let partial = path.with_extension("partial");
         if std::fs::write(&partial, &data).is_ok() && std::fs::rename(&partial, path).is_ok() {
             kept.written = data.len();
+            WRITTEN.store(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
     });
 }

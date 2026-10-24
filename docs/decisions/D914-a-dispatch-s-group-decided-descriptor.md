@@ -12,7 +12,9 @@ reaches nothing; the distinct descriptors are bound as D900's waves' are.
 This runs before the wave-by-wave run (D900), which runs every lane and stops at a bound on waves.
 A dispatch of more than 65536 groups is not replayed. When neither run can follow the dispatch, the
 refusal reports what the first waves of sixteen groups reach the access with: how many distinct
-descriptors, their bases, and which registers they cannot know.
+descriptors, their bases, and which registers they cannot know. Amended by D951: the wave-by-wave
+run no longer stops at a bound on waves. Above 256 waves it runs a lattice of groups, and an access
+outside the range the lattice places is an escape.
 
 A dispatch's program that reads its own address (`s_getpc_b64`) is now told where it was loaded,
 as a draw's is (D842). This applies to its translation and to the tracing of its buffers, so a

@@ -13,7 +13,8 @@
 //!
 //! A module built for a guest dispatch writes guest memory for real, so an access it cannot place
 //! exactly - outside its window, or through a descriptor whose addressing is not modelled - is
-//! recorded rather than dropped, and the dispatch is refused when any lane made one.
+//! recorded rather than dropped, and the dispatch is refused when any lane made one. A loop cut for
+//! running past its cap is recorded the same way, by its backward branch (D949).
 
 use orbistoun_spirv::{Builder, Id, op};
 
@@ -55,6 +56,19 @@ pub struct ComputeInputs {
     /// (D861).
     #[serde(default)]
     pub first_thread: u32,
+    /// The bound buffers, one bit a slot, placed from a sample of a dispatch's waves rather than at
+    /// their descriptor's base (D951): an access through one is read relative to the guest base the
+    /// push block carries at [`SAMPLED_BASES_PUSH_WORD`], from the descriptor it computes, and one
+    /// the bound buffer does not hold is an escape. Zero as the stream sets a dispatch up; the
+    /// preparation that bound the buffers sets it. At most [`MOST_SAMPLED_BUFFERS`] bits.
+    #[serde(default)]
+    pub sampled_buffers: u32,
+    /// The private memory (scratch) one wave holds, in bytes, where `COMPUTE_PGM_RSRC2.SCRATCH_EN`
+    /// gives the program scratch: `COMPUTE_TMPRING_SIZE.WAVESIZE` in its 1 KiB units (D954). The
+    /// wave's scratch offset then arrives in the scalar register after the workgroup ids
+    /// ([`crate::scratch::offset_register`]). Zero for a program without scratch.
+    #[serde(default)]
+    pub scratch_wave_bytes: u32,
 }
 
 /// Where a dispatch's partial-group shape sits in the push-constant block (D855): the last group's
@@ -65,6 +79,16 @@ pub const PARTIAL_PUSH_WORD: u32 = super::USER_DATA_STAGE_WORDS;
 /// Where a dispatch's global loads' buffer's guest base sits in the push-constant block (D883): the
 /// low half of the address the buffer starts at, after the partial-group shape.
 pub const GLOBAL_BASE_PUSH_WORD: u32 = PARTIAL_PUSH_WORD + 6;
+
+/// Where the guest bases of a dispatch's buffers placed from a sample sit in the push-constant block
+/// (D951), after the global loads' base: two words for each slot [`ComputeInputs::sampled_buffers`]
+/// names, in slot order - the low half of the address the bound buffer starts at, then its bits
+/// 47:32.
+pub const SAMPLED_BASES_PUSH_WORD: u32 = GLOBAL_BASE_PUSH_WORD + 1;
+
+/// The most buffers one dispatch binds from a sample (D951): the push-constant words their bases
+/// take, after the user data, the partial-group shape and the global loads' base.
+pub const MOST_SAMPLED_BUFFERS: u32 = 8;
 
 impl PartialGroups {
     /// The six words a module reads at [`PARTIAL_PUSH_WORD`].
@@ -179,25 +203,53 @@ pub(super) struct DispatchState {
     wave: Option<Id>,
     /// A private word, non-zero once any access has left the memory the module can reach exactly.
     escaped: Id,
+    /// A private word counting the backward jumps the invocation has taken (D949).
+    jumps: Id,
 }
 
 impl DispatchState {
-    /// Declares the workgroup id, the wave index when the group is `waves` of more than one, and
-    /// the escape flag, through the module's private word pointer type and its zero.
+    /// Declares the workgroup id, the wave index when the group is `waves` of more than one, the
+    /// escape flag and the backward-jump count, through the module's private word pointer type and
+    /// its zero.
     pub(super) fn declare(
         b: &mut Builder,
         (u32_type, waves): (Id, u32),
-        (escaped_ptr, zero): (Id, Id),
+        (word_ptr, zero): (Id, Id),
     ) -> Self {
         let workgroup = super::declare_workgroup_id(b, u32_type);
         let wave = (waves > 1).then(|| super::declare_lane_input(b, u32_type, true));
-        let escaped = b.id();
-        b.declare(op::VARIABLE, &[escaped_ptr.0, escaped.0, PRIVATE, zero.0]);
+        let (escaped, jumps) = (b.id(), b.id());
+        for word in [escaped, jumps] {
+            b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE, zero.0]);
+        }
         Self {
             workgroup,
             wave,
             escaped,
+            jumps,
         }
+    }
+
+    /// The private word counting the invocation's backward jumps (D949).
+    pub(super) const fn jumps(self) -> Id {
+        self.jumps
+    }
+
+    /// Records a cut loop when `cut` holds (D949): the observation's loop word becomes the offset of
+    /// its backward branch plus one. One store, so invocations that cut different loops leave one
+    /// whole name, not a mixture; whichever lands names a loop that ran away.
+    pub(super) fn note_cut(module: &mut Wavefront<'_>, cut: Id, branch: u32) {
+        let (store, merge) = (module.builder.id(), module.builder.id());
+        module.builder.function(op::SELECTION_MERGE, &[merge.0, 0]);
+        module
+            .builder
+            .function(op::BRANCH_CONDITIONAL, &[cut.0, store.0, merge.0]);
+        module.builder.function(op::LABEL, &[store.0]);
+        let member = Model::constant(module, 0);
+        let named = Model::constant(module, branch.saturating_add(1));
+        module.write_observation(member, orbistoun_spirv::DISPATCH_LOOP_WORD, named);
+        module.builder.function(op::BRANCH, &[merge.0]);
+        module.builder.function(op::LABEL, &[merge.0]);
     }
 
     /// Declares the state when the module is a guest dispatch's: a compute stage given its entry
@@ -511,7 +563,7 @@ impl DispatchState {
             .builder
             .function(op::BRANCH_CONDITIONAL, &[set.0, store.0, merge.0]);
         module.builder.function(op::LABEL, &[store.0]);
-        module.write_observation(zero, 0, one);
+        module.write_observation(zero, orbistoun_spirv::DISPATCH_ESCAPE_WORD, one);
         module.builder.function(op::BRANCH, &[merge.0]);
         module.builder.function(op::LABEL, &[merge.0]);
     }
@@ -648,6 +700,8 @@ mod tests {
             integer_images: [false; 2],
             integer_fetched: 0,
             first_thread: 0,
+            sampled_buffers: 0,
+            scratch_wave_bytes: 0,
         }
     }
 

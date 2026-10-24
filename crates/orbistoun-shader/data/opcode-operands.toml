@@ -15,6 +15,13 @@ target = "gfx1013"
 
 [[opcode_operands]]
 family = "DS"
+opcode = 0
+mnemonic = "ds_add_u32"
+samples = 4
+operands = [{ word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "DS"
 opcode = 7
 mnemonic = "ds_min_u32"
 samples = 3
@@ -110,6 +117,20 @@ opcode = 118
 mnemonic = "ds_read_b64"
 samples = 2
 operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "DS"
+opcode = 178
+mnemonic = "ds_permute_b32"
+samples = 4
+operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "DS"
+opcode = 179
+mnemonic = "ds_bpermute_b32"
+samples = 4
+operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
 family = "DS"
@@ -315,6 +336,20 @@ samples = 3
 operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
+family = "MIMG"
+opcode = 102
+mnemonic = "image_bvh_intersect_ray"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }]
+
+[[opcode_operands]]
+family = "MIMG"
+opcode = 103
+mnemonic = "image_bvh64_intersect_ray"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }]
+
+[[opcode_operands]]
 family = "MTBUF"
 opcode = 0
 mnemonic = "tbuffer_load_format_x"
@@ -428,9 +463,30 @@ operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "MUBUF"
+opcode = 8
+mnemonic = "buffer_load_ubyte"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 9
+mnemonic = "buffer_load_sbyte"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
 opcode = 10
 mnemonic = "buffer_load_ushort"
 samples = 3
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 11
+mnemonic = "buffer_load_sshort"
+samples = 4
 operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
@@ -463,6 +519,20 @@ operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "MUBUF"
+opcode = 24
+mnemonic = "buffer_store_byte"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 26
+mnemonic = "buffer_store_short"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
 opcode = 28
 mnemonic = "buffer_store_dword"
 samples = 14
@@ -491,9 +561,93 @@ operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "MUBUF"
+opcode = 48
+mnemonic = "buffer_atomic_swap"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 49
+mnemonic = "buffer_atomic_cmpswap"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
 opcode = 50
 mnemonic = "buffer_atomic_add"
 samples = 5
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 51
+mnemonic = "buffer_atomic_sub"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 53
+mnemonic = "buffer_atomic_smin"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 54
+mnemonic = "buffer_atomic_umin"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 55
+mnemonic = "buffer_atomic_smax"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 56
+mnemonic = "buffer_atomic_umax"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 57
+mnemonic = "buffer_atomic_and"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 58
+mnemonic = "buffer_atomic_or"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 59
+mnemonic = "buffer_atomic_xor"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 60
+mnemonic = "buffer_atomic_inc"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 61
+mnemonic = "buffer_atomic_dec"
+samples = 4
 operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
@@ -509,6 +663,41 @@ opcode = 64
 mnemonic = "buffer_atomic_fmax"
 samples = 3
 operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 80
+mnemonic = "buffer_atomic_swap_x2"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 82
+mnemonic = "buffer_atomic_add_x2"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 90
+mnemonic = "buffer_atomic_or_x2"
+samples = 4
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 113
+mnemonic = "buffer_gl0_inv"
+samples = 3
+operands = []
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 114
+mnemonic = "buffer_gl1_inv"
+samples = 3
+operands = []
 
 [[opcode_operands]]
 family = "SMEM"
@@ -1772,6 +1961,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "VOP3"
+opcode = 334
+mnemonic = "v_alignbit_b32"
+samples = 3
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
 opcode = 335
 mnemonic = "v_alignbyte_b32"
 samples = 3
@@ -1879,6 +2075,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 family = "VOP3"
 opcode = 426
 mnemonic = "v_rcp_f32_e64"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
+opcode = 439
+mnemonic = "v_not_b32_e64"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }]
 

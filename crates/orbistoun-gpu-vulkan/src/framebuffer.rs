@@ -298,6 +298,7 @@ pub(crate) fn bind_device_local(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("attachments");
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory", e))?;
@@ -564,12 +565,12 @@ pub(crate) fn one_shot(
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
     let buffers = [command];
     let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
+    crate::device_lost::submit(crate::device_lost::Kind::Copy);
     // SAFETY: recording has ended and the queue belongs to this device.
     unsafe { device.queue_submit(session.queue, &submits, vk::Fence::null()) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
-    // SAFETY: the device is live.
-    unsafe { device.device_wait_idle() }
-        .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+        .map_err(crate::device_lost::vulkan("queue_submit"))?;
+    crate::device_lost::wait_idle(device)?;
+    staging_idle(device);
     // SAFETY: the device is idle, so nothing recorded from the pool is in use.
     unsafe { device.destroy_command_pool(pool, None) };
     Ok(())
@@ -604,9 +605,10 @@ fn one_shot_unwaited(
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
     let buffers = [command];
     let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
+    crate::device_lost::submit(crate::device_lost::Kind::Copy);
     // SAFETY: recording has ended and the queue belongs to this device.
     unsafe { device.queue_submit(session.queue, &submits, vk::Fence::null()) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
+        .map_err(crate::device_lost::vulkan("queue_submit"))?;
     in_flight()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -654,7 +656,8 @@ fn transition(
 /// A colour target kept on the device across a submission's draws.
 ///
 /// Created once per target, seeded from given pixels or cleared, drawn on in place by each draw,
-/// and read back only when its pixels are asked for.
+/// and read back only when its pixels are asked for. Its pixels pass to and from the host through a
+/// staging buffer lent for each copy ([`lend_staging`]), not one of its own.
 #[derive(Debug)]
 pub(crate) struct ResidentAttachment {
     image: vk::Image,
@@ -662,10 +665,9 @@ pub(crate) struct ResidentAttachment {
     view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
-    /// Host-visible (cached where offered), the size of the image: the seed goes in and the
-    /// readback comes out through it.
-    buffer: vk::Buffer,
-    buffer_memory: vk::DeviceMemory,
+    /// One row of its pixels, host-visible: a uniform fill is written here on the device and copied
+    /// into every row, so a guest's clear needs no buffer the size of the image.
+    row: Staging,
     /// The guest's extent, which its buffer holds and the guest reads and writes.
     width: u32,
     height: u32,
@@ -918,6 +920,22 @@ impl ResidentAttachment {
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
         let size = attachment_bytes((width, height), encoding);
         let initial = initial.filter(|bytes| bytes.len() as u64 == size);
+        // Lent before the target's own allocations are named, so a staging buffer made here is
+        // named as staging.
+        let seed = match initial {
+            Some(bytes) => {
+                let staging = lend_staging(&session, size)?;
+                if let Err(e) =
+                    fill_host_memory(device, staging.memory, &device_bytes(encoding, bytes))
+                {
+                    give_back_staging(device, staging);
+                    return Err(e);
+                }
+                Some(staging)
+            }
+            None => None,
+        };
+        let _for = crate::device_memory::purpose("render targets");
         let drawn = scaled((width, height), scale);
         let (image, memory) = create_attachment(instance, physical, device, drawn, encoding)?;
         let guest_image = if scale > 1 {
@@ -931,10 +949,15 @@ impl ResidentAttachment {
         } else {
             None
         };
-        let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
-        if let Some(bytes) = initial {
-            fill_host_memory(device, buffer_memory, &device_bytes(encoding, bytes))?;
-        }
+        // A whole number of words, which a fill writes.
+        let row_size = attachment_bytes((width, 1), encoding).next_multiple_of(4);
+        let (row_buffer, row_memory) =
+            create_readback_buffer(instance, physical, device, row_size)?;
+        let row = Staging {
+            buffer: row_buffer,
+            memory: row_memory,
+            size: row_size,
+        };
         let format = drawn_format(encoding);
         let render_pass = create_resident_render_pass(device, format)?;
         let (view, framebuffer) =
@@ -942,24 +965,29 @@ impl ResidentAttachment {
         let loads = Loads {
             image,
             guest_image: guest_image.map(|(guest, _)| guest),
-            buffer,
+            buffer: seed.map_or(vk::Buffer::null(), |staging| staging.buffer),
+            replicate: false,
             extent: (width, height),
             scale,
             filter: resample_filter(encoding),
         };
 
-        // Its starting pixels copied in, or the clear, before it is drawn on.
-        one_shot(&session, |device, command| {
+        // Its starting pixels copied in, or the clear, before it is drawn on; waited for, so the
+        // staging buffer is free after.
+        let seeded = one_shot(&session, |device, command| {
             loads.seed(device, command, initial.is_none().then_some(clear));
-        })?;
+        });
+        if let Some(staging) = seed {
+            give_back_after(device, staging, seeded.is_ok());
+        }
+        seeded?;
         Ok(Self {
             image,
             memory,
             view,
             render_pass,
             framebuffer,
-            buffer,
-            buffer_memory,
+            row,
             width,
             height,
             scale,
@@ -970,16 +998,28 @@ impl ResidentAttachment {
         })
     }
 
-    /// What copying through its buffer needs.
-    fn loads(&self) -> Loads {
+    /// What copying through `buffer` needs: a buffer of its pixels at the guest's extent.
+    fn loads(&self, buffer: vk::Buffer) -> Loads {
         Loads {
             image: self.image,
             guest_image: self.guest_image.map(|(guest, _)| guest),
-            buffer: self.buffer,
+            buffer,
+            replicate: false,
             extent: self.extent(),
             scale: self.scale,
             filter: resample_filter(self.encoding),
         }
+    }
+
+    /// The device memory it holds: its image, the guest-extent image a render scale gives it, and
+    /// its row.
+    pub(crate) fn device_bytes(&self) -> vk::DeviceSize {
+        let guest = if self.guest_image.is_some() {
+            attachment_bytes(self.extent(), self.encoding)
+        } else {
+            0
+        };
+        attachment_bytes(self.drawn_extent(), self.encoding) + guest + self.row.size
     }
 
     /// How its texels hold colour.
@@ -988,10 +1028,10 @@ impl ResidentAttachment {
     }
 
     /// Gives it new contents in place: `pixels` (tightly packed `Rgba8`, exactly the extent) copied
-    /// in through its own buffer, after everything already recorded on the queue. In place, because
-    /// recreating the attachment waits for the device and allocates twice.
+    /// in through a staging buffer, after everything already recorded on the queue. In place,
+    /// because recreating the attachment waits for the device and allocates twice.
     ///
-    /// The device is settled first, so nothing still reads the buffer when it is written.
+    /// The device is settled first, so the staging buffer an earlier reload lent is free again.
     pub(crate) fn reload(&self, pixels: &[u8]) -> Result<(), DispatchError> {
         let (width, height) = self.extent();
         let size = attachment_bytes((width, height), self.encoding);
@@ -1005,13 +1045,18 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         settle(&session)?;
-        fill_host_memory(
+        let staging = lend_staging(&session, size)?;
+        if let Err(e) = fill_host_memory(
             &session.device,
-            self.buffer_memory,
+            staging.memory,
             &device_bytes(self.encoding, pixels),
-        )?;
-        let (image, loads) = (self.image, self.loads());
-        one_shot_unwaited(&session, |device, command| {
+        ) {
+            give_back_staging(&session.device, staging);
+            return Err(e);
+        }
+        let (image, loads) = (self.image, self.loads(staging.buffer));
+        // Read by a copy not waited for: free again once the device is next idle.
+        let copied = one_shot_unwaited(&session, |device, command| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -1044,22 +1089,28 @@ impl ResidentAttachment {
                 transfer_write,
                 attachment,
             );
-        })
+        });
+        give_back_staging_unwaited(staging);
+        copied
     }
 
     /// Gives it one `Rgba8` word everywhere, in place, on the device: what a guest's fill clear
-    /// seeds. `vkCmdFillBuffer` writes the exact bits into its buffer (no float clear rounding) and
-    /// the copy follows, all recorded after what the queue holds, so the host never waits or
-    /// touches the buffer.
+    /// seeds. `vkCmdFillBuffer` writes the exact bits into its row (no float clear rounding) and the
+    /// row is copied into every row, all recorded after what the queue holds, so the host never
+    /// waits or touches a buffer. A texel's bytes are alike within a word wherever the pattern
+    /// repeats inside one, so every row starting the word afresh holds what a fill of the whole
+    /// image would.
     pub(crate) fn reload_uniform(&self, word: u32) -> Result<(), DispatchError> {
         let word = device_word(self.encoding, word);
-        let (width, height) = self.extent();
-        let size = attachment_bytes((width, height), self.encoding);
         let session = crate::compute::session()?;
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (image, buffer, loads) = (self.image, self.buffer, self.loads());
+        let (image, buffer, size) = (self.image, self.row.buffer, self.row.size);
+        let loads = Loads {
+            replicate: true,
+            ..self.loads(buffer)
+        };
         one_shot_unwaited(&session, |device, command| {
             let transfer = vk::PipelineStageFlags::TRANSFER;
             // After whatever last read or wrote the buffer: a reload's copy, a readback.
@@ -1078,7 +1129,7 @@ impl ResidentAttachment {
                     &[],
                 );
             }
-            // SAFETY: recording is open; the buffer is `size` bytes with transfer-destination usage,
+            // SAFETY: recording is open; the row is `size` bytes with transfer-destination usage,
             // and the size is a multiple of four.
             unsafe { device.cmd_fill_buffer(command, buffer, 0, size, word) };
             let filled = [vk::MemoryBarrier::default()
@@ -1149,10 +1200,14 @@ impl ResidentAttachment {
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.copy_out(&session, (self.buffer, false), true)?;
         let (width, height) = self.extent();
         let size = attachment_bytes((width, height), self.encoding);
-        let bytes = read_host_memory(&session.device, self.buffer_memory, size)?;
+        let staging = lend_staging(&session, size)?;
+        let bytes = self
+            .copy_out(&session, (staging.buffer, false), true)
+            .and_then(|()| read_host_memory(&session.device, staging.memory, size));
+        give_back_after(&session.device, staging, bytes.is_ok());
+        let bytes = bytes?;
         Ok(Pixels {
             width,
             height,
@@ -1190,7 +1245,7 @@ impl ResidentAttachment {
         wait: bool,
     ) -> Result<(), DispatchError> {
         let (image, (width, height)) = (self.image, self.drawn_extent());
-        let loads = self.loads();
+        let loads = self.loads(buffer);
         let record = |device: &ash::Device, command: vk::CommandBuffer| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1263,8 +1318,11 @@ impl ResidentAttachment {
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (image, loads, buffer) = (self.image, self.loads(), self.buffer);
-        one_shot(&session, |device, command| {
+        let size = attachment_bytes((width, count), self.encoding);
+        let staging = lend_staging(&session, size)?;
+        let (image, buffer) = (self.image, staging.buffer);
+        let loads = self.loads(buffer);
+        let copied = one_shot(&session, |device, command| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -1296,20 +1354,19 @@ impl ResidentAttachment {
                 transfer_read,
                 attachment,
             );
-        })?;
-        let size = attachment_bytes((width, count), self.encoding);
-        let bytes = read_host_memory(&session.device, self.buffer_memory, size)?;
+        });
+        let bytes = copied.and_then(|()| read_host_memory(&session.device, staging.memory, size));
+        give_back_after(&session.device, staging, bytes.is_ok());
         Ok(Pixels {
             width,
             height: count,
-            bytes: host_bytes(self.encoding, bytes),
+            bytes: host_bytes(self.encoding, bytes?),
         })
     }
 
     /// Gives rows `first` to `first + count` new pixels in place (tightly packed, the guest's width),
     /// keeping the rest: what the guest wrote into a frame still on the device (D864). After
-    /// everything already recorded on the queue; the device is settled first, so nothing still
-    /// reads the buffer when it is written.
+    /// everything already recorded on the queue, through a staging buffer as [`Self::reload`]'s.
     pub(crate) fn reload_rows(
         &self,
         (first, count): (u32, u32),
@@ -1329,13 +1386,17 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         settle(&session)?;
-        fill_host_memory(
+        let staging = lend_staging(&session, pixels.len() as vk::DeviceSize)?;
+        if let Err(e) = fill_host_memory(
             &session.device,
-            self.buffer_memory,
+            staging.memory,
             &device_bytes(self.encoding, pixels),
-        )?;
-        let (image, loads) = (self.image, self.loads());
-        one_shot_unwaited(&session, |device, command| {
+        ) {
+            give_back_staging(&session.device, staging);
+            return Err(e);
+        }
+        let (image, loads) = (self.image, self.loads(staging.buffer));
+        let copied = one_shot_unwaited(&session, |device, command| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -1368,7 +1429,9 @@ impl ResidentAttachment {
                 transfer_write,
                 attachment,
             );
-        })
+        });
+        give_back_staging_unwaited(staging);
+        copied
     }
 
     /// Destroys it. Best-effort, like every release here: with no session the process is ending.
@@ -1403,9 +1466,20 @@ impl ResidentAttachment {
             unsafe { device.free_memory(guest_memory, None) };
         }
         // SAFETY: as above.
-        unsafe { device.destroy_buffer(self.buffer, None) };
+        unsafe { device.destroy_buffer(self.row.buffer, None) };
         // SAFETY: as above; the buffer bound to it is destroyed.
-        unsafe { device.free_memory(self.buffer_memory, None) };
+        unsafe { device.free_memory(self.row.memory, None) };
+    }
+}
+
+/// Gives back a staging buffer a waited copy went through: free when the copy and its read
+/// succeeded, kept until the device is next idle when either failed, since a copy submitted may
+/// still be running.
+fn give_back_after(device: &ash::Device, staging: Staging, succeeded: bool) {
+    if succeeded {
+        give_back_staging(device, staging);
+    } else {
+        give_back_staging_unwaited(staging);
     }
 }
 
@@ -1416,6 +1490,8 @@ struct Loads {
     image: vk::Image,
     guest_image: Option<vk::Image>,
     buffer: vk::Buffer,
+    /// Whether the buffer holds one row, copied into every row, rather than the whole image.
+    replicate: bool,
     /// The guest's extent, which the buffer holds.
     extent: (u32, u32),
     scale: u32,
@@ -1484,10 +1560,15 @@ impl Loads {
     /// takes each guest pixel over its whole square of drawn pixels.
     fn copy_in(self, device: &ash::Device, command: vk::CommandBuffer) {
         let (width, height) = self.extent;
-        let regions = [whole_image(width, height)];
+        let regions: Vec<vk::BufferImageCopy> = if self.replicate {
+            (0..height).map(|row| rows_image(width, (row, 1))).collect()
+        } else {
+            vec![whole_image(width, height)]
+        };
         let Some(guest) = self.guest_image else {
-            // SAFETY: recording is open; the buffer holds the image's bytes and the image is in
-            // the transfer-destination layout.
+            // SAFETY: recording is open; the buffer holds the bytes each region reads - the image's,
+            // or the one row every region reads - and the image is in the transfer-destination
+            // layout.
             unsafe {
                 device.cmd_copy_buffer_to_image(
                     command,
@@ -1519,8 +1600,8 @@ impl Loads {
             transfer_read,
             transfer_write,
         );
-        // SAFETY: recording is open; the buffer holds the guest image's bytes and the image is in
-        // the transfer-destination layout.
+        // SAFETY: recording is open; the buffer holds the bytes each region reads - the guest
+        // image's, or its one row - and the image is in the transfer-destination layout.
         unsafe {
             device.cmd_copy_buffer_to_image(
                 command,
@@ -1851,6 +1932,113 @@ fn read_host_memory(
     Ok(bytes)
 }
 
+/// A host-visible buffer a resident attachment's pixels pass through on their way in from the host
+/// or out to it: lent for one copy ([`lend_staging`]) rather than held by every attachment for its
+/// life, where a 4K target's would be 33 MB of host-visible memory beside its image.
+#[derive(Debug, Clone, Copy)]
+struct Staging {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    size: vk::DeviceSize,
+}
+
+/// The staging buffers not lent: free ones, least recently given back first; and ones a copy
+/// submitted without waiting may still read, free once the device is next idle.
+#[derive(Default)]
+struct StagingPool {
+    free: Vec<Staging>,
+    in_flight: Vec<Staging>,
+}
+
+/// The most bytes of free staging buffers kept for the next copy: a frame's write-back and the next
+/// submission's seed of a 4K target, or two of an eight-byte one. A larger buffer is made for its
+/// copy and let go after.
+pub(crate) const STAGING_KEPT: vk::DeviceSize = 128 << 20;
+
+fn staging_pool() -> &'static std::sync::Mutex<StagingPool> {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<StagingPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+/// A staging buffer of at least `size` bytes, nothing reading or writing it: the smallest free one
+/// that holds them, or a new one.
+fn lend_staging(
+    session: &crate::compute::Session,
+    size: vk::DeviceSize,
+) -> Result<Staging, DispatchError> {
+    let size = size.max(4);
+    {
+        let mut pool = staging_pool()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = pool
+            .free
+            .iter()
+            .enumerate()
+            .filter(|(_, staging)| staging.size >= size)
+            .min_by_key(|(_, staging)| staging.size)
+            .map(|(index, _)| index)
+        {
+            return Ok(pool.free.remove(index));
+        }
+    }
+    let _for = crate::device_memory::purpose("target staging");
+    let (buffer, memory) =
+        create_readback_buffer(&session.instance, session.physical, &session.device, size)?;
+    Ok(Staging {
+        buffer,
+        memory,
+        size,
+    })
+}
+
+/// Gives back a staging buffer whose copies have all run.
+fn give_back_staging(device: &ash::Device, staging: Staging) {
+    let mut pool = staging_pool()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pool.free.push(staging);
+    trim_staging(device, &mut pool);
+}
+
+/// Gives back a staging buffer a copy submitted without waiting may still read: it is free once the
+/// device is next idle ([`staging_idle`]).
+fn give_back_staging_unwaited(staging: Staging) {
+    staging_pool()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .in_flight
+        .push(staging);
+}
+
+/// Frees the staging buffers copies submitted without waiting were reading, once the device is
+/// idle, so nothing reads them.
+fn staging_idle(device: &ash::Device) {
+    let mut pool = staging_pool()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pool.in_flight.is_empty() {
+        return;
+    }
+    let done = std::mem::take(&mut pool.in_flight);
+    pool.free.extend(done);
+    trim_staging(device, &mut pool);
+}
+
+/// Lets go of the least recently given back free staging buffers past [`STAGING_KEPT`] bytes.
+fn trim_staging(device: &ash::Device, pool: &mut StagingPool) {
+    let mut kept: vk::DeviceSize = pool.free.iter().map(|staging| staging.size).sum();
+    while kept > STAGING_KEPT && !pool.free.is_empty() {
+        let staging = pool.free.remove(0);
+        kept -= staging.size;
+        // SAFETY: created on this device and free: every copy through it has run, the caller having
+        // waited for it or for the device. Taken out of the pool, so destroyed once.
+        unsafe { device.destroy_buffer(staging.buffer, None) };
+        // SAFETY: as above, and the buffer bound to it is destroyed.
+        unsafe { device.free_memory(staging.memory, None) };
+    }
+}
+
 /// A resident frame as it stood when [`ResidentAttachment::snapshot_into`] took it, held on the device
 /// in a host-visible buffer of its own until it is read or dropped.
 #[derive(Debug)]
@@ -1877,6 +2065,7 @@ impl FrameSnapshot {
         height: u32,
         texel_bytes: vk::DeviceSize,
     ) -> Result<Self, DispatchError> {
+        let _for = crate::device_memory::purpose("frame snapshots");
         let session = crate::compute::session()?;
         let session = session
             .lock()
@@ -2184,6 +2373,7 @@ fn create_storage_image(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("storage images");
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory(storage)", e))?;
@@ -2359,6 +2549,7 @@ fn shared_default_texture(devices: Devices<'_>) -> Result<Texture, DispatchError
     if let Some(texture) = *shared {
         return Ok(texture);
     }
+    let _for = crate::device_memory::purpose("textures");
     let texture = Texture {
         shared: true,
         ..create_texture(
@@ -2419,6 +2610,28 @@ fn texture_bytes_kept(session: &crate::compute::Session) -> vk::DeviceSize {
     })
 }
 
+/// The bytes of the kept textures' staging buffers not yet let go: host memory holding texels the
+/// device holds, or will once their copy runs.
+/// Counted as kept textures are made and their staging let go, and read without their lock.
+pub(crate) fn kept_staging_bytes() -> u64 {
+    KEPT_STAGING.get()
+}
+
+/// [`kept_staging_bytes`].
+static KEPT_STAGING: orbistoun_gpu::tally::Tally = orbistoun_gpu::tally::Tally::new();
+
+/// Counts `texture`'s staging among [`KEPT_STAGING`] as it is kept (`kept`) or let go.
+fn count_kept_staging(texture: &Texture, kept: bool) {
+    if texture.staging_memory == vk::DeviceMemory::null() {
+        return;
+    }
+    if kept {
+        KEPT_STAGING.add(texture.bytes);
+    } else {
+        KEPT_STAGING.sub(texture.bytes);
+    }
+}
+
 /// The least and most [`texture_bytes_kept`] keeps.
 const TEXTURE_BYTES_KEPT_LEAST: vk::DeviceSize = 256 << 20;
 const TEXTURE_BYTES_KEPT_MOST: vk::DeviceSize = 2 << 30;
@@ -2450,6 +2663,7 @@ fn kept_texture(
     words: TextureWords<'_>,
     sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
+    let _for = crate::device_memory::purpose("kept textures");
     let mut kept = kept_textures()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2465,6 +2679,7 @@ fn kept_texture(
         ..create_texture(devices, words, false, sampling)?
     };
     kept.bytes += texture.bytes;
+    count_kept_staging(&texture, true);
     kept.textures.insert(key, (texture, false));
     Ok(texture)
 }
@@ -2484,6 +2699,7 @@ fn kept_uploaded(device: &ash::Device, textures: &[Texture]) {
         {
             entry.1 = true;
             let texture = &mut entry.0;
+            count_kept_staging(texture, false);
             // SAFETY: created on this device for this texture; the copy out of it has run - the
             // caller waited for the device - and no copy is made again, so nothing uses it. Its
             // handles become null, which a later release destroys as nothing.
@@ -2493,6 +2709,25 @@ fn kept_uploaded(device: &ash::Device, textures: &[Texture]) {
             texture.staging = vk::Buffer::null();
             texture.staging_memory = vk::DeviceMemory::null();
         }
+    }
+}
+
+/// Lets go of the staging buffers of a pipeline's own textures once their copy in has run, as
+/// [`kept_uploaded`] does for the kept ones: a cached pipeline is never copied in again, and up to
+/// [`PIPELINE_CACHE_LIMIT`] of them would otherwise each hold their texels on the host too.
+fn own_uploaded(device: &ash::Device, textures: &mut [Texture]) {
+    for texture in textures
+        .iter_mut()
+        .filter(|texture| !texture.shared && texture.staging_memory != vk::DeviceMemory::null())
+    {
+        // SAFETY: created on this device for this pipeline's texture alone; the copy out of it has
+        // run - the caller waited for the device - and the pipeline is marked copied in, so nothing
+        // uses it again. Its handles become null, which the pipeline's release destroys as nothing.
+        unsafe { device.destroy_buffer(texture.staging, None) };
+        // SAFETY: as above, and the buffer bound to it is destroyed.
+        unsafe { device.free_memory(texture.staging_memory, None) };
+        texture.staging = vk::Buffer::null();
+        texture.staging_memory = vk::DeviceMemory::null();
     }
 }
 
@@ -2514,6 +2749,7 @@ fn make_room_for_textures(session: &crate::compute::Session) -> Result<(), Dispa
         }
     }
     for (_, (texture, _)) in kept.textures.drain() {
+        count_kept_staging(&texture, false);
         release_texture(device, &texture);
     }
     kept.bytes = 0;
@@ -3383,6 +3619,7 @@ pub(crate) fn create_host_buffer(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("host buffers");
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory", e))?;
@@ -4050,14 +4287,12 @@ fn render_over(
     let command = record(instance, device, family, &target, start, pipeline.as_ref())?;
     let command_buffers = [command.buffer];
     let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+    crate::device_lost::submit(crate::device_lost::Kind::Draws);
     // SAFETY: recording has ended and the queue belongs to this device.
     unsafe { device.queue_submit(queue, &submits, vk::Fence::null()) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
+        .map_err(crate::device_lost::vulkan("queue_submit"))?;
     // One submission, so a device wait is as strong as a fence.
-    //
-    // SAFETY: the device is live and nothing else is using it.
-    unsafe { device.device_wait_idle() }
-        .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+    crate::device_lost::wait_idle(device)?;
 
     // SAFETY: the memory is host-visible and coherent, was just written by the copy, and is
     // not currently mapped.
@@ -4989,11 +5224,12 @@ fn gpu_clock_read(device: &ash::Device) {
 /// the device may still be drawing from the last two.
 pub(crate) const WINDOW_SLOTS: usize = 3;
 
-/// The fences of the submits made while each window slot was current, and which slot that is. A
-/// slot is written again once its own fences have signalled, not once the whole device is idle.
+/// The fences of the submits made while each window slot was current, each with its submission's
+/// serial, and which slot that is. A slot is written again once its own fences have signalled, not
+/// once the whole device is idle.
 struct SlotFences {
     current: usize,
-    fences: [Vec<vk::Fence>; WINDOW_SLOTS],
+    fences: [Vec<(vk::Fence, u64)>; WINDOW_SLOTS],
 }
 
 fn slot_fences() -> &'static std::sync::Mutex<SlotFences> {
@@ -5004,8 +5240,8 @@ fn slot_fences() -> &'static std::sync::Mutex<SlotFences> {
     &SLOTS
 }
 
-/// A fence for a submit, kept against the window slot current as it is made.
-fn submit_fence(device: &ash::Device) -> Result<vk::Fence, DispatchError> {
+/// A fence for the submit `serial`, kept against the window slot current as it is made.
+fn submit_fence(device: &ash::Device, serial: u64) -> Result<vk::Fence, DispatchError> {
     // SAFETY: the device is live and the create info outlives the call.
     let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
         .map_err(|e| DispatchError::Vulkan("create_fence", e))?;
@@ -5013,7 +5249,7 @@ fn submit_fence(device: &ash::Device) -> Result<vk::Fence, DispatchError> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let current = slots.current;
-    slots.fences[current].push(fence);
+    slots.fences[current].push((fence, serial));
     Ok(fence)
 }
 
@@ -5035,13 +5271,15 @@ pub(crate) fn enter_window_slot(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let waiting = std::mem::take(&mut slots.fences[slot]);
     if !waiting.is_empty() {
+        let fences: Vec<vk::Fence> = waiting.iter().map(|(fence, _)| *fence).collect();
         orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::FrameFenceWait, || {
             // SAFETY: every fence is live, created on this device and submitted with a queue
             // submit.
-            unsafe { device.wait_for_fences(&waiting, true, u64::MAX) }
+            unsafe { device.wait_for_fences(&fences, true, u64::MAX) }
         })
-        .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))?;
-        for fence in waiting {
+        .map_err(crate::device_lost::vulkan("wait_for_fences"))?;
+        for (fence, serial) in waiting {
+            crate::device_lost::complete(serial);
             // SAFETY: signalled, so no pending submit uses it; taken out of the list, so destroyed once.
             unsafe { device.destroy_fence(fence, None) };
         }
@@ -5056,7 +5294,7 @@ fn forget_slot_fences(device: &ash::Device) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for fences in &mut slots.fences {
-        for fence in std::mem::take(fences) {
+        for (fence, _) in std::mem::take(fences) {
             // SAFETY: the device is idle, so the fence has signalled and no submit uses it.
             unsafe { device.destroy_fence(fence, None) };
         }
@@ -5100,10 +5338,11 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
     let buffers = [open.command];
     let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
-    let fence = submit_fence(device)?;
+    let serial = crate::device_lost::submit(crate::device_lost::Kind::Draws);
+    let fence = submit_fence(device, serial)?;
     // SAFETY: recording has ended, the queue belongs to this device, and the fence is new.
     unsafe { device.queue_submit(session.queue, &submits, fence) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
+        .map_err(crate::device_lost::vulkan("queue_submit"))?;
     if let Ok(mut pending) = in_flight().lock() {
         pending.push(open.command);
     }
@@ -5315,9 +5554,8 @@ pub(crate) fn settle(session: &crate::compute::Session) -> Result<(), DispatchEr
         .lock()
         .map(|mut pending| std::mem::take(&mut *pending))
         .unwrap_or_default();
-    // SAFETY: the device is live and the caller holds the session, so nothing submits meanwhile.
-    unsafe { device.device_wait_idle() }
-        .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+    crate::device_lost::wait_idle(device)?;
+    staging_idle(device);
     forget_slot_fences(device);
     gpu_clock_read(device);
     read_closed_queries(device);
@@ -5470,6 +5708,7 @@ fn render_resident_with(
                 }
             })?;
             kept_uploaded(device, &built.textures);
+            own_uploaded(device, &mut built.textures);
         }
         built.textures_uploaded = true;
     }
@@ -5858,7 +6097,7 @@ fn build_pipeline(
         let handle = create_graphics_pipeline(
             device,
             render_pass,
-            (vertex, fragment),
+            ((vertex, fragment), shaders),
             layout,
             size,
             geometry,
@@ -5988,6 +6227,10 @@ fn create_bound_resources(
     devices: Devices<'_>,
     bound: Bound<'_>,
 ) -> Result<BoundResources, DispatchError> {
+    // Named around what the pipeline owns alone, not around the textures kept across pipelines
+    // (D860), which name themselves: the outermost purpose wins.
+    let own = || crate::device_memory::purpose("pipelines' own textures and buffers");
+    let owned = own();
     let device = devices.device;
     let windows = bound.windows;
     // The two storage buffers every translated module declares, at set 0 bindings 0 and 1. Binding
@@ -6022,6 +6265,7 @@ fn create_bound_resources(
         ),
     };
     let buffers = [observation, guest_memory];
+    drop(owned);
     // One per slot, the default white texel where nothing asked for one; only the first takes the
     // harness's coarse level.
     let mut textures = Vec::with_capacity(MAX_TEXTURES);
@@ -6041,6 +6285,7 @@ fn create_bound_resources(
         } else if let Some(key) = kept {
             kept_texture(devices, key, words, sampling)?
         } else {
+            let _owned = own();
             create_texture(devices, words, coarse, sampling)?
         });
     }
@@ -6263,11 +6508,14 @@ fn pipeline_stages(
     ]
 }
 
-/// Creates the graphics pipeline from its stages and fixed-function state.
+/// A draw's vertex and fragment modules, with the words each was made from.
+type Stages<'a> = ((vk::ShaderModule, vk::ShaderModule), (&'a [u32], &'a [u32]));
+
+/// Creates the graphics pipeline from its stages, made from `words`, and fixed-function state.
 fn create_graphics_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
-    modules: (vk::ShaderModule, vk::ShaderModule),
+    (modules, words): Stages<'_>,
     layout: vk::PipelineLayout,
     size: (u32, u32),
     geometry: Geometry,
@@ -6372,8 +6620,12 @@ fn create_graphics_pipeline(
         None => info,
     }];
     let pipelines = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildPipeline, || {
-        // SAFETY: every referenced object is live and every slice outlives the call.
-        unsafe { device.create_graphics_pipelines(crate::pipeline_cache::cache(), &infos, None) }
+        crate::compile_watch::compiling("a draw's pipeline".to_owned(), &[words.0, words.1], || {
+            // SAFETY: every referenced object is live and every slice outlives the call.
+            unsafe {
+                device.create_graphics_pipelines(crate::pipeline_cache::cache(), &infos, None)
+            }
+        })
     })
     .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
     crate::pipeline_cache::keep(device);
@@ -7095,6 +7347,7 @@ fn ensure_draw_data(devices: Devices<'_>) -> Result<vk::Buffer, DispatchError> {
         return Ok(existing.buffer);
     }
     let size = DRAW_DATA_BYTES + DRAW_DATA_RANGE;
+    let _for = crate::device_memory::purpose("draw data");
     let (buffer, memory) = create_host_buffer(
         devices.instance,
         devices.physical,
@@ -7185,9 +7438,8 @@ fn write_one_draw_waiting(device: &ash::Device, words: &DrawWords) -> Result<u32
     if let Some(offset) = write_draw_data(std::slice::from_ref(words)) {
         return Ok(offset);
     }
-    // SAFETY: the device is live; once it is idle no recorded work still reads the buffer.
-    unsafe { device.device_wait_idle() }
-        .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+    // Once the device is idle no recorded work still reads the buffer.
+    crate::device_lost::wait_idle(device)?;
     reset_draw_data();
     write_draw_data(std::slice::from_ref(words)).ok_or(DispatchError::Unsupported(
         "the draw-data buffer has no room for one draw when empty".to_owned(),
@@ -7996,5 +8248,82 @@ mod tests {
             staged(&texels, 4, true).texels,
             std::borrow::Cow::Owned(_)
         ));
+    }
+
+    /// Free staging buffers are kept up to their bytes, the least recently given back let go of
+    /// first; one larger than all of them is let go of after its copy.
+    #[test]
+    fn free_staging_is_bounded_by_bytes() {
+        let Ok(session) = crate::compute::session() else {
+            eprintln!("no Vulkan device: staging is not exercised here");
+            return;
+        };
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let make = |size| {
+            let (buffer, memory) = super::create_readback_buffer(
+                &session.instance,
+                session.physical,
+                &session.device,
+                size,
+            )
+            .expect("a buffer");
+            super::Staging {
+                buffer,
+                memory,
+                size,
+            }
+        };
+        let quarter = super::STAGING_KEPT / 4;
+        let mut pool = super::StagingPool::default();
+        let quarters: Vec<super::Staging> = (0..6).map(|_| make(quarter)).collect();
+        let newest = quarters[5].buffer;
+        pool.free.extend(quarters);
+        super::trim_staging(&session.device, &mut pool);
+        assert_eq!(pool.free.len(), 4, "a quarter each, four kept");
+        assert!(pool.free.last().is_some_and(|s| s.buffer == newest));
+        pool.free.push(make(super::STAGING_KEPT + 4));
+        super::trim_staging(&session.device, &mut pool);
+        assert!(pool.free.is_empty(), "past the bound alone, it goes too");
+        pool.free.push(make(4));
+        super::trim_staging(&session.device, &mut pool);
+        assert_eq!(pool.free.len(), 1, "a small one is kept");
+        for staging in std::mem::take(&mut pool.free) {
+            // SAFETY: made above on this device and never used by a copy.
+            unsafe { session.device.destroy_buffer(staging.buffer, None) };
+            // SAFETY: as above, and its buffer is destroyed.
+            unsafe { session.device.free_memory(staging.memory, None) };
+        }
+    }
+
+    /// A target drawn at twice its extent (D862) takes a uniform fill in every pixel: the row it is
+    /// written into is copied into every row of the guest-extent image, and that drawn up.
+    #[test]
+    fn a_scaled_target_takes_a_uniform_fill_everywhere() {
+        if crate::compute::session().is_err() {
+            eprintln!("no Vulkan device: the scaled fill is not exercised here");
+            return;
+        }
+        let (width, height) = (12_u32, 6_u32);
+        let resident = super::ResidentAttachment::create_scaled(
+            (width, height),
+            None,
+            [0.0; 4],
+            (orbistoun_gpu::TargetEncoding::Unorm8, 2),
+        )
+        .expect("an attachment");
+        resident.reload_uniform(0x8040_2010).expect("filled");
+        let read = resident.read_back().expect("read back");
+        let rows = resident.read_rows((2, 3)).expect("rows");
+        resident.destroy();
+        assert_eq!(
+            read.bytes,
+            [0x10, 0x20, 0x40, 0x80].repeat((width * height) as usize)
+        );
+        assert_eq!(
+            rows.bytes,
+            [0x10, 0x20, 0x40, 0x80].repeat((width * 3) as usize)
+        );
     }
 }

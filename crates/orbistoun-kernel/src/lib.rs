@@ -4731,6 +4731,8 @@ fn fill_from_file(base: u64, len: u64, fd: u64, offset: u64) -> bool {
     let (Ok(length), Ok(at)) = (usize::try_from(len), usize::try_from(base)) else {
         return false;
     };
+    // The host's file read writes the pages from its kernel, where no fault commits them.
+    orbistoun_mem::lazy::commit(base, len);
     // SAFETY: the range was just reserved read-write for this mapping, which nothing else holds
     // yet, and is `len` bytes long.
     let pages = unsafe {

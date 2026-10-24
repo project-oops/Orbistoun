@@ -313,6 +313,12 @@ a feature whose work is never submitted - is not stopped. The title decided to s
 and the wall is the input to that decision. Tracing it back one link per run costs a run per
 link, so the sub-loop answers with interventions and with what the title tells its own scripts:
 
+0. **Read the decision before running anything.** `orbistoun-cli callers <eboot> <global>` lists
+   every instruction that reads or writes a global, and `orbistoun-cli disasm <eboot> <offset>`
+   shows the condition around one, both in under a second. Most of a gate - which flags it
+   combines, which functions set them, which script natives touch them - is answered here; a
+   run is spent only on the values static reading cannot know, tallied with step 3 at the
+   gate's own instructions.
 1. **What never runs.** Execute breakpoints (`ORBISTOUN_WATCHPOINT=<addr>:x`) on the work the
    frame lacks say which of its entry points run; the summary names each, hit or not.
 2. **Who calls it.** The first execute hit reports the top of the stack, so an indirect call - a
@@ -321,6 +327,9 @@ link, so the sub-loop answers with interventions and with what the title tells i
 3. **What the scripts asked.** `<addr>:trace@<reg>` on a dispatch site stays armed and tallies a
    register at every hit; on a script VM's `call <reg>` that is every native the scripts called,
    with counts. A native that should run and does not is the decision, in the title's own words.
+   A tally over a whole run is mostly boot and loading frames: count the phase's own frames first
+   (the report's last-minute line) and open the window at its first flip with
+   `ORBISTOUN_WATCH_FROM=<flip>`, so the values describe the phase the question is about.
 4. **Whether it is the cause.** `ORBISTOUN_HOLD=<addr>:<value>/<width>` keeps a value for the
    whole run; `?<addr>=<value>` writes it only while a guard word holds (an object's vtable), so
    memory the guest has not built yet is left alone. One run says whether a gate is the cause -

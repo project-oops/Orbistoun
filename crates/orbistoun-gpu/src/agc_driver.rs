@@ -8,11 +8,20 @@
 use crate::cp;
 use crate::pipeline::{GuestMemory, Pipeline, Queue, Submission, SubmissionReport};
 use crate::registers::{ColourTarget, ComponentSwap};
+use crate::tally::Tallied;
 use crate::tiling;
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
 use orbistoun_translate::{Fidelity, Strategy, Width};
 use std::sync::{Arc, Mutex, OnceLock};
+
+mod attachments;
+mod census;
+mod last_bound;
+
+pub use census::host_held;
+
+use last_bound::bind_last_submission;
 
 guest_module! {
     "libSceAgcDriver" {
@@ -386,7 +395,9 @@ pub fn install_draw_executor(executor: DrawExecutor) {
 
 /// Seeds the colour attachments after the first before a submission's draws are carried out
 /// (D825): each by the id `SetRenderTargets` names it by and its extent, with what it holds as
-/// linear `Rgba8` words. `false` when the device could not take them.
+/// linear `Rgba8` words. No words is one the device holds already, kept from an earlier segment
+/// (D948): it keeps what it holds, and answers `false` where it holds nothing of that extent under
+/// that id. `false` when the device could not take them.
 pub type MoreTargetsSeeder = fn(&[(crate::ResourceId, (u32, u32), &[u32])]) -> bool;
 
 /// What a colour attachment after the first holds once the draws ran, as linear `Rgba8` words, by
@@ -1243,7 +1254,7 @@ impl GuestCp<'_> {
                 )
             })?;
             note_drawn(&drawn_bases(target, &more), submission);
-            return self.write_back_more_targets(&more);
+            return self.write_back_more_targets(&more, false);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714). A frame still pending with its band
@@ -1280,17 +1291,18 @@ impl GuestCp<'_> {
         if matches!(before, TargetRead::HeldOverDeferred) {
             drop_covered(target.base, target.words() as u64 * 4);
         }
-        self.write_back_more_targets(&more)
+        // Left on the device as the first is, until something touches them (D948).
+        self.write_back_more_targets(&more, true)
     }
 
-    /// Hands the device what each colour attachment after the first holds, read from guest memory
-    /// now (D825), and answers each with its id. They are not deferred to the flip as the first
-    /// is: each is read before and written back after every submission that draws into it.
+    /// Hands the device what each colour attachment after the first holds (D825), and answers
+    /// each: read from guest memory now, or - one still kept on the device from an earlier segment,
+    /// its memory untouched since (D948) - held there and not read.
     fn seed_more_targets(
         &mut self,
         submission: &Submission,
         first: ColourTarget,
-    ) -> Result<Vec<(ColourTarget, ComponentSwap, crate::ResourceId)>, String> {
+    ) -> Result<Vec<attachments::More>, String> {
         if submission.more_colour_targets.is_empty() {
             return Ok(Vec::new());
         }
@@ -1300,7 +1312,6 @@ impl GuestCp<'_> {
             );
         };
         let mut more = Vec::with_capacity(submission.more_colour_targets.len());
-        let mut before = Vec::with_capacity(more.capacity());
         for attachment in &submission.more_colour_targets {
             let (target, swap) = writable_more_target(attachment, first).ok_or_else(|| {
                 format!(
@@ -1321,49 +1332,85 @@ impl GuestCp<'_> {
                     }
                 )
             })?;
+            // Held on the device, nothing having touched its pages since: a compressed one is read
+            // afresh, since expanding its keys writes them.
+            if attachment.dcc.is_none()
+                && let Some(memory_then) = attachments::held(target, swap, attachment.id)
+            {
+                more.push(attachments::More {
+                    target,
+                    swap,
+                    id: attachment.id,
+                    memory_then,
+                    held: true,
+                });
+                continue;
+            }
             // Its keys expanded, as the first's are, so what is read and drawn over is its texels
             // (D873).
             if let Some(dcc) = attachment.dcc {
                 self.expand_dcc(dcc, target.layout)?;
             }
-            let length = target.words() * 4;
-            // A frame still pending for its pages is written back first, so this reads it.
-            let bytes = self
-                .settle_pending(target.base, length as u64)
-                .then(|| cp::CpMemory::read(self, target.base, length))
-                .flatten()
-                .filter(|bytes| bytes.len() >= length)
-                .ok_or_else(|| {
-                    format!(
-                        "its colour attachment at {:#x}, {length:#x} bytes, is not readable guest memory",
-                        target.base
-                    )
-                })?;
-            before.push(target.detile_mapped(&words_of(&bytes), |w| loaded(w, target, swap)));
-            more.push((target, swap, attachment.id));
+            more.push(self.read_more_target(target, swap, attachment.id)?);
         }
-        let seeds: Vec<(crate::ResourceId, (u32, u32), &[u32])> = more
-            .iter()
-            .zip(&before)
-            .map(|((target, _, id), words)| (*id, (target.width, target.height), words.as_slice()))
-            .collect();
-        if seed(&seeds) {
-            Ok(more)
-        } else {
-            Err("the device could not take its further colour attachments".to_owned())
+        if attachments::seed(*seed, &more) {
+            return Ok(more);
         }
+        // The device no longer holds one kept there: each such is written back, read, and handed
+        // over afresh.
+        if more.iter().any(|kept| kept.held) {
+            for kept in &mut more {
+                if kept.held {
+                    *kept = self.read_more_target(kept.target, kept.swap, kept.id)?;
+                }
+            }
+            if attachments::seed(*seed, &more) {
+                return Ok(more);
+            }
+        }
+        Err("the device could not take its further colour attachments".to_owned())
+    }
+
+    /// A colour attachment after the first read from guest memory: a frame still pending for its
+    /// pages, or a write deferred over them, goes there first, so this reads it.
+    fn read_more_target(
+        &mut self,
+        target: ColourTarget,
+        swap: ComponentSwap,
+        id: crate::ResourceId,
+    ) -> Result<attachments::More, String> {
+        let length = target.words() * 4;
+        let bytes = self
+            .settle_pending(target.base, length as u64)
+            .then(|| cp::CpMemory::read(self, target.base, length))
+            .flatten()
+            .filter(|bytes| bytes.len() >= length)
+            .ok_or_else(|| {
+                format!(
+                    "its colour attachment at {:#x}, {length:#x} bytes, is not readable guest memory",
+                    target.base
+                )
+            })?;
+        Ok(attachments::More::read(target, swap, id, bytes))
     }
 
     /// Writes each colour attachment after the first back where the guest reads it, tiled and in
-    /// its byte order, as the device drew it (D825).
+    /// its byte order, as the device drew it (D825) - or, where `defer`, leaves it on the device
+    /// with its write-back deferred over its own pages (D948), and writes back now only one that
+    /// cannot wait.
     fn write_back_more_targets(
         &mut self,
-        more: &[(ColourTarget, ComponentSwap, crate::ResourceId)],
+        more: &[attachments::More],
+        defer: bool,
     ) -> Result<(), String> {
         let Some((_, read)) = more_targets_io().get() else {
             return Ok(());
         };
-        for &(target, swap, id) in more {
+        for kept in more {
+            if defer && attachments::defer(kept) {
+                continue;
+            }
+            let (target, swap, id) = (kept.target, kept.swap, kept.id);
             let after = read(id).ok_or_else(|| {
                 format!(
                     "its colour attachment at {:#x} could not be read back",
@@ -1466,6 +1513,14 @@ fn end_dispatch_poll() {
 /// How long a dispatch's preparation takes before the run names it.
 const SLOW_DISPATCH_PREPARE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How a slow preparation ended, for its line: "prepared", or "refused: " and the refusal.
+fn preparation_outcome<T>(prepared: &Result<T, String>) -> std::borrow::Cow<'static, str> {
+    match prepared {
+        Ok(_) => "prepared".into(),
+        Err(why) => format!("refused: {why}").into(),
+    }
+}
+
 /// Whether a submission's draws write depth alone: colour target zero unbound - `COLOR_INVALID`
 /// (D779) - or its writes switched off by the target mask or `CB_DISABLE` (D941).
 fn draws_depth_only(submission: &Submission) -> bool {
@@ -1475,14 +1530,15 @@ fn draws_depth_only(submission: &Submission) -> bool {
             .is_some_and(|format| format.is_unbound())
 }
 
-/// Runs a guest compute dispatch's module over its window, images and buffers: the module with its
-/// [`crate::content_hash`], the window's words before, the push-constant block and the grid, the
-/// images it fetches from and stores to, and each of its own buffers' words before (D746). Answers
-/// the window's words after, whether any access escaped the window, the stored image's texels
-/// after, and each buffer's words after, or why the device could not run it. Installed by the
-/// worker, which owns the graphics device.
+/// Runs a guest compute dispatch's module over its window, images and buffers: the guest program's
+/// address with the module translated from it and the module's [`crate::content_hash`], the
+/// window's words before, the push-constant block and the grid, the images it fetches from and
+/// stores to, and each of its own buffers' words before (D746). Answers the window's words after,
+/// whether any access escaped the window, the stored image's texels after, and each buffer's words
+/// after, or why the device could not run it. Installed by the worker, which owns the graphics
+/// device.
 pub type DispatchExecutor = fn(
-    (&[u32], u64),
+    (u64, &[u32], u64),
     &[u32],
     (&[u32], [u32; 3]),
     (
@@ -1491,12 +1547,12 @@ pub type DispatchExecutor = fn(
     ),
 ) -> Result<DispatchDone, String>;
 
-/// What a dispatch left: the window's words, whether an access escaped it, each stored image's
-/// texels in the order it bound them (D893), and its own buffers' words with their write masks
-/// (D746, D809).
+/// What a dispatch left: the window's words, whether an access escaped it and the backward branch
+/// of a loop it cut for running past its cap (D949), each stored image's texels in the order it
+/// bound them (D893), and its own buffers' words with their write masks (D746, D809).
 pub type DispatchDone = (
     Vec<u32>,
-    bool,
+    (bool, Option<u32>),
     Vec<Vec<u32>>,
     Vec<crate::dispatch::BufferAfter>,
 );
@@ -1534,6 +1590,21 @@ static PASS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// Sets whether a refused dispatch or draw segment is passed over (D896).
 pub fn set_pass_refused(pass: bool) {
     PASS_REFUSED.store(pass, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a refused draw segment is passed over (D896): whether the device draws a segment or
+/// refuses it then changes nothing the command processor does next, so a drawer may carry the
+/// draws out after the command processor has gone on (D948).
+#[must_use]
+pub fn passing_refused() -> bool {
+    PASS_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keeps a draw segment the device refused after the command processor went on as one passed over
+/// (D896, D948), so the run's report counts it beside those refused while it waited.
+pub fn note_draws_passed_over(why: &str) {
+    note_draw_refusal(why.to_owned());
+    let _ = pass_over("draws", why);
 }
 
 /// How many distinct refusals passed over are kept.
@@ -1574,6 +1645,35 @@ pub fn passed_refusals() -> Vec<(String, u64)> {
         .clone()
 }
 
+/// Says, on a line of its own that starts "refused:", that a compute dispatch's refusal stands:
+/// the program, the dispatch's byte and grid, why, and whether the command processor went on past
+/// it or stops there, where nothing after it retires and the guest waits on it. Once for each
+/// program, so a refusal met every frame does not flood the log; a run that sat silent behind one
+/// for 25 minutes is what this ends.
+fn say_refused_dispatch(
+    (program, offset, groups): (Option<u64>, u32, [u32; 3]),
+    why: &str,
+    passed: bool,
+) {
+    static SAID: OnceLock<Mutex<std::collections::HashSet<Option<u64>>>> = OnceLock::new();
+    let first = SAID
+        .get_or_init(Mutex::default)
+        .lock()
+        .is_ok_and(|mut said| said.insert(program));
+    if !first {
+        return;
+    }
+    let program = program.map_or_else(|| "unknown".to_owned(), |at| format!("{at:#x}"));
+    tracing::warn!(
+        "refused: the compute dispatch at byte {offset:#x}, the program at {program}, {groups:?} groups: {why}; {}",
+        if passed {
+            "passed over (D896)"
+        } else {
+            "the command processor stops at it, and nothing after it retires"
+        }
+    );
+}
+
 /// Why the most recent dispatch was not carried out, for the run report.
 fn dispatch_refusal() -> &'static Mutex<Option<String>> {
     static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
@@ -1584,6 +1684,54 @@ fn note_dispatch_refusal(why: String) {
     *dispatch_refusal()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+}
+
+/// Refuses what a dispatch left when it is not the guest's: its module cut a loop that ran past its
+/// cap (D949), or an access escaped its window, as `(escaped, loop_cut)` says.
+fn refuse_inexact(
+    prepared: &crate::pipeline::PreparedDispatch,
+    (escaped, loop_cut): (bool, Option<u32>),
+) -> Result<(), String> {
+    if let Some(branch) = loop_cut {
+        return Err(loop_cut_refusal(
+            prepared.program,
+            branch,
+            &prepared.buffers,
+        ));
+    }
+    if escaped {
+        return Err(concat!(
+            "an access left its window or went through a buffer descriptor whose addressing ",
+            "is not modelled, so what it wrote is not the guest's"
+        )
+        .to_owned());
+    }
+    Ok(())
+}
+
+/// Why a dispatch of the compute program at `program` is refused when its module cut the loop
+/// closed by the backward branch at byte `branch` (D949), naming the guest ranges it bound by slot,
+/// `buffers`: what the loop read is there, for `ORBISTOUN_SAVE` to keep.
+fn loop_cut_refusal(program: u64, branch: u32, buffers: &[(u64, u64)]) -> String {
+    let bound: Vec<String> = buffers
+        .iter()
+        .map(|(address, bytes)| format!("{address:#x}+{bytes:#x}"))
+        .collect();
+    format!(
+        concat!(
+            "a loop at +{:#x} (its backward branch) in the compute program at {:#x} ran past {} ",
+            "iterations and was cut, so what the dispatch wrote is not the guest's (D949); its ",
+            "buffers by slot: {}"
+        ),
+        branch,
+        program,
+        orbistoun_translate::control::LOOP_CAP,
+        if bound.is_empty() {
+            "none".to_owned()
+        } else {
+            bound.join(", ")
+        }
+    )
 }
 
 /// Why the most recent compute dispatch was refused, if one was.
@@ -1865,7 +2013,7 @@ fn note_dispatch_writes(
             let lit = match before {
                 crate::dispatch::BufferBefore::Words(words) => Some(words.iter().any(|&w| w != 0)),
                 crate::dispatch::BufferBefore::Unread(_)
-                | crate::dispatch::BufferBefore::Alias(_) => None,
+                | crate::dispatch::BufferBefore::Alias(..) => None,
             };
             (at, bytes, lit)
         })
@@ -2098,7 +2246,7 @@ fn buffer_writes_into<'a>(
         let (runs, whole): (Runs<'_>, bool) = match before {
             // Written back through the slot it shares a buffer with (D937).
             BufferBefore::Words(words) if words.is_empty() => continue,
-            BufferBefore::Alias(_) => continue,
+            BufferBefore::Alias(..) => continue,
             BufferBefore::Words(words) => {
                 if after.words.len() != words.len() {
                     return Err("the device answered a buffer of another size".to_owned());
@@ -2210,7 +2358,7 @@ fn uniform_buffers(
                 }
                 crate::dispatch::BufferBefore::Words(_) => &after.words,
                 // A fill through the slot it shares a buffer with, if any (D937).
-                crate::dispatch::BufferBefore::Alias(_) => return None,
+                crate::dispatch::BufferBefore::Alias(..) => return None,
             };
             let (&first, rest) = held.split_first()?;
             rest.iter().all(|&word| word == first).then_some(cp::Fill {
@@ -2247,15 +2395,16 @@ impl GuestCp<'_> {
     fn read_buffers(
         &self,
         ranges: &[(u64, u64)],
-        (unread, aliases): (&[bool], &[Option<usize>]),
+        (unread, aliases): (&[bool], &[crate::pipeline::SharedBuffer]),
     ) -> Result<Vec<crate::dispatch::BufferBefore>, String> {
         ranges
             .iter()
             .enumerate()
             .map(|(slot, &(address, bytes))| {
-                // The same range as an earlier slot binds that slot's buffer (D937).
-                if let Some(&Some(earlier)) = aliases.get(slot) {
-                    return Ok(crate::dispatch::BufferBefore::Alias(earlier));
+                // The same range as another slot, or part of one it shares (D937, D953), binds
+                // that slot's buffer.
+                if let Some(&Some((holder, offset))) = aliases.get(slot) {
+                    return Ok(crate::dispatch::BufferBefore::Alias(holder, offset));
                 }
                 let span = usize::try_from(bytes.next_multiple_of(4))
                     .map_err(|_| "a buffer larger than this host addresses")?;
@@ -2312,7 +2461,8 @@ impl GuestCp<'_> {
             let started = std::time::Instant::now();
             let prepared = self.prepare_state(&state);
             // A preparation slow enough to hold a frame by itself is named, with its grid, so the
-            // program whose translation or tracing costs it is found.
+            // program whose translation or tracing costs it is found - and a refused one with why,
+            // on the same line, so the cost and the cause are read together.
             let took = started.elapsed();
             if took >= SLOW_DISPATCH_PREPARE {
                 tracing::info!(
@@ -2320,11 +2470,7 @@ impl GuestCp<'_> {
                     took.as_millis(),
                     state.program,
                     state.groups,
-                    if prepared.is_ok() {
-                        "prepared"
-                    } else {
-                        "refused"
-                    },
+                    preparation_outcome(&prepared),
                 );
             }
             prepared
@@ -2494,22 +2640,22 @@ impl GuestCp<'_> {
                 .map_err(|why| format!("{why}, in the program at {:#x}", prepared.program))?;
             Ok::<_, String>((window, buffers))
         })?;
-        let (after, escaped, stored, buffers_after) = span(Span::DispatchExecute, || {
+        // For a backend's diagnostics, which see only the words.
+        crate::bound_ranges::note(
+            prepared.module_hash,
+            base.map(|at| (at, before.len() as u64 * 4)),
+            &prepared.buffers,
+        );
+        let (after, exactness, stored, buffers_after) = span(Span::DispatchExecute, || {
             execute(
-                (&prepared.module, prepared.module_hash),
+                (prepared.program, &prepared.module, prepared.module_hash),
                 &before,
                 (&prepared.push, prepared.groups),
                 (&prepared.images, &buffers_before),
             )
         })?;
         let _written_back = crate::perf::SpanGuard::start(Span::DispatchWriteBack);
-        if escaped {
-            return Err(concat!(
-                "an access left its window or went through a buffer descriptor whose addressing ",
-                "is not modelled, so what it wrote is not the guest's"
-            )
-            .to_owned());
-        }
+        refuse_inexact(&prepared, exactness)?;
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
         }
@@ -3190,12 +3336,9 @@ fn note_drawn(targets: &[u64], submission: &Submission) {
 }
 
 /// The bases of every colour attachment a frame drew into: the first, then each one more.
-fn drawn_bases(
-    first: ColourTarget,
-    more: &[(ColourTarget, ComponentSwap, crate::ResourceId)],
-) -> Vec<u64> {
+fn drawn_bases(first: ColourTarget, more: &[attachments::More]) -> Vec<u64> {
     std::iter::once(first.base)
-        .chain(more.iter().map(|(target, _, _)| target.base))
+        .chain(more.iter().map(|kept| kept.target.base))
         .collect()
 }
 
@@ -3527,6 +3670,9 @@ fn read_target(
 ) -> Option<TargetRead> {
     let read_started = std::time::Instant::now();
     let length = target.words() * 4;
+    // An attachment kept on the device over it goes back first: its memory is not what this last
+    // wrote or read there, whatever the host says of its pages (D948).
+    attachments::settle_over(target.base, length as u64);
     // Unchanged is asked of the host first: whether any page of the target has been written since
     // this last wrote or read it. Only where the host cannot say, or says it was, are the bytes
     // compared - a write of the same bytes is still unchanged. Read-only and unwritten (D720) is
@@ -3615,7 +3761,7 @@ fn read_target(
     // (D714).
     replace_written(Some(Written {
         target,
-        contents: Contents::Bytes(Arc::new(bytes)),
+        contents: Contents::kept(bytes),
         since,
     }));
     crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
@@ -3705,7 +3851,7 @@ fn write_target(
         let since = orbistoun_mem::watch::mark(target.base, words as u64 * 4);
         replace_written(wrote.then(|| Written {
             target,
-            contents: Contents::Bytes(Arc::new(written)),
+            contents: Contents::kept(written),
             since,
         }));
         // Protected from here, as write-watch is marked from here (D720).
@@ -3784,7 +3930,7 @@ fn keep_spare(contents: Contents) {
         && let Ok(bytes) = Arc::try_unwrap(bytes)
         && let Ok(mut spare) = spare().lock()
     {
-        *spare = Some(bytes);
+        *spare = Some(bytes.into_inner());
     }
 }
 
@@ -3869,11 +4015,16 @@ struct Written {
 /// still deferred over the whole of it (D719) - one word throughout, kept without the bytes.
 #[derive(Debug, Clone)]
 enum Contents {
-    Bytes(Arc<Vec<u8>>),
+    Bytes(Arc<census::KeptBytes>),
     Uniform { word: u32, length: usize },
 }
 
 impl Contents {
+    /// `bytes`, kept and counted among the colour target copies while they live.
+    fn kept(bytes: Vec<u8>) -> Self {
+        Self::Bytes(Arc::new(census::KeptBytes::new(bytes)))
+    }
+
     /// How many bytes.
     fn len(&self) -> usize {
         match self {
@@ -4331,6 +4482,15 @@ enum Held {
     },
     /// One word throughout: a command-processor fill.
     Fill(u32),
+    /// A colour attachment after the first, as the device holds it under `id` (D948): kept there
+    /// across the draw segments that draw into it, read off the device when carried out.
+    Attachment {
+        id: crate::ResourceId,
+        target: ColourTarget,
+        swap: ComponentSwap,
+        /// As [`Held::Frame`]'s.
+        memory_then: Contents,
+    },
 }
 
 impl Deferred {
@@ -4338,7 +4498,7 @@ impl Deferred {
     const fn snapshot(&self) -> Option<u64> {
         match self.held {
             Held::Frame { snapshot, .. } => Some(snapshot),
-            Held::Fill(_) => None,
+            Held::Fill(_) | Held::Attachment { .. } => None,
         }
     }
 
@@ -4431,6 +4591,12 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     }
     let (snapshot, target, swap, memory_then) = match &copy.held {
         Held::Fill(pattern) => return fill_guest(copy.destination, copy.length, *pattern),
+        Held::Attachment {
+            id,
+            target,
+            swap,
+            memory_then,
+        } => return attachments::carry_out(copy, *id, (*target, *swap, memory_then)),
         Held::Frame {
             snapshot,
             target,
@@ -4603,6 +4769,25 @@ fn carry_out_all(copies: &[Deferred], hooks: &LazyCopies) -> bool {
 /// one could not be.
 pub fn carry_out_before_reading(address: u64, length: u64) -> bool {
     carry_out_overlapping(address, length)
+}
+
+/// What `submission`'s colour target holds in guest memory now, as linear `Rgba8` words: for a
+/// drawer told it holds the target ([`Before::Held`]) that has let go of it since, since the
+/// target's frame was written back or kept whole in a snapshot first. Every write deferred over the
+/// target is carried out before it is read (D719, D948), so the words are what an immediate
+/// write-back would have left there. `None` where the target is not one a frame is drawn over or
+/// its memory cannot be read.
+#[must_use]
+pub fn target_in_memory(submission: &Submission) -> Option<Vec<u32>> {
+    let (target, swap) = writable_target(submission).ok()?;
+    let length = target.words() * 4;
+    let cp = GuestCp {
+        memory: MappedRegions::current(),
+        submission: None,
+    };
+    let bytes =
+        cp::CpMemory::read(&cp, target.base, length).filter(|bytes| bytes.len() >= length)?;
+    Some(target.detile_mapped(&words_of(&bytes), |w| loaded(w, target, swap)))
 }
 
 /// An access to guest memory faulted: when `address` is in a deferred copy's destination, the copy
@@ -5083,7 +5268,10 @@ impl cp::CpMemory for GuestCp<'_> {
                     "the compute dispatch at byte {:#x}: {why}",
                     dispatch.offset
                 ));
-                pass_over("compute dispatch", &why)
+                let passed = pass_over("compute dispatch", &why);
+                let program = self.dispatch_program(dispatch.stream, dispatch.offset);
+                say_refused_dispatch((program, dispatch.offset, dispatch.groups), &why, passed);
+                passed
             }
         }
     }
@@ -5610,6 +5798,7 @@ fn last_submission() -> &'static Mutex<Option<Submission>> {
 /// Read by the run report (`orbistoun-worker`), beside the reach and import counts.
 #[must_use]
 pub fn last_submission_report() -> Option<SubmissionReport> {
+    bind_last_submission();
     last_submission()
         .lock()
         .ok()
@@ -5620,6 +5809,7 @@ pub fn last_submission_report() -> Option<SubmissionReport> {
 /// worker can drive it to a backend. `None` until a guest submits one.
 #[must_use]
 pub fn take_last_submission() -> Option<Submission> {
+    bind_last_submission();
     last_submission()
         .lock()
         .ok()
@@ -5681,10 +5871,11 @@ fn submit_acb(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// The pipeline a running guest's submissions are prepared through, kept for the run so its shader
-/// cache survives between them.
-fn live_pipeline() -> &'static Mutex<Option<Pipeline>> {
-    static LIVE: OnceLock<Mutex<Option<Pipeline>>> = OnceLock::new();
-    LIVE.get_or_init(|| Mutex::new(None))
+/// cache survives between them. What its caches hold is published each time it is let go.
+fn live_pipeline() -> &'static Tallied<Option<Pipeline>, 5> {
+    static LIVE: Tallied<Option<Pipeline>, 5> =
+        Tallied::new(None, |live| live.as_ref().map_or([0; 5], Pipeline::held));
+    &LIVE
 }
 
 /// Where the title's kept translations are written, once a run has named it (D113).
@@ -5728,6 +5919,36 @@ pub fn prepare_translations(
 
 /// Writes any translation the pipeline made since the last write.
 fn keep_new_translations(pipeline: &mut Pipeline) {
+    /// When the store was last written. A title's store is hundreds of megabytes, and a frame
+    /// that translates a shader a submission wrote it whole after each.
+    static WRITTEN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if let Ok(mut written) = WRITTEN.lock() {
+        if written.is_some_and(|at| at.elapsed() < TRANSLATIONS_KEPT_EVERY) {
+            return;
+        }
+        *written = Some(std::time::Instant::now());
+    }
+    write_translations(pipeline);
+}
+
+/// The least time between two writes of the kept translations while a run goes on; the run's end
+/// writes what is left ([`flush_translations`]).
+const TRANSLATIONS_KEPT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Writes any translation the live pipeline made since the last write, however recently that was:
+/// at the run's end.
+pub fn flush_translations() {
+    if let Some(pipeline) = live_pipeline()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        write_translations(pipeline);
+    }
+}
+
+/// Writes the pipeline's kept translations where the run named, when they changed.
+fn write_translations(pipeline: &mut Pipeline) {
     let (Some(path), Some(store)) = (TRANSLATIONS_AT.get(), pipeline.translation_store_mut())
     else {
         return;
@@ -5748,12 +5969,14 @@ fn keep_new_translations(pipeline: &mut Pipeline) {
 /// already translated, and binds it while its words wait in the queue behind it. So what a
 /// submission binds is looked up here as it is carried out, not where it was prepared, and a
 /// module whose draws were refused stays here for the next submission that binds it.
-fn undelivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>
-{
-    static PENDING: OnceLock<Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>> =
-        OnceLock::new();
-    PENDING.get_or_init(Default::default)
+fn undelivered_modules() -> &'static Tallied<KeptModules, 1> {
+    static PENDING: Tallied<KeptModules, 1> =
+        Tallied::new(std::collections::BTreeMap::new(), census::modules_bytes);
+    &PENDING
 }
+
+/// Modules' words by the resource they are bound as.
+type KeptModules = std::collections::BTreeMap<crate::ResourceId, Vec<u32>>;
 
 /// Keeps the modules a preparation made until a drawn submission carries them. Called with the
 /// live pipeline still held, so no other preparation can bind one before it is kept.
@@ -5798,10 +6021,10 @@ fn with_bound_modules(submission: &Submission) -> std::borrow::Cow<'_, Submissio
 /// Every module a drawn submission has carried to the backend, kept so a submission can be driven
 /// again to a backend of its own, which holds none of them (a draw's change, measured at the run's
 /// end).
-fn delivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>> {
-    static DELIVERED: OnceLock<Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>> =
-        OnceLock::new();
-    DELIVERED.get_or_init(Default::default)
+fn delivered_modules() -> &'static Tallied<KeptModules, 1> {
+    static DELIVERED: Tallied<KeptModules, 1> =
+        Tallied::new(std::collections::BTreeMap::new(), census::modules_bytes);
+    &DELIVERED
 }
 
 /// Moves the modules a drawn submission carried out of the undelivered store: the backend holds
@@ -6015,7 +6238,13 @@ fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrit
         || (Submission::default(), Some(Vec::new())),
         |pipeline| {
             let reads = SettledReads(memory);
-            let submission = pipeline.submit(bytes, Queue::Draw, &[], &reads);
+            // A stream drawn a segment at a time has each segment prepared, and bound, as it is
+            // reached (D729); what this preparation would bind for its draws is never drawn.
+            let submission = if cp::carried_out_whole(bytes) {
+                pipeline.submit(bytes, Queue::Draw, &[], &reads)
+            } else {
+                pipeline.submit_per_segment(bytes, Queue::Draw, &[], &reads)
+            };
             keep_new_translations(pipeline);
             note_made(&submission);
             // What the submission carries forward - the tables its registers load from, the
@@ -6473,15 +6702,24 @@ struct StalledStream {
 }
 
 /// The graphics stream a memory wait stopped, while the queue stands at that wait.
-fn stalled_stream() -> &'static Mutex<Option<StalledStream>> {
-    static STALLED: Mutex<Option<StalledStream>> = Mutex::new(None);
+fn stalled_stream() -> &'static Tallied<Option<StalledStream>, 1> {
+    static STALLED: Tallied<Option<StalledStream>, 1> = Tallied::new(None, |stalled| {
+        [stalled.as_ref().map_or(0, |stalled| {
+            census::stream_bytes(&stalled.bytes, &stalled.submission)
+        })]
+    });
     &STALLED
 }
 
 /// The graphics streams handed to the queue since a memory wait stopped it, in order (D932).
-fn held_streams() -> &'static Mutex<std::collections::VecDeque<(Vec<u8>, Submission)>> {
-    static HELD: Mutex<std::collections::VecDeque<(Vec<u8>, Submission)>> =
-        Mutex::new(std::collections::VecDeque::new());
+fn held_streams() -> &'static Tallied<std::collections::VecDeque<(Vec<u8>, Submission)>, 1> {
+    static HELD: Tallied<std::collections::VecDeque<(Vec<u8>, Submission)>, 1> =
+        Tallied::new(std::collections::VecDeque::new(), |held| {
+            [held
+                .iter()
+                .map(|(stream, submission)| census::stream_bytes(stream, submission))
+                .sum()]
+        });
     &HELD
 }
 
@@ -6679,9 +6917,14 @@ struct Aside {
 
 /// The asynchronous compute streams stepped aside, oldest first: each queue's first waits, and the
 /// rest of that queue's wait behind it in its order (D891, D902).
-fn aside() -> &'static Mutex<std::collections::VecDeque<Aside>> {
-    static ASIDE: Mutex<std::collections::VecDeque<Aside>> =
-        Mutex::new(std::collections::VecDeque::new());
+fn aside() -> &'static Tallied<std::collections::VecDeque<Aside>, 1> {
+    static ASIDE: Tallied<std::collections::VecDeque<Aside>, 1> =
+        Tallied::new(std::collections::VecDeque::new(), |aside| {
+            [aside
+                .iter()
+                .map(|aside| census::stream_bytes(&aside.bytes, &aside.submission))
+                .sum()]
+        });
     &ASIDE
 }
 
@@ -6947,6 +7190,35 @@ fn first_unwritable(
 
 #[cfg(test)]
 mod tests {
+    /// A slow preparation that was refused is named with its refusal on the same line: a bare
+    /// "refused" left Grand Theft Auto V's in-world compute passes with no cause in the run log.
+    #[test]
+    fn a_refused_slow_preparation_says_why() {
+        assert_eq!(
+            super::preparation_outcome(&Ok::<(), String>(())),
+            "prepared"
+        );
+        assert_eq!(
+            super::preparation_outcome(&Err::<(), _>("no device".to_owned())),
+            "refused: no device"
+        );
+    }
+
+    /// A dispatch whose module cut a runaway loop is refused naming the program, the loop's
+    /// backward branch, the cap it ran past and the ranges it bound (D949).
+    #[test]
+    fn a_cut_loop_names_its_program_and_branch() {
+        assert_eq!(
+            super::loop_cut_refusal(0x4000_03d8_7800, 0x60, &[(0x7400_1000_0000, 0x40)]),
+            concat!(
+                "a loop at +0x60 (its backward branch) in the compute program at 0x400003d87800 ",
+                "ran past 1048576 iterations and was cut, so what the dispatch wrote is not the ",
+                "guest's (D949); its buffers by slot: 0x740010000000+0x40"
+            )
+        );
+        assert!(super::loop_cut_refusal(0x1000, 0x8, &[]).ends_with("by slot: none"));
+    }
+
     /// No deferred copy guards pages whose words are being edited in place: the edit's writes would
     /// fault on the guard, and the edit no longer holds the deferred list against that - its
     /// faults' handler takes the list, which deadlocked Grand Theft Auto V's write-back drawn on
@@ -8219,7 +8491,7 @@ mod tests {
     /// deferred copies and protection are kept by whole host pages, and a page one test left
     /// guarded can hold the next test's freshly allocated buffer. That copy is then carried out
     /// under the next test's write allowance, refused, and fails whatever touched the page.
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         // Each test starts on a queue nothing has stopped.
@@ -8468,7 +8740,6 @@ mod tests {
     fn a_target_under_its_own_deferred_frame_is_held() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, Written};
         use fake::TAKEN;
-        use std::sync::Arc;
         use std::sync::atomic::Ordering;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
@@ -8487,7 +8758,7 @@ mod tests {
         super::forget_written();
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            contents: super::Contents::kept(memory.to_vec()),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -8721,7 +8992,7 @@ mod tests {
 
     /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's
     /// read.
-    fn region_of(buffer: &[u8]) -> (u64, u64) {
+    pub(super) fn region_of(buffer: &[u8]) -> (u64, u64) {
         let base = buffer.as_ptr() as usize as u64;
         (base, base + buffer.len() as u64)
     }
@@ -8920,7 +9191,7 @@ mod tests {
 
     /// Lets the command processor write `[base, base + len)` and nothing else - a test's own
     /// buffer, never an address another test names.
-    fn allow_writes_to(base: u64, len: u64) {
+    pub(super) fn allow_writes_to(base: u64, len: u64) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static ALLOWED: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
         ALLOWED.0.store(base, Ordering::SeqCst);
@@ -9056,22 +9327,22 @@ mod tests {
     /// The lazy-copy hooks every test here shares (the first install wins): snapshots and
     /// protection that are counted, not real. No page's protection changes, so a test drives the
     /// fault path by calling what the handler would.
-    mod fake {
+    pub(super) mod fake {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         pub(super) static SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
         pub(super) static TAKEN: AtomicU64 = AtomicU64::new(0);
         pub(super) static DISCARDED: AtomicU64 = AtomicU64::new(0);
         pub(super) static PROTECTED: AtomicU64 = AtomicU64::new(0);
-        pub(super) static GUARDS: AtomicU64 = AtomicU64::new(0);
+        pub(in crate::agc_driver) static GUARDS: AtomicU64 = AtomicU64::new(0);
         pub(super) static RELEASES: AtomicU64 = AtomicU64::new(0);
 
         /// The frame every snapshot holds: a 16x8 ramp.
-        pub(super) fn frame() -> Vec<u32> {
+        pub(in crate::agc_driver) fn frame() -> Vec<u32> {
             (0..128u32).map(|i| 0xff00_0000 | (i * 0x0101)).collect()
         }
 
-        pub(super) fn install() {
+        pub(in crate::agc_driver) fn install() {
             super::super::install_lazy_copies(super::super::LazyCopies {
                 snapshot: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
                 show: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
@@ -9102,6 +9373,78 @@ mod tests {
         }
     }
 
+    /// A target the drawer let go of is handed over as guest memory holds it: a frame written back
+    /// there comes back word for word, and a colour attachment's write-back still deferred over it
+    /// (D948) is carried out before it is read, so it comes back as the device drew it.
+    #[test]
+    fn a_target_let_go_of_comes_back_from_memory_as_written_back() {
+        use super::attachments::{More, defer};
+        use super::{
+            ColourTarget, GuestCp, MappedRegions, install_more_targets, set_guest_regions,
+            target_in_memory, write_target,
+        };
+        use crate::pipeline::Submission;
+        use crate::registers::{ColourTargetExtent, SwizzleMode, decode_colour_target_format};
+        let _guard = serial();
+        fake::install();
+        install_more_targets(|_| true, |_| Some(fake::frame()));
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0x10u8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        let mut submission = Submission {
+            colour_target: Some(target),
+            colour_target_tiling: Some(SwizzleMode::Tiled64KbRX),
+            colour_target_format: Some(decode_colour_target_format(0x0001_80a8 | (1 << 11))),
+            colour_target_bases: 1,
+            ..Submission::default()
+        };
+        submission.targets.insert(
+            crate::backend::ResourceId(1),
+            ColourTargetExtent {
+                width: 16,
+                height: 8,
+            },
+        );
+        let (_, swap) = super::writable_target(&submission).expect("a writable target");
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        let written: Vec<u32> = (0..128u32).map(|i| 0x8040_2010 ^ i).collect();
+        assert!(write_target(&mut cp, target, swap, &written));
+        assert_eq!(
+            target_in_memory(&submission),
+            Some(written),
+            "the frame written back"
+        );
+
+        let kept = More::read(target, swap, crate::ResourceId(0x00c7), vec![0x10; span]);
+        assert!(defer(&kept), "an attachment's write-back deferred over it");
+        assert_eq!(
+            target_in_memory(&submission),
+            Some(fake::frame()),
+            "carried out before it is read"
+        );
+        assert!(
+            !super::deferred()
+                .lock()
+                .expect("list")
+                .iter()
+                .any(|copy| copy.destination == base),
+            "nothing left deferred over it"
+        );
+    }
+
     /// A target is compared only when it may have been written (D720).
     ///
     /// Read once, the target is protected; read again, it is unchanged on the protection's word,
@@ -9113,7 +9456,6 @@ mod tests {
         use super::{
             ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, Written, cp::CpMemory,
         };
-        use std::sync::Arc;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0x10u8; span].into_boxed_slice());
@@ -9131,7 +9473,7 @@ mod tests {
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            contents: super::Contents::kept(memory.to_vec()),
             since: None,
         });
         let mut cp = GuestCp {
@@ -9185,7 +9527,6 @@ mod tests {
             ColourTarget, ComponentSwap, GuestMemory, MappedRegions, SettledReads, Written,
         };
         use fake::frame;
-        use std::sync::Arc;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -9202,7 +9543,7 @@ mod tests {
         fake::install();
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            contents: super::Contents::kept(memory.to_vec()),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -9235,7 +9576,6 @@ mod tests {
     fn a_flipped_frame_is_written_back_on_first_read_or_dropped_by_a_covering_fill() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
         use fake::{DISCARDED, TAKEN, frame};
-        use std::sync::Arc;
         use std::sync::atomic::Ordering;
         let _guard = serial();
         let target = ColourTarget {
@@ -9255,7 +9595,7 @@ mod tests {
         let pend = |memory: &[u8]| {
             *super::last_written().lock().expect("slot") = Some(Written {
                 target,
-                contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+                contents: super::Contents::kept(memory.to_vec()),
                 since: None,
             });
             super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -9312,7 +9652,6 @@ mod tests {
     fn a_frame_switched_from_is_kept_until_read_then_written_at_the_switch() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written};
         use fake::{SNAPSHOTS, frame};
-        use std::sync::Arc;
         use std::sync::atomic::Ordering;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
@@ -9333,7 +9672,7 @@ mod tests {
         let pend = |memory: &[u8]| {
             *super::last_written().lock().expect("slot") = Some(Written {
                 target,
-                contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+                contents: super::Contents::kept(memory.to_vec()),
                 since: None,
             });
             super::set_pending(Some((target, ComponentSwap::Alternate)));
@@ -9453,7 +9792,6 @@ mod tests {
     fn a_copy_over_a_deferred_frame_drops_it_unread() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
         use fake::{DISCARDED, TAKEN};
-        use std::sync::Arc;
         use std::sync::atomic::Ordering;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
@@ -9481,7 +9819,7 @@ mod tests {
         fake::install();
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(memory[gap..gap + span].to_vec())),
+            contents: super::Contents::kept(memory[gap..gap + span].to_vec()),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -9849,7 +10187,6 @@ mod tests {
     fn a_guest_write_to_a_pending_target_lands_on_its_frame() {
         use super::{ColourTarget, ComponentSwap, Written};
         use fake::frame;
-        use std::sync::Arc;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -9870,7 +10207,7 @@ mod tests {
         let before = memory.to_vec();
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(before.clone())),
+            contents: super::Contents::kept(before.clone()),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -10142,7 +10479,6 @@ mod tests {
     #[test]
     fn a_fill_over_the_whole_pending_target_drops_the_frame_unwritten() {
         use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
-        use std::sync::Arc;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory = off_page(span, 0);
@@ -10158,7 +10494,7 @@ mod tests {
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
-            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            contents: super::Contents::kept(memory.to_vec()),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));

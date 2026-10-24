@@ -9,6 +9,7 @@
 
 pub mod blocks;
 pub mod guest;
+pub mod lazy;
 pub mod platform;
 pub mod stack;
 pub mod test_bases;
@@ -176,6 +177,12 @@ impl Protection {
     /// Read only, for constant data and relocated-then-sealed regions.
     pub const READ_ONLY: Self = Self {
         read: true,
+        write: false,
+        execute: false,
+    };
+    /// No access at all, for guards and reserved ranges not yet backed.
+    pub const NONE: Self = Self {
+        read: false,
         write: false,
         execute: false,
     };

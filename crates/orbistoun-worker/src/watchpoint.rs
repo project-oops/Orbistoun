@@ -218,6 +218,37 @@ static TRACE_COUNT: [AtomicU64; TRACE_VALUES] = [const { AtomicU64::new(0) }; TR
 /// Hits whose value found no free entry.
 static TRACE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 
+/// Guest flips presented so far, counted by [`flipped`] for [`counting`]: an atomic the trap
+/// handler can read, where the video port's own count is behind a lock.
+static FLIPS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one presented flip.
+pub fn flipped() {
+    FLIPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The flip `ORBISTOUN_WATCH_FROM` names, read once; 0 counts from the start.
+fn counting_from() -> u64 {
+    static FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FROM.get_or_init(|| {
+        orbistoun_env::WATCH_FROM
+            .get()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Whether a trace hit is counted yet: from the flip `ORBISTOUN_WATCH_FROM` names on, so a tally
+/// describes the phase it was asked about rather than every frame before it.
+fn counting() -> bool {
+    in_window(FLIPS.load(Ordering::Relaxed), counting_from())
+}
+
+/// Whether flip `now` is inside a window opening at flip `from`.
+fn in_window(now: u64, from: u64) -> bool {
+    now >= from
+}
+
 /// Tallies `value` for trace slot `slot`.
 fn tally(slot: usize, value: u64) {
     use Ordering::Relaxed;
@@ -820,13 +851,15 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64, bool)
             continue;
         }
         if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 2 {
-            // Trace: counted and tallied every time, never disarmed.
+            // Trace: counted and tallied every time inside the window, never disarmed.
             ours = true;
             resume = true;
-            EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
-            note_execute(after, registers);
-            let index = TRACE_REGISTER[slot].load(Ordering::Relaxed) as usize;
-            tally(slot, register_value(registers, index));
+            if counting() {
+                EXEC_SLOT_HITS[slot].fetch_add(1, Ordering::Relaxed);
+                note_execute(after, registers);
+                let index = TRACE_REGISTER[slot].load(Ordering::Relaxed) as usize;
+                tally(slot, register_value(registers, index));
+            }
             continue;
         }
         if ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
@@ -1252,6 +1285,15 @@ mod tests {
         let lines = execute_snapshot().join("\n");
         assert!(lines.contains("0x400000000010") && lines.contains("hit 1 time(s)"));
         assert!(lines.contains("0x4000000000b2") && lines.contains("hit 2 time(s)"));
+    }
+
+    /// A window opens at its flip: hits before it are not counted, hits at and after it are.
+    #[test]
+    fn a_window_opens_at_its_flip() {
+        assert!(super::in_window(0, 0));
+        assert!(!super::in_window(5559, 5560));
+        assert!(super::in_window(5560, 5560));
+        assert!(super::in_window(9000, 5560));
     }
 
     /// A trace names the register it tallies, and arms as an execute breakpoint would.

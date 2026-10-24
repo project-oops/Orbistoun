@@ -25,7 +25,10 @@ use crate::{TranslateError, Width};
 mod compute_inputs;
 mod input_controls;
 mod pixel_inputs;
-pub use compute_inputs::{ComputeInputs, GLOBAL_BASE_PUSH_WORD, PARTIAL_PUSH_WORD, PartialGroups};
+pub use compute_inputs::{
+    ComputeInputs, GLOBAL_BASE_PUSH_WORD, MOST_SAMPLED_BUFFERS, PARTIAL_PUSH_WORD, PartialGroups,
+    SAMPLED_BASES_PUSH_WORD,
+};
 pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
@@ -38,6 +41,8 @@ pub const WAVE: u32 = Width::Wave64.lanes();
 /// The architecture reserves these two indices, the same codes `data/operands.toml` names, so guest
 /// code that reads or writes the mask needs no special handling.
 const EXEC_LO: u32 = 126;
+/// `OpLoopMerge`'s loop control asking the compiler not to unroll the loop.
+const DONT_UNROLL: u32 = 0x2;
 /// Scalar register holding the high half of the execution mask.
 const EXEC_HI: u32 = 127;
 
@@ -2137,6 +2142,96 @@ fn declare_exchange(b: &mut Builder, (u32_type, element): (Id, Id), lanes: u32) 
     (mask, words)
 }
 
+/// A dispatch's buffers seen as 64-bit words, for its 64-bit atomics (D955).
+#[derive(Debug, Clone, Copy)]
+struct PairBuffers {
+    array: buffer::DrawBufferArray,
+    u64_type: Id,
+    /// A private 64-bit word an exchange leaves what it answered in, read past the branch around it.
+    held: Id,
+    zero: Id,
+}
+
+impl PairBuffers {
+    /// Declares the view of the compute buffers' binding, the 64-bit type and both capabilities
+    /// (`Int64`, `Int64Atomics`), and the private word.
+    fn declare(b: &mut Builder, u32_type: Id) -> Self {
+        b.header(op::CAPABILITY, &[capability::INT64]);
+        b.header(op::CAPABILITY, &[capability::INT64_ATOMICS]);
+        let u64_type = b.declare_type(op::TYPE_INT, &[64, 0]);
+        let array = buffer::declare_draw_buffer_pairs(
+            b,
+            u32_type,
+            u64_type,
+            orbistoun_spirv::COMPUTE_BUFFERS_BINDING,
+        );
+        let private = orbistoun_spirv::storage::PRIVATE;
+        let (held_ptr, held, zero) = (b.id(), b.id(), b.id());
+        b.declare(op::TYPE_POINTER, &[held_ptr.0, private, u64_type.0]);
+        b.declare(op::CONSTANT, &[u64_type.0, zero.0, 0, 0]);
+        b.declare(op::VARIABLE, &[held_ptr.0, held.0, private]);
+        Self {
+            array,
+            u64_type,
+            held,
+            zero,
+        }
+    }
+
+    /// The 64-bit atomic `opcode` of `value` on the pair `pointer` names, answering what it held,
+    /// where `takes` holds: an or folds zero in elsewhere, as the one-word atomics fold their
+    /// identity; an exchange has none, so it runs inside a branch on `takes`, leaving what it
+    /// answered in the private word, which holds zero where it did not run.
+    fn atomic(
+        &self,
+        b: &mut Builder,
+        opcode: u16,
+        (pointer, value, takes): (Id, Id, Id),
+        (scope, semantics): (Id, Id),
+    ) -> Id {
+        let u64_type = self.u64_type;
+        if opcode == op::ATOMIC_OR {
+            let folded = b.id();
+            b.function(
+                op::SELECT,
+                &[u64_type.0, folded.0, takes.0, value.0, self.zero.0],
+            );
+            let before = b.id();
+            let operands = [
+                u64_type.0,
+                before.0,
+                pointer.0,
+                scope.0,
+                semantics.0,
+                folded.0,
+            ];
+            b.function(op::ATOMIC_OR, &operands);
+            return before;
+        }
+        b.function(op::STORE, &[self.held.0, self.zero.0]);
+        let (body, merge) = (b.id(), b.id());
+        b.function(op::SELECTION_MERGE, &[merge.0, 0]);
+        b.function(op::BRANCH_CONDITIONAL, &[takes.0, body.0, merge.0]);
+        b.function(op::LABEL, &[body.0]);
+        let exchanged = b.id();
+        let operands = [
+            u64_type.0,
+            exchanged.0,
+            pointer.0,
+            scope.0,
+            semantics.0,
+            value.0,
+        ];
+        b.function(op::ATOMIC_EXCHANGE, &operands);
+        b.function(op::STORE, &[self.held.0, exchanged.0]);
+        b.function(op::BRANCH, &[merge.0]);
+        b.function(op::LABEL, &[merge.0]);
+        let before = b.id();
+        b.function(op::LOAD, &[u64_type.0, before.0, self.held.0]);
+        before
+    }
+}
+
 /// Builds a wavefront-model module for one decoded shader.
 #[derive(Debug)]
 pub struct Wavefront<'a> {
@@ -2206,6 +2301,10 @@ pub struct Wavefront<'a> {
     /// This invocation's lane when each invocation is one lane (D760); `None` where one invocation
     /// simulates the wave.
     invocation: Option<Id>,
+    /// The loop over the wave's lanes one instruction is emitted inside, where one invocation
+    /// simulates the wave ([`Model::open_lane_loop`]): its lane is then a run-time value, as
+    /// [`Self::invocation`]'s is, but the registers are still the wave's.
+    lane_loop: Option<LaneLoop>,
     /// The first lane of this invocation's wave, as a place in its group, where a guest dispatch's
     /// group of several waves runs one invocation per lane (D880).
     wave_base: Option<Id>,
@@ -2236,6 +2335,9 @@ pub struct Wavefront<'a> {
     /// the device for neither feature.
     f16_type: Option<Id>,
     u16_type: Option<Id>,
+    /// The 64-bit view of a dispatch's buffers, declared with its capabilities the first time a
+    /// 64-bit atomic reaches one, so other modules ask the device for neither feature.
+    pair_buffers: Option<PairBuffers>,
     /// The sampled images, each declared the first time an instruction samples it, at most two, in
     /// first-sample order.
     ///
@@ -2290,6 +2392,8 @@ pub struct Wavefront<'a> {
     memory_high: u32,
     /// A guest dispatch's user-data words the stream never wrote, one bit each.
     unwritten_user_data: u32,
+    /// A guest dispatch's buffers placed from a sample of its waves, one bit a slot (D951).
+    sampled_buffers: u32,
     /// Whether the program reads one of them, whose value nothing here knows.
     reads_unwritten: bool,
     /// Scalar and vector registers written so far, in program order: seeded at entry, or by an
@@ -2325,6 +2429,64 @@ pub struct Wavefront<'a> {
     /// Vector registers holding, in every lane, a user-data word a plain copy from a scalar put
     /// there, by the word: a dispatch's level, moved before the store that names it.
     vector_copies: BTreeMap<u32, u32>,
+    /// A dispatch's scratch, where it has any (D954).
+    scratch: Option<Scratch>,
+}
+
+/// An open loop over the wave's lanes ([`Model::open_lane_loop`]): the lane, a phi of zero and the
+/// next lane; the next lane's id, defined in the continue block; the loop's header, continue and
+/// merge blocks; and the halves of a mask it carries ([`Model::open_carrying_lane_loop`]), each a
+/// phi and the id the continue block passes back to it.
+#[derive(Debug, Clone, Copy)]
+struct LaneLoop {
+    lane: Id,
+    next: Id,
+    header: Id,
+    continue_target: Id,
+    merge: Id,
+    carried: Option<[(Id, Id); 2]>,
+}
+
+/// A dispatch's scratch as a module holds it (D954): a private array of words, the wave's whole
+/// scratch where one invocation is the wave, or its lane's share where each invocation is one lane.
+#[derive(Debug, Clone, Copy)]
+struct Scratch {
+    /// What each wave holds, in bytes.
+    wave_bytes: u32,
+    /// The scalar register the wave's scratch offset arrives in.
+    register: u32,
+    /// The private array.
+    array: Id,
+    /// Its length in words.
+    words: u32,
+}
+
+impl Scratch {
+    /// Declares a dispatch's scratch for a module whose invocation is `per_lane`'s lane, or the
+    /// whole wave; `None` for any module without scratch.
+    fn declare(
+        b: &mut Builder,
+        (u32_type, stage, per_lane): (Id, Stage, Option<u32>),
+        user_data: &UserData,
+    ) -> Option<Self> {
+        let inputs = user_data
+            .compute
+            .filter(|inputs| stage == Stage::Compute && inputs.scratch_wave_bytes != 0)?;
+        let wave_words = inputs.scratch_wave_bytes.div_ceil(4);
+        let words = per_lane.map_or(wave_words, |lanes| wave_words.div_ceil(lanes.max(1)));
+        let (length, array_type, pointer, array, zero) = (b.id(), b.id(), b.id(), b.id(), b.id());
+        b.declare(op::CONSTANT, &[u32_type.0, length.0, words]);
+        b.declare(op::TYPE_ARRAY, &[array_type.0, u32_type.0, length.0]);
+        b.declare(op::TYPE_POINTER, &[pointer.0, PRIVATE, array_type.0]);
+        b.declare(op::CONSTANT_NULL, &[array_type.0, zero.0]);
+        b.declare(op::VARIABLE, &[pointer.0, array.0, PRIVATE, zero.0]);
+        Some(Self {
+            wave_bytes: inputs.scratch_wave_bytes,
+            register: crate::scratch::offset_register(user_data.count, &inputs),
+            array,
+            words,
+        })
+    }
 }
 
 /// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
@@ -3057,6 +3219,11 @@ impl<'a> Wavefront<'a> {
         }
         let (files, observation, guest_memory) =
             declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
+        let scratch = Scratch::declare(
+            &mut b,
+            (u32_type, stage, per_lane.map(|(lanes, _)| lanes)),
+            &user_data,
+        );
         let lane_ids = per_lane.map(|shape| {
             PerLane::declare(
                 &mut b,
@@ -3198,6 +3365,7 @@ impl<'a> Wavefront<'a> {
             local_words: local_share_words(user_data.local_words),
             lanes: per_lane.map_or_else(|| simulated_lanes(stage, width), |(lanes, _)| lanes),
             modelled,
+            lane_loop: None,
             exchange: lane_ids.and_then(|lane| lane.exchange),
             known_exec: [None; 2],
             constants: BTreeMap::new(),
@@ -3207,6 +3375,7 @@ impl<'a> Wavefront<'a> {
             f32_type,
             f16_type: None,
             u16_type: None,
+            pair_buffers: None,
             textures: Vec::new(),
             descriptor_loads: Default::default(),
             type_rewrites: std::collections::BTreeSet::new(),
@@ -3230,6 +3399,7 @@ impl<'a> Wavefront<'a> {
             dispatch,
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
             unwritten_user_data: user_data.compute.unwrap_or_default().unwritten_user_data,
+            sampled_buffers: user_data.compute.unwrap_or_default().sampled_buffers,
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
@@ -3248,6 +3418,7 @@ impl<'a> Wavefront<'a> {
             global_share: None,
             scalar_copies: BTreeMap::new(),
             vector_copies: BTreeMap::new(),
+            scratch,
         };
 
         this.seed_entry(user_data_source, &user_data, &system);
@@ -3982,6 +4153,22 @@ impl<'a> Wavefront<'a> {
                 _ => None,
             };
         }
+        // Inside a loop over the lanes, likewise: the lane is the loop's, and every lane it runs
+        // is known only where the modelled lanes' whole mask is.
+        if self.lane_loop.is_some() {
+            let full = u64::MAX >> (64 - self.modelled.clamp(1, 64));
+            let high = if self.modelled > 32 {
+                u64::from(self.known_exec[1]?)
+            } else {
+                0
+            };
+            let mask = u64::from(self.known_exec[0]?) | high << 32;
+            return match mask & full {
+                0 => Some(false),
+                bits if bits == full => Some(true),
+                _ => None,
+            };
+        }
         let (half, bit) = if lane < 32 { (0, lane) } else { (1, lane - 32) };
         self.known_exec[half].map(|mask| mask >> bit & 1 != 0)
     }
@@ -3990,6 +4177,7 @@ impl<'a> Wavefront<'a> {
     /// each invocation is one lane (D760).
     fn lane_slot(&mut self, lane: u32) -> Id {
         self.invocation
+            .or(self.lane_loop.map(|looped| looped.lane))
             .unwrap_or_else(|| Self::constant(self, lane))
     }
 
@@ -4179,6 +4367,117 @@ impl<'a> Wavefront<'a> {
         b.function(op::LABEL, &[merge.0]);
     }
 
+    /// Whether an instruction's lanes may run as a loop here: one invocation simulating a guest
+    /// dispatch's whole wave, with no loop already open.
+    fn loops_lanes(&self) -> bool {
+        self.invocation.is_none() && self.lane_loop.is_none() && self.stage == Stage::Compute
+    }
+
+    /// Opens a loop over the modelled lanes, from zero, and leaves the builder in its body; the
+    /// halves `carried` on entry, where it carries any, are answered as the body sees them.
+    fn begin_lane_loop(&mut self, carried: Option<(Id, Id)>) -> Option<(Id, Id)> {
+        let (u32_type, zero) = (self.u32_type, Self::constant(self, 0));
+        let b = &mut self.builder;
+        let (entry, header, body) = (b.id(), b.id(), b.id());
+        let looped = LaneLoop {
+            lane: b.id(),
+            next: b.id(),
+            header,
+            continue_target: b.id(),
+            merge: b.id(),
+            carried: carried.map(|_| [(b.id(), b.id()), (b.id(), b.id())]),
+        };
+        // A block of its own before the header, so each phi names the block it is entered from.
+        b.function(op::BRANCH, &[entry.0]);
+        b.function(op::LABEL, &[entry.0]);
+        b.function(op::BRANCH, &[header.0]);
+        b.function(op::LABEL, &[header.0]);
+        let phi = |b: &mut Builder, (value, next): (Id, Id), entered: Id| {
+            b.function(
+                op::PHI,
+                &[
+                    u32_type.0,
+                    value.0,
+                    entered.0,
+                    entry.0,
+                    next.0,
+                    looped.continue_target.0,
+                ],
+            );
+        };
+        phi(b, (looped.lane, looped.next), zero);
+        if let (Some([low, high]), Some((entered_low, entered_high))) = (looped.carried, carried) {
+            phi(b, low, entered_low);
+            phi(b, high, entered_high);
+        }
+        // Not unrolled (D956): unrolled, the loop's passes are a module that grows with the lanes
+        // again, only inside the driver's compiler.
+        b.function(
+            op::LOOP_MERGE,
+            &[looped.merge.0, looped.continue_target.0, DONT_UNROLL],
+        );
+        b.function(op::BRANCH, &[body.0]);
+        b.function(op::LABEL, &[body.0]);
+        self.lane_loop = Some(looped);
+        looped.carried.map(|[low, high]| (low.0, high.0))
+    }
+
+    /// Closes the loop [`Self::begin_lane_loop`] opened, its body's halves `carried` passed back to
+    /// the next lane, and leaves the builder after it; answers the halves the last lane left.
+    fn end_lane_loop(&mut self, carried: Option<(Id, Id)>) -> Option<(Id, Id)> {
+        let looped = self.lane_loop.take()?;
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let (zero, one) = (Self::constant(self, 0), Self::constant(self, 1));
+        let lanes = Self::constant(self, self.modelled);
+        let b = &mut self.builder;
+        b.function(op::BRANCH, &[looped.continue_target.0]);
+        b.function(op::LABEL, &[looped.continue_target.0]);
+        b.function(op::IADD, &[u32_type.0, looped.next.0, looped.lane.0, one.0]);
+        // The continue block names the halves the phis take, as an or with zero: they are the
+        // body's own, defined before it.
+        let passed = looped
+            .carried
+            .zip(carried)
+            .map(|([low, high], (body_low, body_high))| {
+                for (next, value) in [(low.1, body_low), (high.1, body_high)] {
+                    b.function(op::BITWISE_OR, &[u32_type.0, next.0, value.0, zero.0]);
+                }
+                (low.1, high.1)
+            });
+        let more = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, more.0, looped.next.0, lanes.0],
+        );
+        b.function(
+            op::BRANCH_CONDITIONAL,
+            &[more.0, looped.header.0, looped.merge.0],
+        );
+        b.function(op::LABEL, &[looped.merge.0]);
+        passed
+    }
+
+    /// `halves` with `lane`'s bit set where `condition` holds, for a lane known only at run time: the
+    /// bit `lane % 32` of the low half for lanes 0-31, of the high half for the rest.
+    fn looped_lane_bit(&mut self, (low, high): (Id, Id), lane: Id, condition: Id) -> (Id, Id) {
+        let (one, zero, thirty_one, thirty_two) = (
+            Self::constant(self, 1),
+            Self::constant(self, 0),
+            Self::constant(self, 31),
+            Self::constant(self, 32),
+        );
+        let within = self.binary(op::BITWISE_AND, lane, thirty_one);
+        let bit = self.binary(op::SHIFT_LEFT_LOGICAL, one, within);
+        let contribution = self.select(condition, bit, zero);
+        let in_high = Model::compare(self, op::UGREATER_THAN_EQUAL, lane, thirty_two);
+        let to_low = self.select(in_high, zero, contribution);
+        let to_high = self.select(in_high, contribution, zero);
+        (
+            self.binary(op::BITWISE_OR, low, to_low),
+            self.binary(op::BITWISE_OR, high, to_high),
+        )
+    }
+
     /// Whether this invocation's bit of a mask held as two halves is set, when each invocation is
     /// one lane (D760).
     fn invocation_bit(&mut self, invocation: Id, (low, high): (Id, Id)) -> Id {
@@ -4228,7 +4527,10 @@ impl<'a> Wavefront<'a> {
 
     fn lane_pointer(&mut self, register: u32, lane: u32) -> Id {
         let register_index = self.constant(register);
-        let lane_index = self.constant(lane);
+        let lane_index = match self.lane_loop {
+            Some(looped) => looped.lane,
+            None => self.constant(lane),
+        };
         let pointer = self.builder.id();
         self.builder.function(
             op::ACCESS_CHAIN,
@@ -4258,6 +4560,11 @@ impl<'a> Wavefront<'a> {
             let high = self.load_scalar(EXEC_HI);
             return self.invocation_bit(invocation, (low, high));
         }
+        if let Some(looped) = self.lane_loop {
+            let low = self.load_scalar(EXEC_LO);
+            let high = self.load_scalar(EXEC_HI);
+            return self.invocation_bit(looped.lane, (low, high));
+        }
         let (half, bit) = if lane < 32 {
             (EXEC_LO, lane)
         } else {
@@ -4284,6 +4591,71 @@ impl<'a> Wavefront<'a> {
             &[self.bool_type.0, active.0, isolated.0, zero.0],
         );
         active
+    }
+
+    /// Where a 64-bit atomic at `word_index` of the buffer at `slot` lands in its 64-bit view, and
+    /// whether it is carried out: its pair's index, or zero where the pair is not eight-byte
+    /// aligned, as the hardware's 64-bit atomics require, or not inside the bound buffer; and
+    /// whether the pair is both, `landed` holds and `lane` runs.
+    fn pair_place(
+        &mut self,
+        pairs: PairBuffers,
+        (slot, word_index): (u32, Id),
+        landed: Id,
+        lane: u32,
+    ) -> (Id, Id) {
+        let active = match self.lane_known(lane) {
+            Some(true) => None,
+            _ => Some(self.lane_active(lane)),
+        };
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let (zero, one) = (Self::constant(self, 0), Self::constant(self, 1));
+        let buffer = Self::constant(self, slot);
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                pairs.array.block_ptr.0,
+                block.0,
+                pairs.array.variable.0,
+                buffer.0,
+            ],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        let pair_index = b.id();
+        b.function(
+            op::SHIFT_RIGHT_LOGICAL,
+            &[u32_type.0, pair_index.0, word_index.0, one.0],
+        );
+        let odd = b.id();
+        b.function(op::BITWISE_AND, &[u32_type.0, odd.0, word_index.0, one.0]);
+        let aligned = b.id();
+        b.function(op::IEQUAL, &[bool_type.0, aligned.0, odd.0, zero.0]);
+        let below = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, below.0, pair_index.0, length.0],
+        );
+        let inside = b.id();
+        b.function(
+            op::LOGICAL_AND,
+            &[bool_type.0, inside.0, aligned.0, below.0],
+        );
+        let index = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, index.0, inside.0, pair_index.0, zero.0],
+        );
+        let mut takes = b.id();
+        b.function(op::LOGICAL_AND, &[bool_type.0, takes.0, inside.0, landed.0]);
+        if let Some(active) = active {
+            let both = b.id();
+            b.function(op::LOGICAL_AND, &[bool_type.0, both.0, takes.0, active.0]);
+            takes = both;
+        }
+        (index, takes)
     }
 
     /// Writes vertex `slot`'s distance inside each user clip plane: `dot(plane, position)` over
@@ -4964,6 +5336,12 @@ impl Model for Wavefront<'_> {
         self.dx10_clamp
     }
 
+    // A compute dispatch asking for a trap handler is refused before its module is built
+    // (`orbistoun-gpu`'s `dispatch::state_at`, `TRAP_PRESENT`), so a compute module runs without one.
+    fn no_trap_handler(&self) -> bool {
+        self.stage == Stage::Compute
+    }
+
     fn program_address(&self) -> Option<u64> {
         self.program_address
     }
@@ -5190,6 +5568,17 @@ impl Model for Wavefront<'_> {
         }
     }
 
+    // Only a guest dispatch has an observation the host reads for a cut, so only it cuts (D949).
+    fn loop_budget(&mut self) -> Option<Id> {
+        self.dispatch.map(compute_inputs::DispatchState::jumps)
+    }
+
+    fn note_loop_cut(&mut self, cut: Id, branch: u32) {
+        if self.dispatch.is_some() {
+            compute_inputs::DispatchState::note_cut(self, cut, branch);
+        }
+    }
+
     fn lanes(&self) -> u32 {
         self.lanes
     }
@@ -5321,7 +5710,10 @@ impl Model for Wavefront<'_> {
 
     fn set_lane_bit(&mut self, halves: (Id, Id), lane: u32, condition: Id) -> (Id, Id) {
         let Some(invocation) = self.invocation else {
-            return model::constant_lane_bit(self, halves, lane, condition);
+            return match self.lane_loop {
+                Some(looped) => self.looped_lane_bit(halves, looped.lane, condition),
+                None => model::constant_lane_bit(self, halves, lane, condition),
+            };
         };
         // A guest dispatch run per lane holds only its own lane's bits where its program reads no
         // mask whole, only each lane its own bit (D880); one that reads a mask whole makes every
@@ -5354,7 +5746,7 @@ impl Model for Wavefront<'_> {
     }
 
     fn lane_bit(&mut self, low: Id, high: Id, lane: u32) -> Id {
-        match self.invocation {
+        match self.invocation.or(self.lane_loop.map(|looped| looped.lane)) {
             Some(invocation) => self.invocation_bit(invocation, (low, high)),
             None => model::constant_lane_test(self, (low, high), lane),
         }
@@ -5383,6 +5775,42 @@ impl Model for Wavefront<'_> {
 
     fn lane_may_run(&self, lane: u32) -> bool {
         self.lane_known(lane) != Some(false)
+    }
+
+    // A guest dispatch whose one invocation is the whole wave, where more than one lane may run:
+    // emitted lane by lane, a buffer store of four words is some sixty thousand words of module,
+    // and a program of a few hundred instructions millions.
+    fn open_lane_loop(&mut self) -> bool {
+        if !self.loops_lanes()
+            || (0..self.modelled)
+                .filter(|&lane| self.lane_may_run(lane))
+                .nth(1)
+                .is_none()
+        {
+            return false;
+        }
+        self.begin_lane_loop(None);
+        true
+    }
+
+    fn close_lane_loop(&mut self) {
+        self.end_lane_loop(None);
+    }
+    // A mask is built over every modelled lane, running or not, as the lanes emitted one by one
+    // build it.
+    fn open_carrying_lane_loop(&mut self, carried: (Id, Id)) -> Option<(Id, Id)> {
+        if !self.loops_lanes() || self.modelled < 2 {
+            return None;
+        }
+        self.begin_lane_loop(Some(carried))
+    }
+
+    fn close_carrying_lane_loop(&mut self, carried: (Id, Id)) -> (Id, Id) {
+        self.end_lane_loop(Some(carried)).unwrap_or(carried)
+    }
+
+    fn looped_lane(&self) -> Option<Id> {
+        self.lane_loop.map(|looped| looped.lane)
     }
 
     fn enter_block(&mut self) {
@@ -5975,6 +6403,80 @@ impl Model for Wavefront<'_> {
         Ok(())
     }
 
+    fn scratch(&self) -> Option<(u32, u32)> {
+        self.scratch
+            .map(|scratch| (scratch.wave_bytes, scratch.register))
+    }
+
+    // Where one invocation is the wave, the array is the wave's scratch, word for word. Where each
+    // invocation is one lane (D760), a word whose low bits name the lane is that lane's, at the
+    // word's index over the wave's width; it holds no other lane's.
+    fn scratch_place(&mut self, word: Id, _lane: u32) -> Option<(Id, Id)> {
+        let scratch = self.scratch?;
+        let words = Model::constant(self, scratch.words);
+        let Some(own) = self.invocation else {
+            let held = self.compare(op::ULESS_THAN, word, words);
+            return Some((word, held));
+        };
+        let lanes = self.lanes.max(1);
+        let (low, shift) = (
+            Model::constant(self, lanes - 1),
+            Model::constant(self, lanes.trailing_zeros()),
+        );
+        let owner = self.binary(op::BITWISE_AND, word, low);
+        let index = self.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+        let mine = self.compare(op::IEQUAL, owner, own);
+        let inside = self.compare(op::ULESS_THAN, index, words);
+        let held = self.both(mine, inside);
+        Some((index, held))
+    }
+
+    fn read_scratch(&mut self, index: Id) -> Option<Id> {
+        let array = self.scratch?.array;
+        let (pointer_type, u32_type) = (self.lane_ptr, self.u32_type);
+        let b = &mut self.builder;
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[pointer_type.0, pointer.0, array.0, index.0],
+        );
+        let value = b.id();
+        b.function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        Some(value)
+    }
+
+    // Masked as a register write is: the array is this invocation's own, so a lane that does not
+    // run keeps the word it held.
+    fn write_scratch(&mut self, index: Id, value: Id, lane: u32) -> Option<()> {
+        let array = self.scratch?.array;
+        let known = self.lane_known(lane);
+        if known == Some(false) {
+            return Some(());
+        }
+        let (pointer_type, u32_type) = (self.lane_ptr, self.u32_type);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[pointer_type.0, pointer.0, array.0, index.0],
+        );
+        let value = if known == Some(true) {
+            value
+        } else {
+            let active = self.lane_active(lane);
+            let b = &mut self.builder;
+            let old = b.id();
+            b.function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
+            let chosen = b.id();
+            b.function(
+                op::SELECT,
+                &[u32_type.0, chosen.0, active.0, value.0, old.0],
+            );
+            chosen
+        };
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
+        Some(())
+    }
+
     fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
         let (_, served) = self.draw_buffers.as_ref()?;
         served.get(&instruction.offset).copied()
@@ -5992,6 +6494,39 @@ impl Model for Wavefront<'_> {
             Stage::Compute => self.push_word(GLOBAL_BASE_PUSH_WORD),
             Stage::Fragment => None,
         }
+    }
+
+    fn sampled_buffer(&self, slot: u32) -> bool {
+        self.stage == Stage::Compute && slot < 32 && self.sampled_buffers >> slot & 1 != 0
+    }
+
+    fn sampled_buffer_base(&mut self, slot: u32) -> Option<(Id, Id)> {
+        // The slots placed from a sample take two words each, in slot order (D951).
+        if !self.sampled_buffer(slot) {
+            return None;
+        }
+        let before = (self.sampled_buffers & ((1_u32 << slot) - 1)).count_ones();
+        let at = SAMPLED_BASES_PUSH_WORD + 2 * before;
+        Some((self.push_word(at)?, self.push_word(at + 1)?))
+    }
+
+    fn draw_buffer_words(&mut self, slot: u32) -> Option<Id> {
+        // A primitive shader's buffer is a range of an arena (D747), not a buffer of its own.
+        if self.stage == Stage::Mesh {
+            return None;
+        }
+        let array = self.draw_buffers.as_ref()?.0;
+        let u32_type = self.u32_type;
+        let buffer = Self::constant(self, slot);
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[array.block_ptr.0, block.0, array.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        Some(length)
     }
 
     fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
@@ -6195,6 +6730,80 @@ impl Model for Wavefront<'_> {
             ],
         );
         Ok(before)
+    }
+
+    // The pair through the 64-bit view of the dispatch's buffers, at word `word_index / 2` of it
+    // ([`PairBuffers::atomic`]).
+    fn atomic_draw_buffer_pair(
+        &mut self,
+        slot: u32,
+        (word_index, opcode, [low, high]): (Id, u16, [Id; 2]),
+        landed: Id,
+        lane: u32,
+    ) -> Result<[Id; 2], TranslateError> {
+        let refuse = |detail| TranslateError::Unsupported { offset: 0, detail };
+        if self.draw_buffers.is_none() || self.stage != Stage::Compute {
+            return Err(refuse(
+                "a 64-bit buffer atomic outside a dispatch that binds its buffers (D919)",
+            ));
+        }
+        if !matches!(opcode, op::ATOMIC_EXCHANGE | op::ATOMIC_OR) {
+            return Err(refuse(
+                "a 64-bit buffer atomic that is not an exchange or an or",
+            ));
+        }
+        let pairs = if let Some(pairs) = self.pair_buffers {
+            pairs
+        } else {
+            let pairs = PairBuffers::declare(&mut self.builder, self.u32_type);
+            self.pair_buffers = Some(pairs);
+            pairs
+        };
+        let (index, takes) = self.pair_place(pairs, (slot, word_index), landed, lane);
+        let (u32_type, u64_type) = (self.u32_type, pairs.u64_type);
+        let thirty_two = Self::constant(self, 32);
+        let buffer = Self::constant(self, slot);
+        let member = Self::constant(self, 0);
+        let scope = Self::constant(self, orbistoun_spirv::scope::DEVICE);
+        let semantics = Self::constant(
+            self,
+            orbistoun_spirv::semantics::ACQUIRE_RELEASE
+                | orbistoun_spirv::semantics::UNIFORM_MEMORY,
+        );
+        let b = &mut self.builder;
+        // The value, the high word above the low.
+        let (wide_low, wide_high) = (b.id(), b.id());
+        b.function(op::UCONVERT, &[u64_type.0, wide_low.0, low.0]);
+        b.function(op::UCONVERT, &[u64_type.0, wide_high.0, high.0]);
+        let raised = b.id();
+        b.function(
+            op::SHIFT_LEFT_LOGICAL,
+            &[u64_type.0, raised.0, wide_high.0, thirty_two.0],
+        );
+        let value = b.id();
+        b.function(op::BITWISE_OR, &[u64_type.0, value.0, raised.0, wide_low.0]);
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                pairs.array.element_ptr.0,
+                pointer.0,
+                pairs.array.variable.0,
+                buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let before = pairs.atomic(b, opcode, (pointer, value, takes), (scope, semantics));
+        // Back into two words, low first.
+        let (held_low, lowered, held_high) = (b.id(), b.id(), b.id());
+        b.function(op::UCONVERT, &[u32_type.0, held_low.0, before.0]);
+        b.function(
+            op::SHIFT_RIGHT_LOGICAL,
+            &[u64_type.0, lowered.0, before.0, thirty_two.0],
+        );
+        b.function(op::UCONVERT, &[u32_type.0, held_high.0, lowered.0]);
+        Ok([held_low, held_high])
     }
 
     fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {
@@ -6821,9 +7430,10 @@ const IMAGE_TYPE_2D_CODE: u32 = 9;
 const IMAGE_TYPE_2D_ARRAY_CODE: u32 = 13;
 
 /// The first register of the image descriptor an image instruction names: its first scalar
-/// operand. `None` for any other instruction.
+/// operand. `None` for any other instruction, and for a ray intersection, whose descriptor names a
+/// hierarchy in memory, read as values, rather than an image the host binds.
 fn image_descriptor(instruction: &Instruction, name: &str) -> Option<u32> {
-    if !name.starts_with("image_") {
+    if !name.starts_with("image_") || model::bvh::is_intersect_ray(name) {
         return None;
     }
     instruction
@@ -6838,7 +7448,7 @@ fn image_descriptor(instruction: &Instruction, name: &str) -> Option<u32> {
 /// The first register of the sampler descriptor an image instruction names: its second scalar
 /// operand. `None` for a fetch, which names none, and for any other instruction.
 fn image_sampler(instruction: &Instruction, name: &str) -> Option<u32> {
-    if !name.starts_with("image_") {
+    if !name.starts_with("image_") || model::bvh::is_intersect_ray(name) {
         return None;
     }
     instruction
@@ -7496,6 +8106,8 @@ pub fn group_program(decode: &Decode, encodings: &EncodingTable) -> compute_inpu
             .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
         match named {
             Some("s_barrier") => program.barrier = true,
+            // A lane permute goes through the share's crossbar and holds nothing in it.
+            Some("ds_bpermute_b32") => {}
             Some(name) if name.starts_with("ds_") && instruction.word & model::DS_GDS == 0 => {
                 program.local_share = true;
             }
@@ -7581,19 +8193,38 @@ pub fn draw_buffers_for(
     // A dispatch's buffers are bound writable and written back, so its stores are traced too
     // (D746), and a pixel shader's, written back after its draw; a primitive shader's are
     // snapshots.
-    let buffers = crate::draw_buffers::trace_with(
+    // A dispatch's scratch accesses reach its waves' own private memory, not a buffer (D954).
+    let scratch = match (stage, user_data.compute) {
+        (Stage::Compute, Some(inputs)) if inputs.scratch_wave_bytes != 0 => {
+            crate::scratch::accesses(
+                decode,
+                encodings,
+                Some(crate::scratch::offset_register(user_data.count, &inputs)),
+            )
+        }
+        _ => std::collections::BTreeSet::new(),
+    };
+    let buffers = crate::draw_buffers::trace_skipping(
         decode,
         encodings,
-        (user_data.first_register, user_data.count),
         (
-            matches!(stage, Stage::Compute | Stage::Fragment),
-            stage == Stage::Mesh,
-            stage == Stage::Compute,
+            (user_data.first_register, user_data.count),
+            (
+                matches!(stage, Stage::Compute | Stage::Fragment),
+                stage == Stage::Mesh,
+                stage == Stage::Compute,
+            ),
         ),
+        &scratch,
     );
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
         return Err(TranslateError::TooManyBuffers {
             traced: buffers.sources.len(),
+            computed: buffers
+                .sources
+                .iter()
+                .filter(|source| matches!(source, crate::draw_buffers::BufferSource::Computed(_)))
+                .count(),
             most: orbistoun_spirv::DRAW_BUFFERS_PER_STAGE,
         });
     }
@@ -7685,6 +8316,13 @@ pub fn translate_with_user_data(
         inputs.seeded()?;
     }
     let masks = dispatch_masks(decode, encodings, (stage, width), &user_data)?;
+    // A dispatch's scratch accesses add the offset register the module reads as zero (D954).
+    if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute)
+        && inputs.scratch_wave_bytes != 0
+    {
+        let register = crate::scratch::offset_register(user_data.count, &inputs);
+        crate::scratch::check(decode, encodings, register)?;
+    }
     // A primitive shader that exports its entry `v0` was compiled for passthrough, whatever the
     // stream wrote (D759).
     let mut user_data = user_data;
@@ -7833,10 +8471,10 @@ mod per_lane_tests {
         super::runs_per_lane(&decode, &encodings)
     }
 
-    /// A fetch shader's buffers are each traced to a slot of their own, and nineteen fit one
-    /// stage: PPSA03416's vertex shader, past its title screen, forms seventeen descriptors by
-    /// computation beside two it reads from user data (D733). Seventeen loads, each with a scalar
-    /// offset and so each found per draw, are seventeen slots and bind.
+    /// A fetch shader's computed buffers fit one stage: PPSA03416's vertex shader, past its title
+    /// screen, forms seventeen descriptors by computation beside two it reads from user data
+    /// (D733). Seventeen loads, each with a scalar offset and so each found per draw, through one
+    /// descriptor and offset nothing between them writes, share one slot (D952).
     #[test]
     fn a_fetch_shader_s_computed_buffers_fit_a_stage() {
         const END: u32 = 0xbf81_0000;
@@ -7861,8 +8499,9 @@ mod per_lane_tests {
                 ..super::UserData::default()
             },
         )
-        .expect("seventeen buffers bind");
-        assert_eq!(buffers.sources.len(), 17);
+        .expect("the buffers bind");
+        assert_eq!(buffers.sources.len(), 1);
+        assert_eq!(buffers.served.len(), 17, "every load through it");
     }
 
     /// A program whose lanes exchange only through masks, lane reads and the local data share

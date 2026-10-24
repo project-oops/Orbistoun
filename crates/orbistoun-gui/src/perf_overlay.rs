@@ -152,6 +152,7 @@ mod tests {
                 ("cp: dispatch".to_owned(), 40.0, 5),
                 ("draw whole".to_owned(), 10.0, 20),
             ],
+            memory: None,
         };
         let shown = orbistoun_service::OverlaySettings::default();
         let (lines, biggest) = super::lines(&report, &shown);
@@ -198,6 +199,7 @@ mod tests {
                 ("present".to_owned(), 0.0),
             ],
             spans: Vec::new(),
+            memory: None,
         };
         let (lines, biggest) =
             super::lines(&report, &orbistoun_service::OverlaySettings::default());

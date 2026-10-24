@@ -19,8 +19,10 @@ mod probe;
 mod progress;
 mod questions;
 mod records;
+mod replay;
 mod resolutions;
 mod run;
+mod shader_census;
 mod shaders;
 mod status;
 mod submit;
@@ -45,8 +47,10 @@ use crate::module::{
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
 use crate::questions::{cmd_question_spec, cmd_questions};
+use crate::replay::cmd_replay_dispatch;
 use crate::resolutions::cmd_resolutions;
 use crate::run::{cmd_handoff, cmd_link, cmd_native_build, cmd_run};
+use crate::shader_census::cmd_shader_census;
 use crate::shaders::cmd_shaders;
 use crate::status::cmd_status;
 use crate::submit::dispatch_submit;
@@ -800,6 +804,37 @@ enum Command {
     /// running them exactly: a whole lane mask, another lane's value, the local data share, a
     /// barrier, a scalar store. Reads every title's kept translations; needs no GPU.
     Lanes,
+    /// Measure what each kept shader program of a title costs this build, without running it: its
+    /// translation's size against its guest instructions, and with `--compile` the driver's compile
+    /// time. Ranked by compile time and by words, with totals.
+    ShaderCensus {
+        /// The title whose kept translations to measure; every title's when omitted.
+        title: Option<String>,
+        /// Compile each module on the device, with no pipeline cache, and time it: a compute
+        /// module's whole pipeline, a draw's shader module alone.
+        #[arg(long)]
+        compile: bool,
+        /// Rows each ranking shows.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// Write every row as TSV here, for diffing two builds.
+        #[arg(long)]
+        write: Option<std::path::PathBuf>,
+    },
+    /// Run a guest compute dispatch captured with `ORBISTOUN_CAPTURE_DISPATCH`, or by losing the
+    /// device, again alone: each run's device time, whether it lost the device, and a hash of its
+    /// output to compare builds by.
+    ReplayDispatch {
+        /// The capture's directory, `dispatch-<addr>` where the run keeps its frames.
+        dir: std::path::PathBuf,
+        /// Runs to make; they stop at a lost device.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+        /// A directory to write what the last run left into: the window and each buffer, named as
+        /// the capture names them, to compare with another dispatch's inputs.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Show how the firmware skeleton lays out libkernel.
     ///
     /// Prints the stub each export address gets, which exports are unimplemented, and where a stub
@@ -1083,6 +1118,8 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Exports { .. }
         | Command::Shaders { .. }
         | Command::Lanes
+        | Command::ShaderCensus { .. }
+        | Command::ReplayDispatch { .. }
         | Command::Verify { .. }
         | Command::Report { .. }
         | Command::Load { .. }
@@ -1208,6 +1245,15 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         }
         Command::Shaders { path, top, sources } => cmd_shaders(&path, top, sources)?,
         Command::Lanes => cmd_lanes()?,
+        Command::ShaderCensus {
+            title,
+            compile,
+            top,
+            write,
+        } => cmd_shader_census(title.as_deref(), compile, top, write.as_deref())?,
+        Command::ReplayDispatch { dir, repeat, out } => {
+            cmd_replay_dispatch(&dir, repeat, out.as_deref())?;
+        }
         Command::Verify { path } => cmd_verify(service, &path)?,
         Command::Report { path } => cmd_report(service, &path)?,
         Command::Load { path, base } => cmd_load(service, &path, base)?,

@@ -19,6 +19,7 @@ pub mod model;
 pub mod modifiers;
 pub mod predicated;
 pub mod quick_lanes;
+pub mod scratch;
 pub mod user_data_reads;
 pub mod wavefront;
 
@@ -196,11 +197,16 @@ pub enum TranslateError {
     },
 
     /// A shader reads through more buffers than a stage binds (D733): how many it traced, so a
-    /// report says how far past the binding it is.
-    #[error("the shader reads through {traced} buffers, more than the {most} a stage binds (D733)")]
+    /// report says how far past the binding it is, and how many of them are descriptors or bases
+    /// it computes, each its own buffer unless it reads what an earlier access read (D952).
+    #[error(
+        "the shader reads through {traced} buffers, {computed} of them computed, more than the {most} a stage binds (D733)"
+    )]
     TooManyBuffers {
         /// The buffers its accesses were traced to.
         traced: usize,
+        /// How many of them the program computes (D753).
+        computed: usize,
         /// The most a stage binds.
         most: u32,
     },
@@ -1963,11 +1969,7 @@ mod tests {
                         workgroup_ids: [true, true, false],
                         thread_id_components: 2,
                         threads: [8, 8, 1],
-                        unwritten_user_data: 0,
-                        partial: None,
-                        integer_images: [false; 2],
-                        integer_fetched: 0,
-                        first_thread: 0,
+                        ..ComputeInputs::default()
                     }),
                     ..UserData::default()
                 },
@@ -2441,8 +2443,8 @@ mod tests {
     #[test]
     fn an_instruction_with_no_operand_layout_is_refused() {
         let (table, operands) = tables();
-        // MUBUF opcode 48, `buffer_atomic_swap`, whose layout nothing has recorded.
-        let decoded = decode(&stream(&[0xE0C0_0000, 0x0000_0000]), &table, &operands);
+        // MUBUF opcode 81, `buffer_atomic_cmpswap_x2`, whose layout nothing has recorded.
+        let decoded = decode(&stream(&[0xE144_0000, 0x0000_0000]), &table, &operands);
         let untranslatable = decoded.instructions.iter().any(|i| !i.operands_decoded);
         assert!(untranslatable, "the fixture must include an unknown layout");
         let refused = translate(&decoded, &table, Strategy::default());
@@ -2457,7 +2459,7 @@ mod tests {
         // And what came before it, so a word mistaken for an instruction after a misread length
         // shows as one.
         let decoded = decode(
-            &stream(&[0xBF80_0000, 0xE0C0_0000, 0x0000_0000]),
+            &stream(&[0xBF80_0000, 0xE144_0000, 0x0000_0000]),
             &table,
             &operands,
         );

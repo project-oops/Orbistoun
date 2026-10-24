@@ -811,7 +811,8 @@ pub enum Span {
     /// Within [`Self::PrepareShaders`]: the reconciled shaders prepared and bound before any draw;
     /// the rest of it is each draw's own.
     ShadersUpFront,
-    /// A kept-texels, swizzle or levels cache full, and let go whole to keep a new entry. Counted:
+    /// A texture cache full: the kept texels' oldest texture let go, or a swizzle or levels cache
+    /// let go whole, to keep a new entry. Counted:
     /// a few a run is a title touching more than the cache holds once; one every frame or so is a
     /// working set larger than the cache, every entry read afresh each time it comes back.
     TexturesEmptied,

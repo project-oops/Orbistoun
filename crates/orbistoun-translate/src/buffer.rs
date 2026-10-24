@@ -32,6 +32,15 @@ pub(crate) fn declare(b: &mut Builder, u32_type: Id, count: Id, binding: u32) ->
     b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
     b.annotate(op::DECORATE, &[buffer.0, decoration::DESCRIPTOR_SET, 0]);
     b.annotate(op::DECORATE, &[buffer.0, decoration::BINDING, binding]);
+    if binding == GUEST_MEMORY {
+        // Guest memory is shared with every other workgroup, as the console's is: a load the
+        // guest marks `glc` re-reads it, and a spin on a flag another workgroup sets (a ticket
+        // taken with an atomic, then a wait on the one before) must see the store. Without these
+        // the host compiler may read the flag once and hoist it out of the loop, and the spin
+        // never ends - GTA V's ray-tracing set-up lost the device that way.
+        b.annotate(op::DECORATE, &[buffer.0, decoration::COHERENT]);
+        b.annotate(op::DECORATE, &[buffer.0, decoration::VOLATILE]);
+    }
 
     b.declare(op::TYPE_ARRAY, &[array.0, u32_type.0, count.0]);
     b.declare(op::TYPE_STRUCT, &[block.0, array.0]);
@@ -113,6 +122,28 @@ pub(crate) fn declare_draw_buffers(
     u32_type: Id,
     (binding, writable): (u32, bool),
 ) -> DrawBufferArray {
+    declare_buffer_array(b, u32_type, (u32_type, 4), (binding, writable))
+}
+
+/// A dispatch's draw buffers at `binding` again, as runtime arrays of 64-bit words of type
+/// `u64_type` rather than of 32-bit ones: the view a 64-bit atomic reaches its pair through as one
+/// word. Both views are the one buffer bound at the binding, which the variables alias.
+pub(crate) fn declare_draw_buffer_pairs(
+    b: &mut Builder,
+    u32_type: Id,
+    u64_type: Id,
+    binding: u32,
+) -> DrawBufferArray {
+    declare_buffer_array(b, u32_type, (u64_type, 8), (binding, true))
+}
+
+/// [`declare_draw_buffers`] over runtime arrays of `element`, `stride` bytes apart.
+fn declare_buffer_array(
+    b: &mut Builder,
+    u32_type: Id,
+    (element, stride): (Id, u32),
+    (binding, writable): (u32, bool),
+) -> DrawBufferArray {
     let runtime = b.id();
     let block = b.id();
     let count = b.id();
@@ -122,10 +153,17 @@ pub(crate) fn declare_draw_buffers(
     let element_ptr = b.id();
     let variable = b.id();
 
-    b.annotate(op::DECORATE, &[runtime.0, decoration::ARRAY_STRIDE, 4]);
+    b.annotate(op::DECORATE, &[runtime.0, decoration::ARRAY_STRIDE, stride]);
     b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
     b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
-    if !writable {
+    if writable {
+        // A dispatch's buffers are shared by all its workgroups, as guest memory is (see
+        // [`declare`]): an atomic hands out tickets and a spin waits on a flag another workgroup
+        // stores, so every access must reach memory. GTA V's decoupled look-back scan
+        // (`image+0x3e16400`) spun forever on one hoisted out of its loop and lost the device.
+        b.annotate(op::DECORATE, &[variable.0, decoration::COHERENT]);
+        b.annotate(op::DECORATE, &[variable.0, decoration::VOLATILE]);
+    } else {
         b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::NON_WRITABLE]);
     }
     b.annotate(
@@ -138,7 +176,7 @@ pub(crate) fn declare_draw_buffers(
     );
     b.annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
 
-    b.declare(op::TYPE_RUNTIME_ARRAY, &[runtime.0, u32_type.0]);
+    b.declare(op::TYPE_RUNTIME_ARRAY, &[runtime.0, element.0]);
     b.declare(op::TYPE_STRUCT, &[block.0, runtime.0]);
     b.declare(
         op::CONSTANT,
@@ -155,7 +193,7 @@ pub(crate) fn declare_draw_buffers(
     );
     b.declare(
         op::TYPE_POINTER,
-        &[element_ptr.0, storage::STORAGE_BUFFER, u32_type.0],
+        &[element_ptr.0, storage::STORAGE_BUFFER, element.0],
     );
     b.declare(
         op::VARIABLE,
@@ -174,3 +212,46 @@ pub(crate) const OBSERVATION: u32 = 0;
 
 /// Binding of guest memory.
 pub(crate) const GUEST_MEMORY: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    use orbistoun_spirv::{Builder, Id, decoration, op};
+
+    /// Whether `words` decorate `target` with `which` (`OpDecorate`, three words).
+    fn decorates(words: &[u32], target: Id, which: u32) -> bool {
+        words
+            .windows(3)
+            .any(|w| w == [3 << 16 | u32::from(op::DECORATE), target.0, which])
+    }
+
+    /// Guest memory is coherent and volatile, so a spin on a flag another workgroup sets sees the
+    /// store; the observation window, which only this invocation writes, is not.
+    #[test]
+    fn guest_memory_is_coherent_and_volatile() {
+        let mut b = Builder::new();
+        let u32_type = b.id();
+        let count = b.id();
+        let memory = super::declare(&mut b, u32_type, count, super::GUEST_MEMORY);
+        let observed = super::declare(&mut b, u32_type, count, super::OBSERVATION);
+        let words = b.finish();
+        assert!(decorates(&words, memory.buffer, decoration::COHERENT));
+        assert!(decorates(&words, memory.buffer, decoration::VOLATILE));
+        assert!(!decorates(&words, observed.buffer, decoration::COHERENT));
+        assert!(!decorates(&words, observed.buffer, decoration::VOLATILE));
+    }
+
+    /// A dispatch's writable buffers are coherent and volatile, as guest memory is; a draw's
+    /// read-only ones are not.
+    #[test]
+    fn a_dispatch_s_buffers_are_coherent_and_volatile() {
+        let mut b = Builder::new();
+        let u32_type = b.id();
+        let written = super::declare_draw_buffers(&mut b, u32_type, (0, true));
+        let read = super::declare_draw_buffers(&mut b, u32_type, (1, false));
+        let words = b.finish();
+        assert!(decorates(&words, written.variable, decoration::COHERENT));
+        assert!(decorates(&words, written.variable, decoration::VOLATILE));
+        assert!(!decorates(&words, read.variable, decoration::COHERENT));
+        assert!(!decorates(&words, read.variable, decoration::VOLATILE));
+    }
+}

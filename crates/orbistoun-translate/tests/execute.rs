@@ -1104,6 +1104,26 @@ fn a_scalar_load_into_the_condition_mask_fills_both_halves() {
     assert_eq!((scalar(&registers, 2), scalar(&registers, 3)), (11, 22));
 }
 
+/// A one-word scalar load into `vcc_hi`, scalar register 107, fills it and leaves `vcc_lo`: Grand
+/// Theft Auto V's in-world compute program does `s_load_dword vcc_hi, s[2:3], 0x84` (words
+/// 0xf4001ac1 0xfa000084).
+#[test]
+fn a_scalar_load_into_vcc_hi_fills_the_mask_s_high_half() {
+    if !device_or_skip("a_scalar_load_into_vcc_hi_fills_the_mask_s_high_half") {
+        return;
+    }
+    let sop1 = |name: &str, dst: u32, src: u32| head(name) | (dst << 16) | src;
+    let mut program = vec![v_mov_inline(0, 16), v_mov_inline(1, 33)];
+    program.extend(global_store(0, 1));
+    program.push(sop1("s_mov_b32", 106, 128 + 7));
+    program.extend(s_load("s_load_dword", 107, 0, 16));
+    program.push(sop1("s_mov_b32", 2, 106));
+    program.push(sop1("s_mov_b32", 3, 107));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!((scalar(&registers, 2), scalar(&registers, 3)), (7, 33));
+}
+
 /// `s_load_dwordx2` writes no register beyond its width.
 #[test]
 fn a_wide_scalar_load_writes_no_register_beyond_its_width() {
@@ -4116,6 +4136,35 @@ fn a_thirty_two_lane_shader_masks_with_the_thirty_two_bit_forms() {
     );
 }
 
+/// A 32-lane shader's compare writes `vcc_lo` alone: `vcc_hi` is a register of its own there, and
+/// Grand Theft Auto V's treelet program at `0x3dc9a00` in its image keeps its saved execution mask
+/// in it across a loop of `v_cmp_lt_f32_e32 vcc_lo`. Writing both halves zeroed it, the loop ended
+/// with no lane running, and the program rebuilt its trees from partitions it never chose.
+#[test]
+fn a_thirty_two_lane_compare_leaves_vcc_hi() {
+    if !device_or_skip("a_thirty_two_lane_compare_leaves_vcc_hi") {
+        return;
+    }
+    let (vcc_lo, vcc_hi) = (106, 107);
+    let program = [
+        s_mov_inline(vcc_hi, 37),
+        v_mov_inline(0, 1),
+        v_mov_inline(1, 2),
+        // v_cmp_lt_u32_e32 vcc_lo, v0, v1: true in every lane.
+        head("v_cmp_lt_u32_e32") | (1 << 9) | 256,
+        s_mov_code(2, vcc_hi),
+        s_mov_code(3, vcc_lo),
+        s_endpgm(),
+    ];
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(
+        scalar(&registers, 3),
+        u32::MAX,
+        "every lane answers in vcc_lo"
+    );
+    assert_eq!(scalar(&registers, 2), 37, "vcc_hi is left as it was");
+}
+
 /// A 32-lane shader narrows its mask with `s_and_b32 exec_lo`.
 #[test]
 fn a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic() {
@@ -6391,6 +6440,33 @@ fn local_atomics_take_the_minimum_maximum_and_sum() {
         (100..100 + sum).contains(&returned),
         "lane 0's answer, what the word held before its add: {returned}"
     );
+}
+
+/// `ds_add_u32` (DS 0) adds each running lane's value into the word and answers nothing (AMD's
+/// published RDNA 2 instruction set, `DS_ADD_U32`), as Grand Theft Auto V's in-world compute
+/// program counts into the local share with it: the word starting at 7 ends at 7 plus every lane's
+/// value, 50 to 113.
+#[test]
+fn a_local_add_that_answers_nothing_sums_every_lane() {
+    if !device_or_skip("a_local_add_that_answers_nothing_sums_every_lane") {
+        return;
+    }
+    let mut program: Vec<u32> = lane_index_into(1).to_vec();
+    program.extend(v_mov_literal(2, 50));
+    program.push(vop2_vv("v_add_nc_u32_e32", 1, 1, 2));
+    program.push(v_mov_inline(0, 0));
+    program.push(v_mov_inline(3, 7));
+    program.extend(ds_write(0, 3, 12));
+    program.push(s_waitcnt());
+    // ds_add_u32 v0, v1 offset:12
+    program.extend([head("ds_add_u32") | 0xc, 1 << 8]);
+    program.push(s_waitcnt());
+    program.extend(ds_read(5, 0, 12));
+    program.push(s_waitcnt());
+    program.push(s_endpgm());
+    let registers = run(&program);
+    let sum: u32 = (50..114).sum();
+    assert_eq!(vector(&registers, 5), 7 + sum, "7 and every lane's value");
 }
 
 /// `ds_write_b32 vAddr, vData offset:N`.

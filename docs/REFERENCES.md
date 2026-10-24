@@ -49,7 +49,8 @@ load-bearing; the document number and title are what to search for.
 chapter 13, *Microcode Formats*. Condition-code side effects of scalar instructions, which
 differ by family and are invisible in the encoding, the operand layout and any test of
 destinations (D129). The exponent thresholds and special-case substitutions of the division
-sequence `v_div_scale_f32`, `v_div_fmas_f32`, `v_div_fixup_f32`.
+sequence `v_div_scale_f32`, `v_div_fmas_f32`, `v_div_fixup_f32`. The ray-tracing instructions'
+address registers, descriptor fields and triangle return modes (section 8.2.10, tables 48-50).
 
 **Erratum.** The field table for the LDS format gives the opcode at bits `[24:17]`; it is at
 `[25:18]`. Only `[25:18]` yields the document's own opcode table values for `ds_read_b32`

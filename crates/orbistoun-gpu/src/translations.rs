@@ -59,6 +59,17 @@ pub struct Kept {
     pub warnings: Vec<String>,
 }
 
+impl Kept {
+    /// Lets go of its lists' spare capacity.
+    fn shrink_to_fit(&mut self) {
+        self.bytes.shrink_to_fit();
+        self.module.shrink_to_fit();
+        self.textures.shrink_to_fit();
+        self.storage.shrink_to_fit();
+        self.warnings.shrink_to_fit();
+    }
+}
+
 /// A kept translation's stored images: a list, or the one image - or none - a store kept before a
 /// dispatch could store to more than one holds (D893), so a store written then still loads.
 fn one_or_many<'de, D: serde::Deserializer<'de>>(
@@ -97,16 +108,35 @@ pub struct TranslationStore {
     /// Whether anything changed since it was read or written.
     #[serde(skip)]
     changed: bool,
+    /// What [`Self::held_bytes`] answers, counted as entries come and go.
+    #[serde(skip)]
+    held: u64,
+}
+
+/// The bytes a kept translation holds: its shader and its module, as allocated.
+fn held_by(kept: &Kept) -> u64 {
+    (kept.bytes.capacity() + kept.module.capacity() * 4) as u64
 }
 
 impl TranslationStore {
     /// The store at `path`, or an empty one when none is there or it cannot be read.
     #[must_use]
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        // Streamed, as it is written.
+        let mut store: Self = std::fs::File::open(path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .and_then(|file| serde_json::from_reader(std::io::BufReader::new(file)).ok())
+            .unwrap_or_default();
+        // A list read from JSON grows by doubling, as nothing says its length first: up to half
+        // of each would be spare.
+        store.entries.values_mut().for_each(Kept::shrink_to_fit);
+        store.count_held();
+        store
+    }
+
+    /// Counts what its entries hold afresh.
+    fn count_held(&mut self) {
+        self.held = self.entries.values().map(held_by).sum();
     }
 
     /// Writes the store to `path` when it changed.
@@ -121,10 +151,13 @@ impl TranslationStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        // Written beside and renamed over, so a run stopped mid-write leaves the old store or none.
+        // Written beside and renamed over, so a run stopped mid-write leaves the old store or none;
+        // and streamed, since the whole store as one string is hundreds of megabytes more held.
         let partial = path.with_extension("partial");
-        std::fs::write(&partial, bytes)?;
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&partial)?);
+        serde_json::to_writer(&mut file, self).map_err(std::io::Error::other)?;
+        std::io::Write::flush(&mut file)?;
+        drop(file);
         std::fs::rename(&partial, path)?;
         self.changed = false;
         Ok(())
@@ -137,8 +170,12 @@ impl TranslationStore {
     }
 
     /// Keeps a translation just made.
-    pub fn insert(&mut self, key: u64, kept: Kept) {
-        self.entries.insert(key, kept);
+    pub fn insert(&mut self, key: u64, mut kept: Kept) {
+        kept.shrink_to_fit();
+        self.held += held_by(&kept);
+        if let Some(old) = self.entries.insert(key, kept) {
+            self.held = self.held.saturating_sub(held_by(&old));
+        }
         self.changed = true;
     }
 
@@ -151,6 +188,12 @@ impl TranslationStore {
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The bytes its translations hold: each shader and its module, as allocated.
+    #[must_use]
+    pub const fn held_bytes(&self) -> u64 {
+        self.held
     }
 
     /// Whether none are.
@@ -176,6 +219,7 @@ impl TranslationStore {
         self.entries.retain(|_, kept| {
             if let Some(made) = translate(&kept.bytes, &kept.context, encodings, operands) {
                 *kept = made;
+                kept.shrink_to_fit();
                 refill.translated += 1;
                 true
             } else {
@@ -184,6 +228,7 @@ impl TranslationStore {
             }
         });
         translator.clone_into(&mut self.translator);
+        self.count_held();
         self.changed = true;
         refill
     }

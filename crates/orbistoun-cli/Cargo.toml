@@ -30,6 +30,8 @@ orbistoun-report = { workspace = true }
 orbistoun-perf = { workspace = true }
 # The span table, which says which spans wait on another thread's (D831).
 orbistoun-gpu = { workspace = true }
+# A captured guest dispatch, run again alone: `replay-dispatch`.
+orbistoun-gpu-vulkan = { workspace = true }
 # The dispatcher. Deliberately *not* `orbistoun-propose`, which carries a model runtime this
 # binary has no use for - the crate boundary is what keeps candle and reqwest out of the CLI,
 # rather than a feature flag nobody re-checks (D293).

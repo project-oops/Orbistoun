@@ -11,6 +11,7 @@
 
 mod backend;
 pub mod bc;
+pub mod bound_ranges;
 pub mod colour_slots;
 pub mod cp;
 pub mod dcc;
@@ -20,6 +21,7 @@ pub mod dispatch;
 pub mod display;
 pub mod draw_buffers;
 pub mod formats;
+pub mod memory_watch;
 pub mod msaa;
 pub mod packet;
 pub mod perf;
@@ -28,8 +30,10 @@ mod pixel_inputs;
 pub mod register_defaults;
 pub mod registers;
 mod render;
+pub mod shader_census;
 pub mod streamout;
 pub mod swizzle;
+pub mod tally;
 pub mod tessellation;
 pub mod tiling;
 pub mod translations;

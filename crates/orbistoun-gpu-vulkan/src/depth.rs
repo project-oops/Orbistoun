@@ -118,6 +118,7 @@ impl DepthAttachment {
         height: u32,
         clear: Option<DepthClear>,
     ) -> Result<Self, DispatchError> {
+        let _for = crate::device_memory::purpose("depth targets");
         let session = crate::compute::session()?;
         let session = session
             .lock()

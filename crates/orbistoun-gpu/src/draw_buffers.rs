@@ -152,7 +152,11 @@ const MOST_BYTES: u64 = 256 << 20;
 
 /// How many bytes [`BufferCache`] keeps, the oldest ranges going first past it: a world's vertex
 /// buffers, which a frame draws from again, and a bound for a guest streaming new ones every frame.
-const CACHE_BYTES: usize = 512 << 20;
+const CACHE_BYTES: usize = 256 << 20;
+
+/// How many stale places [`BufferCache`]'s order holds beyond twice its entries before they are
+/// cleared out.
+const STALE_PLACES: usize = 1024;
 
 /// The most bytes a draw buffer has for [`BufferCache`] to compare it with what it kept rather
 /// than ask the host whether it was written: reading and comparing this many costs less than the
@@ -204,6 +208,11 @@ pub struct BufferCache {
 }
 
 impl BufferCache {
+    /// The bytes of guest buffers kept.
+    pub(crate) const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// The `length` bytes at `address`, from the cache while nothing has written them.
     fn read(
         &mut self,
@@ -277,6 +286,15 @@ impl BufferCache {
         self.entries.insert(range, (since, buffer, self.generation));
         self.order.push_back((range, self.generation));
         self.bytes += size;
+        // A range kept again leaves a stale place behind, and a set rewritten every frame within
+        // the bytes never reaches the eviction below: the stale places go once they outnumber the
+        // entries.
+        if self.order.len() > 2 * self.entries.len() + STALE_PLACES {
+            let entries = &self.entries;
+            self.order.retain(|(range, generation)| {
+                entries.get(range).is_some_and(|e| e.2 == *generation)
+            });
+        }
         while self.bytes > CACHE_BYTES {
             let Some((oldest, generation)) = self.order.pop_front() else {
                 break;
@@ -918,7 +936,8 @@ fn span_of(
 }
 
 /// The most waves a dispatch's global loads are run through on the host in one preparation (D883):
-/// a bound on the work a dispatch can ask of the host, refused by name beyond it.
+/// a bound on the work a dispatch can ask of the host, beyond which a sample of its groups is run
+/// (D950).
 const MOST_DISPATCH_WAVES: u64 = 4096;
 
 /// What a dispatch's lane run seeds each wave with (D883), as a refusal says it: the user data
@@ -957,16 +976,122 @@ fn wave_entry(user_data: usize, inputs: orbistoun_translate::wavefront::ComputeI
     }
 }
 
+/// The range a dispatch binds for its global loads (D883, D950), or for a computed access a sample
+/// of its groups reached (D951).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GlobalRange {
+    /// The guest range bound, `(address, bytes)`: what the waves run read, and where they were a
+    /// sample, a margin about it.
+    pub(crate) range: (u64, u64),
+    /// What the waves run read, `(address, bytes)`.
+    pub(crate) read: (u64, u64),
+    /// How many groups were run, where they were a sample of the dispatch's rather than all of
+    /// them: a load outside the range is then possible, and the module reports it as an escape.
+    pub(crate) sampled: Option<u64>,
+}
+
+/// The most margin a sampled dispatch's global range has on each side beyond what its waves read
+/// (D950): room for groups between the sampled ones that read a little further, the bytes bound
+/// bounded however large the span.
+const MOST_SAMPLED_MARGIN: u64 = 1 << 20;
+
+/// The groups a dispatch too large to run whole is sampled at (D950): along each dimension its
+/// first and last group and as many evenly spaced between as the waves allow, every combination of
+/// them. The corners of the grid are always among them, so a load whose address is an affine
+/// function of the group and thread ids reads its lowest and highest bytes in a sampled group.
+/// `waves` bounds the sampled groups' waves, beyond the corners, which are always taken (D951).
+fn sampled_groups(groups: [u32; 3], waves_per_group: u64, waves: u64) -> Vec<[u32; 3]> {
+    let budget = (waves / waves_per_group.max(1)).max(1);
+    let taken = |along: u32| -> u64 {
+        groups
+            .iter()
+            .map(|&n| u64::from(n.min(along)))
+            .product::<u64>()
+    };
+    // The most points along a dimension whose grid fits the budget; two at least, for the corners.
+    let mut along = 2u32;
+    while along < groups.iter().copied().max().unwrap_or(1) && taken(along + 1) <= budget {
+        along += 1;
+    }
+    let points = |n: u32| -> Vec<u32> {
+        if n <= along {
+            return (0..n).collect();
+        }
+        let last = u64::from(n - 1);
+        let steps = u64::from(along - 1);
+        let mut points: Vec<u32> = (0..=steps)
+            .map(|step| u32::try_from(step * last / steps).unwrap_or(n - 1))
+            .collect();
+        points.dedup();
+        points
+    };
+    let [xs, ys, zs] = groups.map(points);
+    let mut sampled = Vec::with_capacity(xs.len() * ys.len() * zs.len());
+    for &z in &zs {
+        for &y in &ys {
+            for &x in &xs {
+                sampled.push([x, y, z]);
+            }
+        }
+    }
+    sampled
+}
+
+/// `read` widened by a margin on each side (D950) - an eighth of its bytes, at most
+/// [`MOST_SAMPLED_MARGIN`], in whole pages - where guest memory is mapped across the widened range;
+/// a side whose margin is not mapped keeps none.
+fn with_margin(read: (u64, u64), memory: &impl GuestMemory) -> (u64, u64) {
+    const PAGE: u64 = 0x1000;
+    let margin = (read.1 / 8).min(MOST_SAMPLED_MARGIN).next_multiple_of(PAGE);
+    if read.1 == 0 || margin == 0 {
+        return read;
+    }
+    let mapped = |(address, bytes): (u64, u64)| {
+        usize::try_from(bytes).is_ok_and(|bytes| memory.read(address, bytes).is_some())
+    };
+    let end = read.0 + read.1;
+    let low = read.0.saturating_sub(margin);
+    let high = end.saturating_add(margin);
+    [(low, high), (read.0, high), (low, end)]
+        .into_iter()
+        .map(|(low, high)| (low, high - low))
+        .find(|&range| mapped(range))
+        .unwrap_or(read)
+}
+
 /// The range a dispatch's global loads read (D883): the program run on the host over every wave of
 /// every group the dispatch runs, each from its entry state - the user data, the group's enabled id
 /// components, and each lane's thread id, x fastest, where the lane has a thread - and the span of
 /// every address an active lane forms. A partial dispatch's last group runs only its threads (D855).
 ///
+/// A dispatch of more waves than [`MOST_DISPATCH_WAVES`] runs every wave of a sample of its groups
+/// instead ([`sampled_groups`]), and binds what they read with a margin ([`with_margin`]); the
+/// module reports a load outside it as an escape, and the dispatch's result is refused (D950).
+///
 /// # Errors
 ///
-/// A dispatch of more waves than [`MOST_DISPATCH_WAVES`], or a load whose lanes' addresses or mask
-/// the host cannot know.
+/// A load whose lanes' addresses or mask the host cannot know.
 pub(crate) fn dispatch_global_range(
+    global: &GlobalLoads,
+    dispatch: (
+        &[u32],
+        orbistoun_translate::wavefront::ComputeInputs,
+        [u32; 3],
+        u32,
+    ),
+    memory: &impl GuestMemory,
+) -> Result<GlobalRange, Refusal> {
+    global_range_within(
+        global,
+        dispatch,
+        (MOST_PREPARATION_STEPS, MOST_NATIVE_PREPARATION_STEPS),
+        memory,
+    )
+}
+
+/// [`dispatch_global_range`] with `(steps, native)` for every wave it runs to share: the model's
+/// steps and the native run's (D951).
+fn global_range_within(
     global: &GlobalLoads,
     (user_data, inputs, groups, width): (
         &[u32],
@@ -974,20 +1099,26 @@ pub(crate) fn dispatch_global_range(
         [u32; 3],
         u32,
     ),
+    (mut steps, mut native): (usize, usize),
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), Refusal> {
+) -> Result<GlobalRange, Refusal> {
     use orbistoun_translate::evaluate::{
-        LOOPS_PAST_THE_BOUND, long_wave_lane_addresses, wave_lane_addresses,
+        LOOPS_PAST_THE_BOUND, PAST_THE_PREPARATION_STEPS, long_wave_lane_addresses_within,
+        wave_lane_addresses_within,
     };
-    let runs =
-        groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(inputs.waves(width));
-    if runs > MOST_DISPATCH_WAVES {
-        return Err(concat!(
-            "a dispatch of more waves than one preparation runs on the host to find where its ",
-            "global loads read (D883)"
-        )
-        .into());
-    }
+    let waves_per_group = u64::from(inputs.waves(width));
+    let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * waves_per_group;
+    let (entries, sampled) = if runs > MOST_DISPATCH_WAVES {
+        let chosen = sampled_groups(groups, waves_per_group, MOST_DISPATCH_WAVES);
+        let count = chosen.len() as u64;
+        let entries = chosen
+            .into_iter()
+            .flat_map(|group| group_waves(inputs, group, width))
+            .collect();
+        (entries, Some(count))
+    } else {
+        (dispatch_waves(inputs, groups, width), None)
+    };
     let (encodings, _) = tables()?;
     let prepared = prepared_program(global, crate::content_hash(&global.prefix))?;
     let mut word = |address: u64| {
@@ -996,26 +1127,44 @@ pub(crate) fn dispatch_global_range(
     };
     // The span every wave reads, folded wave by wave: a long loop's addresses are many.
     let mut span: Option<(u64, u64)> = None;
-    for entry in dispatch_waves(inputs, groups, width) {
-        let addresses = match wave_lane_addresses(
+    // The steps every wave shares, the model's and the native run's each (D951).
+    let (allowed, allowed_native) = (steps, native);
+    let waves = entries.len();
+    for (ran, entry) in entries.into_iter().enumerate() {
+        let addresses = match wave_lane_addresses_within(
             &prepared.program,
             encodings,
             user_data,
             (width, &entry),
-            &mut word,
+            (&mut word, &mut steps),
         ) {
             Ok(addresses) => addresses,
             // A loop longer than the model follows is followed natively (D850).
-            Err(why) if why == LOOPS_PAST_THE_BOUND => {
-                long_wave_lane_addresses(&prepared.program, user_data, (width, &entry), &mut word)
-                    .map_err(|at| -> Refusal {
-                    let step = prepared.program.instruction_named(at);
-                    if prepared.program.runs_quickly() {
-                        format!("{why}; the native run stops at {step}").into()
-                    } else {
-                        format!("{why}; the native run does not carry out {step}").into()
-                    }
-                })?
+            Err(why) if why == LOOPS_PAST_THE_BOUND => long_wave_lane_addresses_within(
+                &prepared.program,
+                user_data,
+                (width, &entry),
+                (&mut word, &mut native),
+            )
+            .map_err(|at| -> Refusal {
+                if at == u32::MAX && native == 0 {
+                    return format!(
+                        "the native replay ran past {allowed_native} steps, the preparation's bound, before every wave's global loads: {ran} of {waves} waves ran (D951)"
+                    )
+                    .into();
+                }
+                let step = prepared.program.instruction_named(at);
+                if prepared.program.runs_quickly() {
+                    format!("{why}; the native run stops at {step}").into()
+                } else {
+                    format!("{why}; the native run does not carry out {step}").into()
+                }
+            })?,
+            Err(why) if why == PAST_THE_PREPARATION_STEPS => {
+                return Err(format!(
+                    "the host replay ran past {allowed} steps, the preparation's bound, before every wave's global loads: {ran} of {waves} waves ran (D951)"
+                )
+                .into());
             }
             Err(why) => {
                 return Err(format!("{why}; {}", wave_entry(user_data.len(), inputs)).into());
@@ -1027,58 +1176,93 @@ pub(crate) fn dispatch_global_range(
             span = Some(span.map_or((first, end), |(low, high)| (low.min(first), high.max(end))));
         }
     }
-    Ok(span.map_or((0, 0), |(low, high)| (low, high - low)))
+    let read = span.map_or((0, 0), |(low, high)| (low, high - low));
+    Ok(GlobalRange {
+        range: if sampled.is_some() {
+            with_margin(read, memory)
+        } else {
+            read
+        },
+        read,
+        sampled,
+    })
 }
 
-/// Every wave of a dispatch of `groups` workgroups as the hardware starts it (D883): its group's
-/// enabled id components, and each lane's thread ids - `None` past the group's threads, or outside
-/// a partial last group (D855) - the x id counting from the dispatch's first thread (D861).
+/// Every wave of a dispatch of `groups` workgroups as the hardware starts it (D883), group by group
+/// as [`group_waves`] starts each.
 fn dispatch_waves(
     inputs: orbistoun_translate::wavefront::ComputeInputs,
     groups: [u32; 3],
     width: u32,
 ) -> Vec<orbistoun_translate::evaluate::WaveEntry> {
-    let waves = inputs.waves(width);
-    let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
     let mut entries = Vec::new();
     for z in 0..groups[2] {
         for y in 0..groups[1] {
             for x in 0..groups[0] {
-                let group = [x, y, z];
-                let group_ids: Vec<u32> = (0..3)
-                    .filter(|&component| inputs.workgroup_ids[component])
-                    .map(|component| group[component])
-                    .collect();
-                for wave in 0..waves {
-                    let threads = (0..width)
-                        .map(|lane| {
-                            let thread = wave * width + lane;
-                            if thread >= x_threads * y_threads * z_threads {
-                                return None;
-                            }
-                            let id = [
-                                thread % x_threads,
-                                thread / x_threads % y_threads,
-                                thread / (x_threads * y_threads),
-                            ];
-                            let runs = inputs.partial.is_none_or(|partial| {
-                                (0..3).all(|c| {
-                                    group[c] != partial.last[c] || id[c] < partial.threads[c]
-                                })
-                            });
-                            runs.then_some([id[0] + inputs.first_thread, id[1], id[2]])
-                        })
-                        .collect();
-                    entries.push(orbistoun_translate::evaluate::WaveEntry {
-                        group_ids: group_ids.clone(),
-                        threads,
-                        components: inputs.thread_id_components,
-                    });
-                }
+                entries.extend(group_waves(inputs, [x, y, z], width));
             }
         }
     }
     entries
+}
+
+/// The first wave of each of the first `count` groups of a dispatch of `groups`, in the order
+/// [`dispatch_waves`] starts them: what a sampled replay probes. Built group by group, so a sample
+/// of a huge grid costs its sample - every wave of the grid made first and then thinned grew to
+/// 7 GiB on GTA V's full-screen passes and exhausted the host.
+fn first_waves_of_first_groups(
+    inputs: orbistoun_translate::wavefront::ComputeInputs,
+    groups: [u32; 3],
+    width: u32,
+    count: usize,
+) -> Vec<orbistoun_translate::evaluate::WaveEntry> {
+    (0..groups[2])
+        .flat_map(|z| (0..groups[1]).flat_map(move |y| (0..groups[0]).map(move |x| [x, y, z])))
+        .take(count)
+        .filter_map(|group| group_waves(inputs, group, width).into_iter().next())
+        .collect()
+}
+
+/// Every wave of the group at `group` as the hardware starts it (D883): its group's enabled id
+/// components, and each lane's thread ids - `None` past the group's threads, or outside a partial
+/// last group (D855) - the x id counting from the dispatch's first thread (D861).
+fn group_waves(
+    inputs: orbistoun_translate::wavefront::ComputeInputs,
+    group: [u32; 3],
+    width: u32,
+) -> Vec<orbistoun_translate::evaluate::WaveEntry> {
+    let waves = inputs.waves(width);
+    let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
+    let group_ids: Vec<u32> = (0..3)
+        .filter(|&component| inputs.workgroup_ids[component])
+        .map(|component| group[component])
+        .collect();
+    (0..waves)
+        .map(|wave| {
+            let threads = (0..width)
+                .map(|lane| {
+                    let thread = wave * width + lane;
+                    if thread >= x_threads * y_threads * z_threads {
+                        return None;
+                    }
+                    let id = [
+                        thread % x_threads,
+                        thread / x_threads % y_threads,
+                        thread / (x_threads * y_threads),
+                    ];
+                    let runs = inputs.partial.is_none_or(|partial| {
+                        (0..3).all(|c| group[c] != partial.last[c] || id[c] < partial.threads[c])
+                    });
+                    runs.then_some([id[0] + inputs.first_thread, id[1], id[2]])
+                })
+                .collect();
+            orbistoun_translate::evaluate::WaveEntry {
+                group_ids: group_ids.clone(),
+                threads,
+                components: inputs.thread_id_components,
+            }
+        })
+        .collect()
 }
 
 /// How many bytes past a computed access's prefix a probed run reads of its program: the loop the
@@ -1092,13 +1276,20 @@ const PROBE_TAIL_BYTES: usize = 4096;
 ///
 /// # Errors
 ///
-/// A refusal naming what the host cannot follow: no program address, more waves than are run, or
-/// what a wave's run could not know. `address` is the program's, whose prefix the access's is.
-/// With `sample`, only the first wave of each of that many groups is run, however many the
-/// dispatch has: what a refusal reports of a dispatch too large to run whole.
+/// A refusal naming what the host cannot follow: no program address, or what a wave's run could
+/// not know. `address` is the program's, whose prefix the access's is. With `sample`, only the
+/// first wave of each of that many groups is run, however many the dispatch has: what a refusal
+/// reports of a dispatch whose waves cannot be run.
+///
+/// A dispatch of more waves than [`MOST_COMPUTED_WAVES`] runs every wave of a lattice of its
+/// groups instead ([`sampled_groups`]), and says how many groups it ran (D951): what they reach is
+/// then bound by [`sampled_reached_range`], and an access outside it is an escape. A lattice that
+/// reaches the access with nothing that binds a byte places nothing: every wave is run instead,
+/// as without a sample, where the dispatch has no more than [`MOST_DISPATCH_WAVES`], and the
+/// access is refused where it has more.
 pub(crate) fn dispatch_computed_descriptors(
     (computed, address, sample): (&Computed, u64, Option<usize>),
-    (user_data, inputs, groups, width): (
+    dispatch: (
         &[u32],
         orbistoun_translate::wavefront::ComputeInputs,
         [u32; 3],
@@ -1106,12 +1297,29 @@ pub(crate) fn dispatch_computed_descriptors(
     ),
     memory: &impl GuestMemory,
 ) -> Result<ReachedDescriptors, Refusal> {
-    use orbistoun_translate::evaluate::{LaneProgram, wave_probes};
-    let runs =
-        groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(inputs.waves(width));
-    if runs > MOST_DISPATCH_WAVES && sample.is_none() {
-        return Err("a dispatch of more waves than are run on the host (D900)".into());
-    }
+    computed_descriptors_within(
+        (computed, address, sample),
+        dispatch,
+        MOST_PREPARATION_STEPS,
+        memory,
+    )
+}
+
+/// [`dispatch_computed_descriptors`] with `steps` for every wave it runs to share (D951).
+fn computed_descriptors_within(
+    (computed, address, sample): (&Computed, u64, Option<usize>),
+    (user_data, inputs, groups, width): (
+        &[u32],
+        orbistoun_translate::wavefront::ComputeInputs,
+        [u32; 3],
+        u32,
+    ),
+    mut steps: usize,
+    memory: &impl GuestMemory,
+) -> Result<ReachedDescriptors, Refusal> {
+    use orbistoun_translate::evaluate::{LaneProgram, wave_probes_within};
+    let waves_per_group = u64::from(inputs.waves(width));
+    let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * waves_per_group;
     let (encodings, operands) = tables()?;
     let length = computed.prefix.len() * 4 + PROBE_TAIL_BYTES;
     let bytes = memory
@@ -1133,39 +1341,130 @@ pub(crate) fn dispatch_computed_descriptors(
         let bytes = memory.read(address, 4)?;
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     };
-    let mut reached = ReachedDescriptors::default();
-    let waves = usize::try_from(inputs.waves(width)).unwrap_or(1);
-    let entries = dispatch_waves(inputs, groups, width);
-    let entries: Vec<_> = match sample {
-        Some(groups) => entries.into_iter().step_by(waves).take(groups).collect(),
-        None => entries,
-    };
-    for entry in entries {
-        let (probed, last) =
-            wave_probes(&program, encodings, user_data, (width, &entry), &mut word)?;
-        *reached.ends.entry(last).or_default() += 1;
-        for (_, values) in probed {
-            let unknown: Vec<String> = registers
-                .iter()
-                .zip(&values)
-                .filter(|(_, value)| value.is_none())
-                .map(|(register, _)| format!("s{register}"))
-                .collect();
-            let values: Option<Vec<u32>> = values.into_iter().collect();
-            let values = values.ok_or_else(|| {
-                format!(
-                    "a wave reaches the access with {} unknown, ending at {last:#x}",
-                    unknown.join(", ")
-                )
-            })?;
-            let mut words = [0; 4];
-            words[..count].copy_from_slice(&values[..count]);
-            reached
-                .descriptors
-                .insert((words, values.get(count).copied().unwrap_or(0)));
+    // `steps` are shared by every wave this preparation runs: no preparation holds the host for
+    // longer than they take (D951).
+    let allowed = steps;
+    let mut run = |entries: Vec<orbistoun_translate::evaluate::WaveEntry>| {
+        let mut reached = ReachedDescriptors::default();
+        for (ran, entry) in entries.iter().enumerate() {
+            let (probed, last) = wave_probes_within(
+                &program,
+                encodings,
+                user_data,
+                (width, entry),
+                (&mut word, &mut steps),
+            )
+            .map_err(|why| replay_bound(why, (computed.at, allowed), (ran, entries.len())))?;
+            *reached.ends.entry(last).or_default() += 1;
+            for (_, values) in probed {
+                let unknown: Vec<String> = registers
+                    .iter()
+                    .zip(&values)
+                    .filter(|(_, value)| value.is_none())
+                    .map(|(register, _)| format!("s{register}"))
+                    .collect();
+                let values: Option<Vec<u32>> = values.into_iter().collect();
+                let values = values.ok_or_else(|| {
+                    format!(
+                        "a wave reaches the access with {} unknown, ending at {last:#x}",
+                        unknown.join(", ")
+                    )
+                })?;
+                let mut words = [0; 4];
+                words[..count].copy_from_slice(&values[..count]);
+                reached
+                    .descriptors
+                    .insert((words, values.get(count).copied().unwrap_or(0)));
+            }
         }
+        Ok::<_, Refusal>(reached)
+    };
+    match sample {
+        Some(count) => run(first_waves_of_first_groups(inputs, groups, width, count)),
+        // Every wave of a lattice of groups, the corners in it: a waterfall's descriptor follows
+        // its lanes, so a group's other waves can reach another (D951).
+        None if runs > MOST_COMPUTED_WAVES => {
+            let chosen = sampled_groups(groups, waves_per_group, MOST_COMPUTED_WAVES);
+            let groups_run = chosen.len() as u64;
+            let mut reached = run(chosen
+                .into_iter()
+                .flat_map(|group| group_waves(inputs, group, width))
+                .collect())?;
+            reached.sampled = Some(groups_run);
+            if !reaches_nothing(computed, &reached) {
+                return Ok(reached);
+            }
+            // A lattice that reaches nothing places nothing: an access only some threads take,
+            // as a waterfall over a tree's leaves is, can lie wholly between the sampled groups.
+            // Every wave is run where a preparation can; past that the access is refused, never
+            // bound empty.
+            if runs > MOST_DISPATCH_WAVES {
+                let ends: Vec<String> = reached
+                    .ends
+                    .iter()
+                    .map(|(at, waves)| format!("{waves} at {at:#x}"))
+                    .collect();
+                return Err(format!(
+                    "a sample of {groups_run} groups reaches the access in no wave, their runs ending {}, and the dispatch's {runs} waves are more than are run whole (D951)",
+                    ends.join(", ")
+                )
+                .into());
+            }
+            run(dispatch_waves(inputs, groups, width))
+        }
+        None => run(dispatch_waves(inputs, groups, width)),
     }
-    Ok(reached)
+}
+
+/// The most steps one preparation's host replay of a computed access runs, across every wave it
+/// runs (D951). A step of the host interpreter, its wave's setup shared out, cost about half a
+/// microsecond in a release build (measured: 256 waves of a 22-step program in 3 ms), so this
+/// holds a preparation to about two seconds - room for the full runs Grand Theft Auto V's tree
+/// walks took before D951, 0.5 to 1.2 s; one that would run longer is refused, never left to
+/// hold the run.
+pub(crate) const MOST_PREPARATION_STEPS: usize = 1 << 22;
+
+/// The most steps one preparation's native runs of a dispatch's global loads take, across every
+/// wave (D951): four waves' worth of [`MOST_NATIVE_STEPS`], the native run being compiled and far
+/// quicker a step than the model.
+///
+/// [`MOST_NATIVE_STEPS`]: orbistoun_translate::evaluate::MOST_NATIVE_STEPS
+const MOST_NATIVE_PREPARATION_STEPS: usize = 4 * orbistoun_translate::evaluate::MOST_NATIVE_STEPS;
+
+/// A wave's refusal, worded where it ran out of steps (D951): its own bound, or the preparation's
+/// `allowed`, before reaching the access at byte `at`; after `ran` of the `waves` to run.
+fn replay_bound(
+    why: orbistoun_translate::evaluate::LaneRefusal,
+    (at, allowed): (u32, usize),
+    (ran, waves): (usize, usize),
+) -> Refusal {
+    use orbistoun_translate::evaluate::{
+        LOOPS_PAST_THE_BOUND, MOST_WAVE_STEPS, PAST_THE_PREPARATION_STEPS,
+    };
+    if why == LOOPS_PAST_THE_BOUND {
+        format!(
+            "the host replay ran past a wave's step bound (at most {MOST_WAVE_STEPS} steps) before reaching the access at {at:#x}, in wave {} of {waves} (D951)",
+            ran + 1
+        )
+        .into()
+    } else if why == PAST_THE_PREPARATION_STEPS {
+        format!(
+            "the host replay ran past {allowed} steps, the preparation's bound, before reaching the access at {at:#x} in every wave: {ran} of {waves} waves ran (D951)"
+        )
+        .into()
+    } else {
+        why
+    }
+}
+
+/// Whether what a lattice of a dispatch's groups reached a computed access with binds nothing
+/// (D951): no descriptor, or only ones whose range is empty - a null descriptor - which cannot say
+/// where the buffer the other groups reach lies.
+fn reaches_nothing(computed: &Computed, reached: &ReachedDescriptors) -> bool {
+    reached.descriptors.iter().all(|&(values, soffset)| {
+        computed_range(computed.through, (values, Some(soffset)), None)
+            .is_ok_and(|(_, bytes)| bytes == 0)
+    })
 }
 
 /// The most groups whose scalar prefix [`dispatch_group_descriptors`] replays.
@@ -1239,6 +1538,77 @@ pub(crate) struct ReachedDescriptors {
     pub descriptors: std::collections::BTreeSet<([u32; 4], u32)>,
     /// Waves by the byte of the last instruction their run ran.
     pub ends: BTreeMap<u32, u32>,
+    /// How many groups were run, where they were a lattice of the dispatch's rather than all of
+    /// them (D951): an unsampled group can then reach the access with another descriptor.
+    pub sampled: Option<u64>,
+}
+
+/// The most waves a dispatch's computed access is run through on the host in one preparation
+/// before a lattice of its groups is run instead (D951). A wave of a waterfall program runs its
+/// loop once a distinct value across its lanes, up to 64 passes of the whole loop on the host
+/// interpreter: some tenths of a millisecond a wave, so 256 keeps a preparation's run within about
+/// 100 ms. At the 4096 the global loads' short prefixes run (D950), Grand Theft Auto V's in-world
+/// frame ground on one such program for minutes.
+pub(crate) const MOST_COMPUTED_WAVES: u64 = 256;
+
+/// The range a computed access binds from what a lattice of a dispatch's groups reach it with
+/// (D951): every reached descriptor's range, from the lowest base to the highest end, widened by
+/// a margin as a sampled dispatch's global loads are (D950). The bound buffer starts at a base of
+/// its own, the access reads it relative to that from the descriptor it computes, and one the
+/// buffer does not hold is an escape.
+///
+/// # Errors
+///
+/// A scalar load's base pair, which is not read relative to a base of its own; a range larger
+/// than a draw buffer binds; or one that crosses a four-gigabyte span, whose low halves the
+/// module's addresses cannot order.
+pub(crate) fn sampled_reached_range(
+    computed: &Computed,
+    reached: &ReachedDescriptors,
+    memory: &impl GuestMemory,
+) -> Result<GlobalRange, Refusal> {
+    if matches!(computed.through, ComputedAccess::Pointer { .. }) {
+        return Err(
+            "a scalar load's base pair, which a sample of the dispatch's groups does not place (D951)"
+                .into(),
+        );
+    }
+    let mut span: Option<(u64, u64)> = None;
+    for &(values, soffset) in &reached.descriptors {
+        let (base, bytes) = computed_range(computed.through, (values, Some(soffset)), None)?;
+        let end = base.saturating_add(bytes);
+        span = Some(span.map_or((base, end), |(low, high)| (low.min(base), high.max(end))));
+    }
+    let read = span.map_or((0, 0), |(low, high)| (low, high - low));
+    // Nothing reached places nothing, and an empty range would make every access an escape.
+    if read.1 == 0 {
+        return Err(
+            "a sample of its groups reaches it with no descriptor that binds a byte (D951)".into(),
+        );
+    }
+    let read = checked_range(read).map_err(|why| -> Refusal {
+        format!(
+            "what a sample of its groups reaches, {:#x}+{:#x}: {why}",
+            read.0, read.1
+        )
+        .into()
+    })?;
+    let within = |(address, bytes): (u64, u64)| {
+        bytes <= MOST_BYTES && (bytes == 0 || address >> 32 == (address + bytes - 1) >> 32)
+    };
+    if !within(read) {
+        return Err(format!(
+            "what a sample of its groups reaches, {:#x}+{:#x}, crosses a four-gigabyte span (D951)",
+            read.0, read.1
+        )
+        .into());
+    }
+    let widened = with_margin(read, memory);
+    Ok(GlobalRange {
+        range: if within(widened) { widened } else { read },
+        read,
+        sampled: reached.sampled,
+    })
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
@@ -1784,6 +2154,30 @@ mod cache_tests {
         assert!(cache.bytes <= CACHE_BYTES);
     }
 
+    /// Constant buffers rewritten every frame, far within the bytes, leave the order no longer
+    /// than a bound over the ranges kept, however many frames go by; and the oldest still goes
+    /// first once the bytes are passed.
+    #[test]
+    fn ranges_kept_again_every_frame_leave_a_bounded_order() {
+        let mut cache = BufferCache::default();
+        for _frame in 0..200 {
+            for range in 0..50u64 {
+                cache.keep((range * 0x1000, 256), None, buffer(256));
+            }
+        }
+        assert_eq!(cache.entries.len(), 50);
+        assert!(
+            cache.order.len() <= 2 * 50 + super::STALE_PLACES + 1,
+            "{} places for 50 ranges",
+            cache.order.len()
+        );
+        let big = CACHE_BYTES - 49 * 256;
+        cache.keep((0x100_0000, big), None, buffer(big));
+        assert!(!cache.entries.contains_key(&(0, 256)), "the oldest went");
+        assert!(cache.entries.contains_key(&(49 * 0x1000, 256)));
+        assert!(cache.bytes <= CACHE_BYTES);
+    }
+
     /// A small range is compared, not watched: read again unchanged it is the very buffer kept,
     /// and changed it is a new one, with its own hash.
     #[test]
@@ -1815,6 +2209,34 @@ mod cache_tests {
 mod tests {
     use super::descriptor_extent;
     use orbistoun_translate::draw_buffers::DescriptorReads;
+
+    /// A sampled replay probes the first wave of each of the first groups, the same entries the
+    /// whole grid thinned out gives, without making the grid's waves.
+    #[test]
+    fn a_sample_is_the_first_wave_of_the_first_groups() {
+        let inputs = orbistoun_translate::wavefront::ComputeInputs {
+            workgroup_ids: [true, true, false],
+            thread_id_components: 2,
+            threads: [104, 1, 1],
+            ..orbistoun_translate::wavefront::ComputeInputs::default()
+        };
+        let groups = [5, 3, 1];
+        let waves = usize::try_from(inputs.waves(64)).expect("a few waves");
+        let thinned: Vec<_> = super::dispatch_waves(inputs, groups, 64)
+            .into_iter()
+            .step_by(waves)
+            .take(7)
+            .collect();
+        assert_eq!(
+            super::first_waves_of_first_groups(inputs, groups, 64, 7),
+            thinned
+        );
+        assert_eq!(
+            super::first_waves_of_first_groups(inputs, groups, 64, 100).len(),
+            15,
+            "no more than the grid holds"
+        );
+    }
 
     /// A chunk of a fan reads its triangles as a list (D898): from its first triangle on, each the
     /// fan's first index and the two after the triangle's own, rotated for the provoking
@@ -2047,7 +2469,7 @@ mod tests {
     /// A dispatch's global loads bind the span every wave of every group forms (D883): each lane's
     /// address is `s[0:1]` plus four times its thread id plus its group's id (`s2`), and the byte
     /// loads' span ends at the word their last byte is in. A dispatch of more waves than one
-    /// preparation runs is refused by name.
+    /// preparation runs binds what a sample of its groups reads (D950).
     #[test]
     fn a_dispatchs_global_loads_bind_what_every_wave_reads() {
         use orbistoun_shader::EncodingTable;
@@ -2089,7 +2511,14 @@ mod tests {
         let range =
             super::dispatch_global_range(&global, (&[0x1000, 7], inputs, [2, 1, 1], 64), &memory);
         // Group 1's thread 103 reads the last byte, 0x19d past the base.
-        assert_eq!(range, Ok((0x7_0000_1000, 0x1a0)));
+        assert_eq!(
+            range,
+            Ok(super::GlobalRange {
+                range: (0x7_0000_1000, 0x1a0),
+                read: (0x7_0000_1000, 0x1a0),
+                sampled: None,
+            })
+        );
         // A refusal says what the run seeded each wave with, so a register past it reads as one the
         // dispatch's entry does not fill: here an address from `s5`, past the user data and the id.
         let past = GlobalLoads {
@@ -2118,17 +2547,102 @@ mod tests {
             ..inputs
         };
         assert_eq!(
-            super::dispatch_global_range(&global, (&[0x1000, 7], later, [2, 1, 1], 64), &memory),
+            super::dispatch_global_range(&global, (&[0x1000, 7], later, [2, 1, 1], 64), &memory)
+                .map(|found| found.range),
             Ok((0x7_0000_1000 + 4000, 0x1a0))
         );
+        // More waves than a preparation runs: a sample of the groups, the last among them (D950).
+        let sampled = super::dispatch_global_range(
+            &global,
+            (&[0x1000, 7], inputs, [5000, 1, 1], 64),
+            &memory,
+        )
+        .expect("sampled");
+        // Group 4999's thread 103 reads the last byte, 0x1523 past the base.
+        assert_eq!(sampled.read, (0x7_0000_1000, 0x1524));
+        assert!(sampled.sampled.is_some_and(|groups| groups < 5000));
+    }
+
+    /// A dispatch of far more waves than a preparation runs, whose global loads index a table by
+    /// group (D950): 240 x 135 groups of 64 threads, a 1920x1080 pass, each lane reading the word
+    /// at `s[0:1]` plus sixteen times its group's x id plus 3840 times its y id plus four times
+    /// its thread id. A sample of the groups runs, the corners among them, and what it reads is every
+    /// group's reads exactly: from group (0, 0)'s thread 0 to group (239, 134)'s thread 63. Mapped
+    /// memory about it gives the range its margin; unmapped memory gives none.
+    #[test]
+    fn a_dispatch_too_large_to_replay_binds_every_groups_reads_from_a_sample() {
+        use orbistoun_shader::EncodingTable;
+        use orbistoun_translate::draw_buffers::GlobalLoads;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+        };
+        // v1 = s0 + 4 * tid + 16 * s2 + 3840 * s3, v2 = s1; global_load_dword v3, v[1:2], off.
+        // 3840 is a row of 240 groups' sixteen bytes; the literal follows the multiply.
+        let literal = 255;
+        let global = GlobalLoads {
+            prefix: vec![
+                short_form("v_lshlrev_b32_e32", 1, 130, 0),
+                short_form("v_add_nc_u32_e32", 1, 0, 1),
+                short_form("v_mov_b32_e32", 4, 2, 0),
+                short_form("v_lshlrev_b32_e32", 4, 132, 4),
+                short_form("v_add_nc_u32_e32", 1, 260, 1),
+                short_form("v_mov_b32_e32", 5, 3, 0),
+                short_form("v_mul_u32_u24_e32", 5, literal, 5),
+                3840,
+                short_form("v_add_nc_u32_e32", 1, 261, 1),
+                short_form("v_mov_b32_e32", 2, 1, 0),
+                // global_load_dword v3, v[1:2], off.
+                0xdc30_0000,
+                0x037d_0001,
+            ],
+            loads: vec![(40, 4)],
+            first_register: 0,
+            user_data: 2,
+            width: 64,
+        };
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, true, false],
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let base = 0x7_0010_0000_u64;
+        let user_data = [base as u32, (base >> 32) as u32];
+        let last = 4 * 63 + 16 * 239 + 3840 * 134;
+        let read = (base, last + 4);
+        let unmapped = super::dispatch_global_range(
+            &global,
+            (&user_data, inputs, [240, 135, 1], 64),
+            &At(0, Vec::new()),
+        )
+        .expect("sampled");
+        assert_eq!(unmapped.read, read, "every group's reads");
+        assert_eq!(unmapped.range, read, "no margin where memory is not mapped");
+        // A wave a group: no more groups than a preparation runs waves.
         assert!(
-            super::dispatch_global_range(
-                &global,
-                (&[0x1000, 7], inputs, [5000, 1, 1], 64),
-                &memory
-            )
-            .is_err()
+            unmapped
+                .sampled
+                .is_some_and(|groups| groups <= super::MOST_DISPATCH_WAVES),
+            "{:?}",
+            unmapped.sampled
         );
+        // Mapped a megabyte about it, the range takes an eighth of its bytes each side, in pages.
+        let around = 1 << 20;
+        let mapped = At(base - around, vec![0; (read.1 + 2 * around) as usize]);
+        let found =
+            super::dispatch_global_range(&global, (&user_data, inputs, [240, 135, 1], 64), &mapped)
+                .expect("sampled");
+        let margin = (read.1 / 8).next_multiple_of(0x1000);
+        assert_eq!(found.read, read);
+        assert_eq!(found.range, (base - margin, read.1 + 2 * margin));
     }
 
     /// A dispatch whose global load loops longer than the model follows binds what every pass
@@ -2190,7 +2704,28 @@ mod tests {
             (&[0x7_0000, 400], inputs, [1, 1, 1], 64),
             &At(0, Vec::new()),
         );
-        assert_eq!(range, Ok((0x7_0000, 400)));
+        assert_eq!(range.map(|found| found.range), Ok((0x7_0000, 400)));
+        // The preparation's steps bound the waves together, the model's and the native run's
+        // each (D951): too few of either, and the loads are refused by name, not followed on.
+        let within = |budgets: (usize, usize), groups: u32| {
+            super::global_range_within(
+                &global,
+                (&[0x7_0000, 400], inputs, [groups, 1, 1], 64),
+                budgets,
+                &At(0, Vec::new()),
+            )
+        };
+        let native = within((super::MOST_PREPARATION_STEPS, 2000), 8).expect_err("native");
+        assert!(
+            native.contains("the native replay ran past 2000 steps")
+                && native.contains("of 8 waves"),
+            "{native}"
+        );
+        let model = within((20, super::MOST_NATIVE_PREPARATION_STEPS), 8).expect_err("model");
+        assert!(
+            model.contains("the host replay ran past 20 steps") && model.contains("0 of 8 waves"),
+            "{model}"
+        );
     }
 
     /// Guest memory at one address.
@@ -2491,6 +3026,371 @@ mod tests {
             .descriptors
             .insert(([0x3000, 16 << 16, 4, STRUCTURED], 0));
         assert!(super::reached_range(&computed, &reached).is_err());
+    }
+
+    /// A computed descriptor over a grid of far more waves than are run whole is found from a
+    /// lattice of its groups, every wave of each (D951): in bounded time, and with the corners in
+    /// the lattice, a descriptor whose base is an affine function of the group's ids spans every
+    /// group's buffer. Here 64 x 64 groups each read the descriptor at `s0` plus sixteen times
+    /// `x + 64 y`, each naming a 256-byte buffer of its own.
+    #[test]
+    fn a_computed_descriptor_too_large_to_run_whole_binds_every_group_from_a_sample() {
+        use orbistoun_translate::draw_buffers::{Computed, ComputedAccess};
+        use orbistoun_translate::wavefront::ComputeInputs;
+        // The user data in s[0:1], the group's x and y ids in s2 and s3 (D883):
+        // s_lshl_b32 s3, s3, 6; s_add_u32 s2, s2, s3; s_lshl_b32 s2, s2, 4; s_add_u32 s0, s0, s2;
+        // s_load_dwordx4 s[4:7], s[0:1], 0x0; s_waitcnt lgkmcnt(0);
+        // buffer_load_dword v1, v0, s[4:7], 0 offen; s_waitcnt vmcnt(0); s_endpgm.
+        let program = [
+            0x8f03_8603_u32,
+            0x8002_0302,
+            0x8f02_8402,
+            0x8000_0200,
+            0xf408_0100,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xe030_1000,
+            0x8001_0100,
+            0xbf8c_3f70,
+            0xbf81_0000,
+        ];
+        let computed = Computed {
+            prefix: program[..7].to_vec(),
+            at: 28,
+            through: ComputedAccess::Descriptor {
+                first: 4,
+                reads: vector(None, false),
+            },
+            soffset: 128,
+            first_register: 0,
+            user_data: 2,
+            program_address: None,
+        };
+        let (code, table, buffers) = (0x100_usize, 0x1_0000_usize, 0x10_0000_u32);
+        let mut bytes = vec![0_u8; 0x30_0000];
+        for (at, word) in program.iter().enumerate() {
+            bytes[code + 4 * at..code + 4 * at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        for group in 0..64 * 64_u32 {
+            let words = [buffers + group * 0x100, 0, 0x100, RAW];
+            for (at, word) in words.iter().enumerate() {
+                let place = table + 16 * group as usize + 4 * at;
+                bytes[place..place + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        let memory = At(0, bytes);
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, true, false],
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let started = std::time::Instant::now();
+        let reached = super::dispatch_computed_descriptors(
+            (&computed, code as u64, None),
+            (&[table as u32, 0], inputs, [64, 64, 1], 64),
+            &memory,
+        )
+        .expect("run over a sample");
+        let took = started.elapsed();
+        let groups = reached.sampled.expect("a sample, not every wave");
+        assert!(
+            groups <= super::MOST_COMPUTED_WAVES,
+            "{groups} groups, a wave each"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{took:?} for the sample"
+        );
+        let found = super::sampled_reached_range(&computed, &reached, &memory).expect("bound");
+        let read = (u64::from(buffers), 64 * 64 * 0x100);
+        assert_eq!(
+            found.read, read,
+            "from group (0, 0)'s buffer to group (63, 63)'s end"
+        );
+        let margin = read.1 / 8;
+        assert_eq!(found.range, (read.0 - margin, read.1 + 2 * margin));
+        assert_eq!(found.sampled, Some(groups));
+        // A scalar load's base pair is not placed so.
+        let pointer = Computed {
+            through: ComputedAccess::Pointer { base: 0, end: 16 },
+            ..computed
+        };
+        assert!(super::sampled_reached_range(&pointer, &reached, &memory).is_err());
+    }
+
+    /// A dispatch's descriptor whose base is built in `vcc_lo` and `vcc_hi` as scalars - loaded,
+    /// shifted, folded with `s_lshl4_add_u32` and `s_addk_i32`, added to a user-data word - is
+    /// found by the group replay (D914), with no wave run at all: the shape of Grand Theft Auto V's
+    /// dispatch at `0x400003e1f500`, which lost `vcc_hi` at its `s_addk_i32` and fell back to
+    /// running every wave.
+    #[test]
+    fn a_group_s_descriptor_built_in_vcc_halves_is_found() {
+        use orbistoun_translate::draw_buffers::{Computed, ComputedAccess};
+        use orbistoun_translate::wavefront::ComputeInputs;
+        // s_load_dword vcc_lo, s[4:5], 0x9c; s_waitcnt; s_lshl_b32 vcc_hi, vcc_lo, 5;
+        // s_load_dword vcc_lo, s[4:5], 0x80; s_waitcnt; s_lshl4_add_u32 vcc_hi, vcc_lo, vcc_hi;
+        // s_addk_i32 vcc_hi, 0x80; s_add_u32 s8, s3, vcc_hi; s_addc_u32 s9, s0, 0;
+        // s_mov_b32 s10, 0x100; s_mov_b32 s11, RAW - the descriptor in s[8:11], read at 60.
+        let computed = Computed {
+            prefix: vec![
+                0xf400_1a82,
+                0xfa00_009c,
+                0xbf8c_c07f,
+                0x8f6b_856a,
+                0xf400_1a82,
+                0xfa00_0080,
+                0xbf8c_c07f,
+                0x98eb_6b6a,
+                0xb7eb_0080,
+                0x8008_6b03,
+                0x8209_8000,
+                0xbe8a_03ff,
+                0x100,
+                0xbe8b_03ff,
+                RAW,
+            ],
+            at: 60,
+            through: ComputedAccess::Descriptor {
+                first: 8,
+                reads: vector(None, false),
+            },
+            soffset: 128,
+            first_register: 0,
+            user_data: 7,
+            program_address: None,
+        };
+        let mut table = vec![0_u8; 0x100];
+        table[0x80..0x84].copy_from_slice(&0x10_u32.to_le_bytes());
+        table[0x9c..0xa0].copy_from_slice(&2_u32.to_le_bytes());
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, false, false],
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let reached = super::dispatch_group_descriptors(
+            &computed,
+            (&[0, 0, 1, 0x20, 0x8000, 0, 0], inputs, [300, 1, 1]),
+            &At(0x8000, table),
+        )
+        .expect("found group by group");
+        // The base: 0x20 + (0x10 << 4) + (2 << 5) + 0x80.
+        assert_eq!(
+            reached.descriptors.into_iter().collect::<Vec<_>>(),
+            [([0x1e0, 0, 0x100, RAW], 0)]
+        );
+    }
+
+    /// A preparation's host replay is bounded in steps across all its waves, not only in each
+    /// (D951): waves that each loop a hundred times before the access finish within their own
+    /// bound, and together run past a preparation's, which refuses the access by name rather than
+    /// hold the run. A wave that loops without end is refused at its own bound.
+    #[test]
+    fn a_preparation_s_replay_stops_at_its_step_bound() {
+        use orbistoun_translate::draw_buffers::{Computed, ComputedAccess};
+        use orbistoun_translate::wavefront::ComputeInputs;
+        // s_movk_i32 s9, 100; loop: s_sub_u32 s9, s9, 1; s_cmp_lg_u32 s9, 0;
+        // s_cbranch_scc1 loop; buffer_load_dword v3, v0, s[4:7], 0 offen - the access, at 16;
+        // s_waitcnt vmcnt(0); s_endpgm.
+        let counted = [
+            0xb009_0064_u32,
+            0x8089_8109,
+            0xbf07_8009,
+            0xbf85_fffd,
+            0xe030_1000,
+            0x8001_0300,
+            0xbf8c_3f70,
+            0xbf81_0000,
+        ];
+        // loop: s_branch loop; then the same access, at 4.
+        let endless = [0xbf82_ffff_u32, 0xe030_1000, 0x8001_0300, 0xbf81_0000];
+        let computed = |program: &[u32], at: u32| Computed {
+            prefix: program[..usize::try_from(at / 4).expect("small")].to_vec(),
+            at,
+            through: ComputedAccess::Descriptor {
+                first: 4,
+                reads: vector(None, false),
+            },
+            soffset: 128,
+            first_register: 0,
+            user_data: 8,
+            program_address: None,
+        };
+        let memory = |program: &[u32]| {
+            let mut bytes = vec![0_u8; 0x2_0000];
+            for (at, word) in program.iter().enumerate() {
+                bytes[0x100 + 4 * at..0x104 + 4 * at].copy_from_slice(&word.to_le_bytes());
+            }
+            At(0, bytes)
+        };
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, false, false],
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let user_data = [0, 0, 0, 0, 0x1_0000, 0, 0x100, RAW];
+        let run = |program: &[u32], at: u32, steps: usize| {
+            super::computed_descriptors_within(
+                (&computed(program, at), 0x100, None),
+                (&user_data, inputs, [200, 1, 1], 64),
+                steps,
+                &memory(program),
+            )
+        };
+        // Some 300 steps a wave: 200 waves fit a preparation's steps, and not 10,000.
+        let reached = run(&counted, 16, super::MOST_PREPARATION_STEPS).expect("within the bound");
+        assert_eq!(reached.descriptors.len(), 1);
+        let refused = run(&counted, 16, 10_000).expect_err("past the preparation's steps");
+        assert!(
+            refused.contains("ran past 10000 steps, the preparation's bound")
+                && refused.contains("access at 0x10"),
+            "{refused}"
+        );
+        let refused = run(&endless, 4, super::MOST_PREPARATION_STEPS).expect_err("endless");
+        assert!(
+            refused.contains("a wave's step bound") && refused.contains("in wave 1 of"),
+            "{refused}"
+        );
+    }
+
+    /// A program shaped as Grand Theft Auto V's tree walks are (D951), and its computed access:
+    /// each thread loads its entry's kind, and only kind 7 loads a descriptor from a table and
+    /// reads through it. The user data holds the kinds' descriptor in `s[0:3]` and the table's in
+    /// `s[4:7]`, the group's id follows in `s8`. `v1 = 4 * (64 * s8 + tid)`;
+    /// `buffer_load_dword v2, v1, s[0:3], 0 offen`; `v_cmpx_eq_u32 7, v2`; `s_cbranch_execz` to the
+    /// end; `s_buffer_load_dwordx4 s[12:15], s[4:7], 0x0`; `buffer_load_dword v3, v0, s[12:15], 0
+    /// offen` - the access, at 48.
+    fn kind_walk() -> (Vec<u32>, orbistoun_translate::draw_buffers::Computed) {
+        use orbistoun_translate::draw_buffers::{Computed, ComputedAccess};
+        let encodings = orbistoun_shader::EncodingTable::builtin().expect("encodings");
+        let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+        };
+        let program = vec![
+            short_form("v_mov_b32_e32", 1, 8, 0),
+            short_form("v_lshlrev_b32_e32", 1, 134, 1),
+            short_form("v_add_nc_u32_e32", 1, 256, 1),
+            short_form("v_lshlrev_b32_e32", 1, 130, 1),
+            0xe030_1000,
+            0x8000_0201,
+            0xbf8c_3f70,
+            short_form("v_cmpx_eq_u32_e32", 0, 135, 2),
+            0xbf88_0006,
+            0xf428_0302,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xe030_1000,
+            0x8003_0300,
+            0xbf8c_3f70,
+            0xbf81_0000,
+        ];
+        let computed = Computed {
+            prefix: program[..12].to_vec(),
+            at: 48,
+            through: ComputedAccess::Descriptor {
+                first: 12,
+                reads: vector(None, false),
+            },
+            soffset: 128,
+            first_register: 0,
+            user_data: 8,
+            program_address: None,
+        };
+        (program, computed)
+    }
+
+    /// An access only some threads take - Grand Theft Auto V's tree walks at `0x400003ce6000` and
+    /// `0x74005b87e400` enter their waterfall only for an entry of one kind - can lie wholly
+    /// between the groups a lattice samples (D951). A lattice that reaches nothing never binds an
+    /// empty range: every wave is run, as without a sample, where the dispatch has no more than
+    /// a preparation runs whole, and the access is refused past that. Here one thread of one group
+    /// off the lattice holds the kind that reaches the access ([`kind_walk`]).
+    #[test]
+    fn a_sample_that_reaches_nothing_runs_every_wave_or_refuses() {
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let (program, computed) = kind_walk();
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, false, false],
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let (code, table, kinds, target) = (0x100_usize, 0x8000_usize, 0x1_0000_usize, 0x40_0000);
+        let prepared = |groups: u32, kind_at: Option<u32>| {
+            let mut bytes = vec![0_u8; 0x50_0000];
+            for (at, word) in program.iter().enumerate() {
+                bytes[code + 4 * at..code + 4 * at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            for (at, word) in [target, 0, 0x100, RAW].iter().enumerate() {
+                bytes[table + 4 * at..table + 4 * at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            if let Some(group) = kind_at {
+                // Thread 5 of that group.
+                let place = kinds + 4 * (64 * group as usize + 5);
+                bytes[place..place + 4].copy_from_slice(&7_u32.to_le_bytes());
+            }
+            let user_data = [kinds as u32, 0, groups * 256, RAW, table as u32, 0, 16, RAW];
+            (At(0, bytes), user_data)
+        };
+        let off_lattice = |groups: u32| {
+            let sampled = super::sampled_groups([groups, 1, 1], 1, super::MOST_COMPUTED_WAVES);
+            (0..groups)
+                .find(|&group| !sampled.contains(&[group, 0, 0]))
+                .expect("a group off the lattice")
+        };
+        // 452 groups of a wave each, as `0x400003ce6000`'s dispatch: the lattice misses the one
+        // group, and every wave is run instead.
+        let hidden = off_lattice(452);
+        let (memory, user_data) = prepared(452, Some(hidden));
+        let reached = super::dispatch_computed_descriptors(
+            (&computed, code as u64, None),
+            (&user_data, inputs, [452, 1, 1], 64),
+            &memory,
+        )
+        .expect("every wave run");
+        assert_eq!(reached.sampled, None, "the whole dispatch, not the lattice");
+        assert_eq!(
+            reached.descriptors.into_iter().collect::<Vec<_>>(),
+            [([target, 0, 0x100, RAW], 0)],
+            "the hidden group's descriptor"
+        );
+        // No thread of any group takes it: every wave run says so exactly, and nothing is read.
+        let (memory, user_data) = prepared(452, None);
+        let none = super::dispatch_computed_descriptors(
+            (&computed, code as u64, None),
+            (&user_data, inputs, [452, 1, 1], 64),
+            &memory,
+        )
+        .expect("every wave run");
+        assert_eq!(none.sampled, None);
+        assert_eq!(super::reached_range(&computed, &none), Ok((0, 0)));
+        // Past the waves a preparation runs whole, a lattice that reaches nothing is refused.
+        let groups = u32::try_from(super::MOST_DISPATCH_WAVES).expect("small") + 500;
+        let (memory, user_data) = prepared(groups, Some(off_lattice(groups)));
+        let refused = super::dispatch_computed_descriptors(
+            (&computed, code as u64, None),
+            (&user_data, inputs, [groups, 1, 1], 64),
+            &memory,
+        )
+        .expect_err("refused, not bound empty");
+        assert!(
+            refused.contains("reaches the access in no wave"),
+            "{refused}"
+        );
+        // And an empty reach is never bound from a sample.
+        let empty = super::ReachedDescriptors {
+            sampled: Some(256),
+            ..super::ReachedDescriptors::default()
+        };
+        assert!(super::sampled_reached_range(&computed, &empty, &memory).is_err());
     }
 
     /// Past the most answers kept, the oldest goes and every other stays, rather than all of

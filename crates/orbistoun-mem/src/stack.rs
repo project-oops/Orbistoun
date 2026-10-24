@@ -69,6 +69,9 @@ impl GuestStack {
                 execute: false,
             },
         )?;
+        // Committed now: the fault that would commit a stack page on touch is delivered on the
+        // stack itself ([`crate::lazy`]).
+        crate::lazy::commit(base, total);
 
         Ok(Self {
             space,

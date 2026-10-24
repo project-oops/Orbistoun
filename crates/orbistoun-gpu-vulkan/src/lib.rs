@@ -8,20 +8,45 @@
 //! refused with [`orbistoun_gpu::BackendError::Unsupported`] rather than dropped. The device opens
 //! lazily, through the session [`compute`] and [`framebuffer`] share.
 
+mod atomics;
+pub mod capture;
+mod compile_watch;
 pub mod compute;
 mod compute_buffers;
 pub use compute_buffers::{BufferIn, BufferOut};
 pub mod compute_images;
 mod depth;
+mod device_lost;
+pub mod device_memory;
+pub use device_lost::{device_lost, note_dispatch, on_device_lost};
+
+/// The host memory the device's buffers held for reuse or upload take, by what holds it: spare
+/// dispatch buffers and the kept textures' staging. What a [`VulkanBackend`] holds itself is its
+/// [`VulkanBackend::host_held`].
+pub fn spares_held() -> [(&'static str, u64); 2] {
+    [
+        (
+            "dispatch spares",
+            compute::spare_host_bytes() + compute_buffers::spare_host_bytes(),
+        ),
+        ("texture staging", framebuffer::kept_staging_bytes()),
+    ]
+}
 mod draw_buffers;
 pub mod framebuffer;
 pub mod guest_formats;
 mod half;
+mod observed;
 pub mod pipeline_cache;
+mod recent;
+pub mod replay;
+pub mod shader_census;
+mod watch;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest,
     dispatch_guest_hashed, dispatch_guest_with_buffers, probe,
 };
+pub use replay::replay_dispatch;
 
 use std::collections::BTreeMap;
 
@@ -56,6 +81,15 @@ const RENDER_HEIGHT: u32 = 64;
 /// few for PPSA04263: 6,251 of its 6,459 snapshots in 30 s made a buffer afresh, 0.83 ms each, 17%
 /// of its run.
 const SPARE_SNAPSHOTS: usize = 16;
+/// The most bytes the spare snapshot buffers hold together: a spare is host-visible device memory,
+/// and sixteen of a 4K frame's at eight bytes a texel were a gibibyte. Room for several of the
+/// common frames, which are taken again before they age out.
+const SPARE_SNAPSHOT_BYTES: u64 = 256 << 20;
+/// The most bytes the resident colour targets hold before idle ones are let go of: a target exists
+/// once on the console, in guest memory, and one let go of is made again from there.
+const TARGET_BYTES_KEPT: u64 = 1 << 30;
+/// How many frames a resident colour target goes undrawn and unseeded before it is idle.
+const TARGET_IDLE_FRAMES: u64 = 8;
 /// The colour a `Draw` clears its attachment to before drawing - opaque black.
 const CLEAR_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -118,6 +152,7 @@ fn upload_host_buffer(
 ) -> Result<compute::DispatchBuffer, BackendError> {
     let words = bytes.len().div_ceil(4).max(1);
     let size = (words * 4) as vk::DeviceSize;
+    let _for = device_memory::purpose("resident buffers");
     let (buffer, memory) = compute::create_host_buffer(
         &session.instance,
         session.physical,
@@ -317,9 +352,22 @@ pub struct VulkanBackend {
     /// The targets whose resident attachment holds draws [`Self::contents`] does not have yet - read
     /// back when their pixels are asked for.
     unread: std::collections::BTreeSet<Option<ResourceId>>,
-    /// What each target holds after the draws on it so far, by the target a `SetRenderTargets`
-    /// selected (`None` is the interim square). The next draw on a target starts from this rather
-    /// than a clear, so a frame's draws accumulate.
+    /// The targets whose resident attachment holds draws kept nowhere else: neither read back nor
+    /// kept whole in a snapshot since. Their frame may reach guest memory only from the device, so
+    /// one is never let go of for being idle.
+    uncaptured: std::collections::BTreeSet<Option<ResourceId>>,
+    /// The frame each target was last drawn, seeded or made resident in.
+    last_used: BTreeMap<Option<ResourceId>, u64>,
+    /// The frame the backend is in: the guest's flips, as [`Self::set_frame`] last gave them.
+    frame: u64,
+    /// The bytes the resident targets may hold before idle ones are let go of, and the frames a
+    /// target goes unused before it is idle ([`Self::evict_idle_targets`]).
+    target_budget: (u64, u64),
+    /// What a target holds after the draws on it so far, by the target a `SetRenderTargets` selected
+    /// (`None` is the interim square), where the device does not hold it: a target drawn on the
+    /// host's path, or handed back from the device. The next draw on a target starts from this
+    /// rather than a clear, so a frame's draws accumulate. Of the targets resident on the device,
+    /// only the one read back last keeps a copy here, for its reader (D714).
     contents: BTreeMap<Option<ResourceId>, framebuffer::Pixels>,
     /// Frames kept as they stood when [`Self::snapshot_last_frame`] took them, by the id it
     /// answered.
@@ -452,6 +500,10 @@ impl VulkanBackend {
             last_drawn: None,
             resident: BTreeMap::new(),
             unread: std::collections::BTreeSet::new(),
+            uncaptured: std::collections::BTreeSet::new(),
+            last_used: BTreeMap::new(),
+            frame: 0,
+            target_budget: (TARGET_BYTES_KEPT, TARGET_IDLE_FRAMES),
             contents: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             next_snapshot: 0,
@@ -509,6 +561,126 @@ impl VulkanBackend {
         self.buffers.len()
     }
 
+    /// The host memory this backend holds beside the device's, by what it holds: frame snapshots
+    /// kept and spare, targets' contents held on the host, the words of the shaders made resident,
+    /// and depth targets' depths and stencil read back.
+    pub fn host_held(&self) -> [(&'static str, u64); 4] {
+        let shaders = self
+            .shaders
+            .values()
+            .map(|shader| shader.spirv.len() as u64 * 4)
+            .sum();
+        let depths = self
+            .depth_reads
+            .values()
+            .chain(self.stencil_reads.values())
+            .map(|(words, _)| words.len() as u64 * 4)
+            .sum();
+        let [snapshots, contents] = self.host_copies();
+        [
+            snapshots,
+            contents,
+            ("resident shader words", shaders),
+            ("depth read-backs", depths),
+        ]
+    }
+
+    fn host_copies(&self) -> [(&'static str, u64); 2] {
+        let snapshots = self
+            .snapshots
+            .values()
+            .chain(&self.spare_snapshots)
+            .map(framebuffer::FrameSnapshot::capacity)
+            .sum();
+        let contents = self
+            .contents
+            .values()
+            .map(|pixels| pixels.bytes.len() as u64)
+            .sum();
+        [
+            ("frame snapshots", snapshots),
+            ("targets held on the host", contents),
+        ]
+    }
+
+    /// The device memory the resident colour targets hold.
+    pub fn resident_target_bytes(&self) -> u64 {
+        self.resident
+            .values()
+            .map(framebuffer::ResidentAttachment::device_bytes)
+            .sum()
+    }
+
+    /// Sets the frame the backend is in, counted by the guest's flips: what a target's use is
+    /// stamped with and its idleness measured from.
+    pub const fn set_frame(&mut self, frame: u64) {
+        self.frame = frame;
+    }
+
+    /// Sets the bytes the resident targets may hold before idle ones are let go of, and the frames
+    /// a target goes undrawn and unseeded before it is idle. A gibibyte and eight frames unless
+    /// set.
+    pub const fn set_target_budget(&mut self, bytes: u64, idle_frames: u64) {
+        self.target_budget = (bytes, idle_frames);
+    }
+
+    /// Whether the resident targets hold more than their budget, so
+    /// [`Self::evict_idle_targets`] has something to do.
+    pub fn targets_over_budget(&self) -> bool {
+        self.resident_target_bytes() > self.target_budget.0
+    }
+
+    /// Lets go of resident colour targets idle for the budget's frames, the longest idle first,
+    /// until the rest fit the budget, and answers which. A target let go of holds nothing on the
+    /// host or the device: [`Self::holds_target`] says so, and the next submission into it is
+    /// handed what guest memory holds.
+    ///
+    /// Only a target whose frame reaches guest memory without the device is let go of: one read
+    /// back since its last draw, or kept whole in a snapshot (D719, D885), which carries it there.
+    /// The target drawn last - the frame pending (D714), which is read off the device when written
+    /// back - is never one, nor a colour attachment whose write-back is deferred (D948), nor any of
+    /// `keep`.
+    pub fn evict_idle_targets(&mut self, keep: &[ResourceId]) -> Vec<ResourceId> {
+        let (budget, idle_frames) = self.target_budget;
+        let mut held = self.resident_target_bytes();
+        if held <= budget {
+            return Vec::new();
+        }
+        let last_drawn = self.last_drawn.map(|drawn| drawn.0);
+        let mut idle: Vec<(u64, ResourceId)> = self
+            .resident
+            .keys()
+            .filter_map(|&target| {
+                let id = target?;
+                let used = self.last_used.get(&target).copied().unwrap_or(0);
+                (last_drawn != Some(target)
+                    && !keep.contains(&id)
+                    && !self.uncaptured.contains(&target)
+                    && self.frame.saturating_sub(used) >= idle_frames)
+                    .then_some((used, id))
+            })
+            .collect();
+        idle.sort_unstable();
+        let mut evicted = Vec::new();
+        for (_, id) in idle {
+            if held <= budget {
+                break;
+            }
+            let Some(resident) = self.resident.remove(&Some(id)) else {
+                continue;
+            };
+            held = held.saturating_sub(resident.device_bytes());
+            // The passes over several attachments name its view.
+            self.detach_more_passes();
+            resident.destroy();
+            self.contents.remove(&Some(id));
+            self.unread.remove(&Some(id));
+            self.last_used.remove(&Some(id));
+            evicted.push(id);
+        }
+        evicted
+    }
+
     /// Sends the draws recorded so far to the device without waiting for them (D714): the frame is
     /// read, and so waited for, only when it is written back.
     ///
@@ -537,6 +709,9 @@ impl VulkanBackend {
     pub fn seed_target(&mut self, target: ResourceId, pixels: framebuffer::Pixels) {
         self.state_generation += 1;
         self.unread.remove(&Some(target));
+        // Handed over from guest memory, which therefore holds it.
+        self.uncaptured.remove(&Some(target));
+        self.last_used.insert(Some(target), self.frame);
         // The seed replaces whatever the device held: written in place into the resident attachment
         // when it has one of that extent.
         if let Some(resident) = self.resident.get(&Some(target))
@@ -564,6 +739,8 @@ impl VulkanBackend {
         {
             self.state_generation += 1;
             self.unread.remove(&Some(target));
+            self.uncaptured.remove(&Some(target));
+            self.last_used.insert(Some(target), self.frame);
             self.contents.remove(&Some(target));
             return;
         }
@@ -1164,7 +1341,7 @@ impl VulkanBackend {
         let _keeping =
             orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::SnapshotOnDevice);
         let target = self.last_drawn?.0;
-        if !self.unread.contains(&target) {
+        if !self.unread.contains(&target) && self.contents.contains_key(&target) {
             return None;
         }
         let resident = self.resident.get(&target)?;
@@ -1185,8 +1362,9 @@ impl VulkanBackend {
             .min_by_key(|(_, spare)| spare.capacity())
             .map(|(index, _)| index)
             .map(|index| {
+                // Taken out in place, so the rest stay in the order they were let go of.
                 self.spare_snapshots
-                    .swap_remove(index)
+                    .remove(index)
                     .sized(extent, texel_bytes)
             });
         let snapshot = match spare.map_or_else(
@@ -1210,27 +1388,43 @@ impl VulkanBackend {
             self.release_snapshot(snapshot);
             return None;
         }
+        // The whole frame at the guest's extent: it reaches guest memory from the snapshot.
+        if !drawn {
+            self.uncaptured.remove(&target);
+        }
         let id = self.next_snapshot;
         self.next_snapshot += 1;
         self.snapshots.insert(id, snapshot);
         Some(id)
     }
 
-    /// Keeps a released snapshot buffer for reuse, up to a few.
+    /// Keeps a released snapshot buffer for reuse, up to [`SPARE_SNAPSHOTS`] of them and
+    /// [`SPARE_SNAPSHOT_BYTES`] together. The one let go of longest ago goes first: a size taken
+    /// again and again is let go of again and again, and stays.
     fn release_snapshot(&mut self, snapshot: framebuffer::FrameSnapshot) {
         self.spare_snapshots.push(snapshot);
-        if self.spare_snapshots.len() > SPARE_SNAPSHOTS {
-            // The smallest goes, cheapest to make again; a release waits for the device.
-            if let Some(smallest) = self
-                .spare_snapshots
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, spare)| spare.capacity())
-                .map(|(index, _)| index)
-            {
-                self.spare_snapshots.swap_remove(smallest).destroy();
-            }
+        let mut bytes: u64 = self
+            .spare_snapshots
+            .iter()
+            .map(framebuffer::FrameSnapshot::capacity)
+            .sum();
+        while self.spare_snapshots.len() > SPARE_SNAPSHOTS || bytes > SPARE_SNAPSHOT_BYTES {
+            // A release waits for the device.
+            let oldest = self.spare_snapshots.remove(0);
+            bytes = bytes.saturating_sub(oldest.capacity());
+            oldest.destroy();
         }
+    }
+
+    /// The spare snapshot buffers kept for reuse: how many, and their bytes.
+    pub fn spare_snapshots(&self) -> (usize, u64) {
+        (
+            self.spare_snapshots.len(),
+            self.spare_snapshots
+                .iter()
+                .map(framebuffer::FrameSnapshot::capacity)
+                .sum(),
+        )
     }
 
     /// The pixels of snapshot `id`, releasing it. `None` when there is no such snapshot or it could
@@ -1297,8 +1491,9 @@ impl VulkanBackend {
     /// current. `None` when there is no such frame or the rows are past it.
     pub fn last_frame_rows(&mut self, (first, count): (u32, u32)) -> Option<framebuffer::Pixels> {
         let target = self.last_drawn?.0;
-        if !self.unread.contains(&target) {
-            let held = self.contents.get(&target)?;
+        if !self.unread.contains(&target)
+            && let Some(held) = self.contents.get(&target)
+        {
             let row = held.bytes.len() / held.height.max(1) as usize;
             let rows = held
                 .bytes
@@ -1349,15 +1544,22 @@ impl VulkanBackend {
     }
 
     /// Brings [`Self::contents`] up to date with `target`'s resident attachment, if it has draws the
-    /// host has not seen.
+    /// host has not seen or the host keeps no copy of it. The copies kept of other resident
+    /// targets go: the device holds what they hold, and a frame read back is read for its
+    /// write-back, after which nothing reads the copy (D714).
     fn read_back(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {
-        if self.unread.contains(&target)
+        if (self.unread.contains(&target) || !self.contents.contains_key(&target))
             && let Some(resident) = self.resident.get(&target)
         {
             let pixels = resident.read_back()?;
             self.contents.insert(target, pixels);
             self.unread.remove(&target);
+            let resident = &self.resident;
+            self.contents
+                .retain(|held, _| *held == target || !resident.contains_key(held));
         }
+        // Read by the host, which writes it back.
+        self.uncaptured.remove(&target);
         Ok(())
     }
 
@@ -1424,21 +1626,25 @@ impl VulkanBackend {
         {
             self.retire_resident(target)?;
         }
-        Ok(match self.resident.entry(target) {
-            std::collections::btree_map::Entry::Occupied(existing) => existing.into_mut(),
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                let initial = self
-                    .contents
-                    .get(&target)
-                    .filter(|pixels| (pixels.width, pixels.height) == (width, height))
-                    .map(|pixels| pixels.bytes.as_slice());
-                slot.insert(framebuffer::ResidentAttachment::create(
-                    (width, height),
-                    initial,
-                    CLEAR_COLOUR,
-                    encoding,
-                )?)
-            }
+        if !self.resident.contains_key(&target) {
+            let initial = self
+                .contents
+                .get(&target)
+                .filter(|pixels| (pixels.width, pixels.height) == (width, height))
+                .map(|pixels| pixels.bytes.as_slice());
+            let created = framebuffer::ResidentAttachment::create(
+                (width, height),
+                initial,
+                CLEAR_COLOUR,
+                encoding,
+            )?;
+            self.resident.insert(target, created);
+            // The device now holds what the host's copy did.
+            self.contents.remove(&target);
+            self.last_used.insert(target, self.frame);
+        }
+        self.resident.get(&target).ok_or_else(|| {
+            DispatchError::Unsupported("a resident attachment just made is not held".to_owned())
         })
     }
 
@@ -1493,6 +1699,7 @@ impl VulkanBackend {
                 unsafe { session.device.free_memory(stale.memory, None) };
             }
             let total = stride * framebuffer::WINDOW_SLOTS as vk::DeviceSize;
+            let _for = device_memory::purpose("guest memory windows");
             let (buffer, memory) = compute::create_host_buffer(
                 &session.instance,
                 session.physical,
@@ -1686,13 +1893,30 @@ impl VulkanBackend {
         self.batched = Some((generation, key, places));
         self.geometry_buffers_rebound = false;
         let target = self.current_target;
-        self.unread.insert(target);
-        self.unread
-            .extend(self.more_targets.iter().map(|more| Some(*more)));
-        self.last_drawn = Some(DrawnOn(target));
+        self.note_drawn_on_device(target);
         self.last_window = None;
         self.window_unread = true;
         joined
+    }
+
+    /// Notes draws on the device into `target` and the colour attachments after it: each holds
+    /// draws the host has not read and guest memory does not hold, and was used this frame.
+    fn note_drawn_on_device(&mut self, target: Option<ResourceId>) {
+        let more: Vec<Option<ResourceId>> = self.more_targets.iter().map(|&id| Some(id)).collect();
+        for drawn in std::iter::once(target).chain(more) {
+            self.unread.insert(drawn);
+            self.uncaptured.insert(drawn);
+            self.last_used.insert(drawn, self.frame);
+        }
+        self.last_drawn = Some(DrawnOn(target));
+    }
+
+    /// Notes `target` drawn on the host's path into `pixels`: the host holds the only copy until it
+    /// is written back.
+    fn note_drawn_on_host(&mut self, target: Option<ResourceId>, pixels: framebuffer::Pixels) {
+        self.contents.insert(target, pixels);
+        self.uncaptured.insert(target);
+        self.last_drawn = Some(DrawnOn(target));
     }
 
     /// The output state each colour attachment after the first draws with (D825): the latest
@@ -1767,10 +1991,7 @@ impl VulkanBackend {
                 .map_err(|e| device_error("draw (resident)", e))?;
         self.batched = batched.map(|(key, places)| (self.state_generation, key, places));
         self.geometry_buffers_rebound = false;
-        self.unread.insert(target);
-        self.unread
-            .extend(self.more_targets.iter().map(|more| Some(*more)));
-        self.last_drawn = Some(DrawnOn(target));
+        self.note_drawn_on_device(target);
         // Read when asked for, not after every draw.
         self.last_window = None;
         self.window_unread = true;
@@ -1809,13 +2030,26 @@ impl VulkanBackend {
     ) -> Result<(), BackendError> {
         if orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawJoined, || {
             self.join_unchanged_batch(&[draw])
-        }) == 1
+        }) != 1
         {
-            return Ok(());
+            orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawWhole, || {
+                self.draw_whole(draw, indexed)
+            })?;
         }
-        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawWhole, || {
-            self.draw_whole(draw, indexed)
-        })
+        self.note_draws(&[draw]);
+        Ok(())
+    }
+
+    /// Notes draws carried out through the bound modules, for the pass they were recorded into.
+    fn note_draws(&self, draws: &[framebuffer::VertexDraw]) {
+        if let (Some(vertex), Some(fragment)) = (self.bound_vertex, self.bound_fragment) {
+            let elements = draws
+                .iter()
+                .map(|draw| u64::from(draw.vertices) * u64::from(draw.instances.max(1)))
+                .sum();
+            let count = u32::try_from(draws.len()).unwrap_or(u32::MAX);
+            device_lost::note_draws([vertex, fragment], count, elements);
+        }
     }
 
     /// A split draw's chunks (D787): as many as join the open batch at once, then the next by the
@@ -1852,6 +2086,7 @@ impl VulkanBackend {
             })?;
             rest = more;
         }
+        self.note_draws(&draws);
         Ok(())
     }
 
@@ -2054,8 +2289,7 @@ impl VulkanBackend {
                 &fragment,
             )
             .map_err(|e| device_error("draw", e))?;
-            self.contents.insert(target, pixels);
-            self.last_drawn = Some(DrawnOn(target));
+            self.note_drawn_on_host(target, pixels);
             self.last_window = None;
             self.window_unread = false;
         }
@@ -2087,6 +2321,7 @@ impl VulkanBackend {
             .spirv
             .clone();
         let window = self.ensure_window_buffer()?;
+        device_lost::note_module_dispatch(shader_id, groups);
         let (observed, guest_memory) = match self.bound_buffer {
             Some(buffer_id) => {
                 let observation = *self
@@ -2424,6 +2659,47 @@ impl Drop for VulkanBackend {
 mod tests {
     use super::VulkanBackend;
     use orbistoun_gpu::{BackendError, Rect, RenderBackend, RenderCommand};
+
+    /// A colour attachment after the first drawn on the device is not let go of until it is read
+    /// back: its write-back is deferred over its pages and reads it off the device (D948).
+    #[test]
+    fn an_attachment_drawn_and_unread_is_not_let_go_of() {
+        use orbistoun_gpu::ResourceId;
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let mut backend = VulkanBackend::new();
+        backend.set_target_budget(0, 1);
+        let [first, more, idle] = [0x10, 0x11, 0x12].map(|id| Some(ResourceId(id)));
+        for target in [first, more, idle] {
+            let resident = super::framebuffer::ResidentAttachment::create(
+                (8, 8),
+                None,
+                super::CLEAR_COLOUR,
+                orbistoun_gpu::TargetEncoding::Unorm8,
+            )
+            .expect("an attachment");
+            backend.resident.insert(target, resident);
+        }
+        backend.more_targets = vec![ResourceId(0x11)];
+        backend.note_drawn_on_device(first);
+        backend.set_frame(5);
+        assert_eq!(
+            backend.evict_idle_targets(&[]),
+            vec![ResourceId(0x12)],
+            "only the one never drawn"
+        );
+        backend
+            .target_frame(ResourceId(0x11))
+            .expect("the attachment read back, as its write-back reads it");
+        assert_eq!(
+            backend.evict_idle_targets(&[]),
+            vec![ResourceId(0x11)],
+            "let go of once read back; the first, drawn last, stays"
+        );
+        assert!(backend.holds_target(ResourceId(0x10), (8, 8)));
+    }
 
     /// A command with no execution is refused by name, not silently dropped.
     #[test]

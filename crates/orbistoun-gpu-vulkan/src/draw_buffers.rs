@@ -170,6 +170,7 @@ fn place(
         return Ok(None);
     } else {
         {
+            let _for = crate::device_memory::purpose("draw buffer arenas");
             let capacity = ARENA_BYTES.max(size);
             let words = usize::try_from(capacity / 4).unwrap_or(usize::MAX);
             let (buffer, memory) = crate::compute::create_host_buffer(
@@ -586,4 +587,21 @@ fn release(device: &ash::Device, held: &mut Held) {
         arena.used = 0;
     }
     held.bytes = 0;
+    // Arenas past what the limit fills are freed, the last first, so the others keep their place
+    // at the geometry binding: a buffer larger than an arena made one of its own size, and a frame
+    // of many took more than the limit.
+    let mut kept: vk::DeviceSize = held.arenas.iter().map(|arena| arena.held.size).sum();
+    while held.arenas.len() > 1 && kept > BYTES_LIMIT as vk::DeviceSize {
+        let Some(arena) = held.arenas.pop() else {
+            break;
+        };
+        kept -= arena.held.size;
+        // SAFETY: mapped when the arena was made and not since unmapped; every draw that read it
+        // has run - the caller settled the device - and no set refers to it after the reset above.
+        unsafe { device.unmap_memory(arena.held.memory) };
+        // SAFETY: as above; created on this device and destroyed once.
+        unsafe { device.destroy_buffer(arena.held.buffer, None) };
+        // SAFETY: as above, and the buffer bound to it is destroyed.
+        unsafe { device.free_memory(arena.held.memory, None) };
+    }
 }

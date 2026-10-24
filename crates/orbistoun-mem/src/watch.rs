@@ -223,9 +223,17 @@ pub fn write_faulted(address: u64) -> bool {
 }
 
 /// Before anything but a guest instruction changes `[base, base + len)` - the host writing it from
-/// its kernel, a change of its protection or mapping, another guard: every guard on its pages is
-/// released and its pages noted written.
+/// its kernel, another guard: its pages not yet committed are committed, since a write from the
+/// host's kernel reaches no fault handler ([`crate::lazy`]), and every guard on them is released
+/// and its pages noted written.
 pub fn release_overlapping(base: u64, len: u64) {
+    crate::lazy::commit(base, len);
+    release_guards(base, len);
+}
+
+/// [`release_overlapping`] without the commit: before a change of protection or mapping, which
+/// commits nothing.
+pub(crate) fn release_guards(base: u64, len: u64) {
     if GUARDS.load(Ordering::Acquire) == 0 {
         return;
     }

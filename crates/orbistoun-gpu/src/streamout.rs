@@ -382,6 +382,8 @@ pub fn plan(
                     integer_fetched: 0,
                     // Its lanes' vertex ids, which its `v0` holds.
                     first_thread: first,
+                    sampled_buffers: 0,
+                    scratch_wave_bytes: 0,
                 },
                 width,
                 dx10_clamp: Some(rsrc1 & DX10_CLAMP != 0),

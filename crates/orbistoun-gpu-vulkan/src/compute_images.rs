@@ -488,6 +488,33 @@ fn read_back_image(device: &ash::Device, image: &Bound) -> Result<Vec<u32>, Disp
     Ok(texels)
 }
 
+/// The set layout bindings of a dispatch fetching `fetched` images and storing to `stored`, at the
+/// bindings [`BoundImages::create`] gives them: a pipeline's layout before any dispatch's images
+/// exist.
+pub(crate) fn layout_bindings_for(
+    fetched: usize,
+    stored: usize,
+) -> Vec<vk::DescriptorSetLayoutBinding<'static>> {
+    let fetched = orbistoun_spirv::TEXTURE_BINDINGS
+        .iter()
+        .take(fetched)
+        .map(|binding| (*binding, false));
+    let stored = orbistoun_spirv::STORAGE_IMAGE_BINDINGS
+        .iter()
+        .take(stored)
+        .map(|binding| (*binding, true));
+    fetched
+        .chain(stored)
+        .map(|(binding, stored)| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(binding)
+                .descriptor_type(descriptor_type(stored))
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        })
+        .collect()
+}
+
 /// A fetched image is a combined image sampler and a stored one a storage image.
 const fn descriptor_type(stored: bool) -> vk::DescriptorType {
     if stored {
@@ -699,6 +726,7 @@ fn allocate(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("dispatch images");
     // SAFETY: the allocation info is fully initialised and the device is live.
     unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory(dispatch image)", e))

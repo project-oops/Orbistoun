@@ -128,6 +128,9 @@ pub enum DispatchError {
     /// The draw asks for state this cannot build exactly; named rather than approximated.
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A dispatch capture could not be read (`capture`).
+    #[error("dispatch capture: {0}")]
+    Capture(String),
 }
 
 /// Reports whether compute can be dispatched here.
@@ -192,6 +195,7 @@ pub(crate) fn create_host_buffer(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("host buffers");
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = unsafe { device.allocate_memory(&allocate, None) }
         .map_err(|e| DispatchError::Vulkan("allocate_memory", e))?;
@@ -228,13 +232,21 @@ type SpareHostBuffer = (u64, vk::DeviceSize, usize, vk::Buffer, vk::DeviceMemory
 /// Host buffers finished guest dispatches released, kept for the next of the same size, as a
 /// dispatch's own buffers and images are (D805). Allocating a dispatch's observation and window and
 /// freeing them after took some 0.4 ms of every dispatch, more than the dispatch.
-fn spare_host_buffers() -> &'static std::sync::Mutex<Vec<SpareHostBuffer>> {
-    static SPARES: std::sync::Mutex<Vec<SpareHostBuffer>> = std::sync::Mutex::new(Vec::new());
+fn spare_host_buffers() -> &'static orbistoun_gpu::tally::Tallied<Vec<SpareHostBuffer>, 1> {
+    static SPARES: orbistoun_gpu::tally::Tallied<Vec<SpareHostBuffer>, 1> =
+        orbistoun_gpu::tally::Tallied::new(Vec::new(), |spares| {
+            [spares.iter().map(|spare| spare.1).sum()]
+        });
     &SPARES
 }
 
 /// The most bytes the spare host buffers hold together.
 const SPARE_HOST_BYTES_MOST: vk::DeviceSize = 64 << 20;
+
+/// The bytes the spare host buffers held when they were last let go, read without their lock.
+pub(crate) fn spare_host_bytes() -> u64 {
+    spare_host_buffers().tallies()[0]
+}
 
 /// A host buffer of `size` bytes holding `words` words for a guest dispatch: a spare of exactly that
 /// where one is kept, zeroed again where `zeroed` asks, else a new one, which starts at zero.
@@ -295,7 +307,7 @@ fn give_host_buffer(
 
 /// A compute pipeline and the layouts it binds through, which outlive one dispatch.
 #[derive(Debug, Clone, Copy)]
-struct KeptPipeline {
+pub(crate) struct KeptPipeline {
     shader: vk::ShaderModule,
     set_layout: vk::DescriptorSetLayout,
     /// Set 1's, where the pipeline binds a dispatch's buffers.
@@ -335,12 +347,12 @@ static GLOBAL_SHARE: std::sync::OnceLock<vk::Buffer> = std::sync::OnceLock::new(
 
 /// The global data share as one compute pipeline binds it: the buffer, where its module declares
 /// [`orbistoun_spirv::GDS_BINDING`] (D789).
-struct GlobalShare(Option<vk::Buffer>);
+pub(crate) struct GlobalShare(Option<vk::Buffer>);
 
 impl GlobalShare {
     /// The share for `module`: none where it does not declare the binding, and an error where it
     /// does and the session could not create the share.
-    fn for_module(module: &[u32]) -> Result<Self, DispatchError> {
+    pub(crate) fn for_module(module: &[u32]) -> Result<Self, DispatchError> {
         Self::where_shared(orbistoun_spirv::declares_binding(
             module,
             orbistoun_spirv::GDS_BINDING,
@@ -426,6 +438,7 @@ fn build_pipeline(
             &module,
             (&image_bindings, &global_share),
             (buffers.is_some(), push_bytes),
+            Compile::Kept,
         )?;
         let held = kept_pipelines()
             .lock()
@@ -526,12 +539,23 @@ fn pipeline_key(
     orbistoun_gpu::content_hash(&shape)
 }
 
+/// Where a compute pipeline is compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Compile {
+    /// Through the session's kept cache and under the compile watch, as a dispatch's is.
+    Kept,
+    /// With no cache and no watch, so the driver compiles it afresh and several threads may compile
+    /// at once: what the shader census times.
+    Alone,
+}
+
 /// Builds the parts of a compute pipeline that outlive a dispatch.
-fn make_pipeline(
+pub(crate) fn make_pipeline(
     device: &ash::Device,
     module: &[u32],
     (images, global_share): (&[vk::DescriptorSetLayoutBinding<'static>], &GlobalShare),
     (buffers, push_bytes): (bool, u32),
+    compile: Compile,
 ) -> Result<KeptPipeline, DispatchError> {
     // A module not laid out as SPIR-V is refused here rather than handed to the device, whose
     // checking layer may walk past its end.
@@ -608,14 +632,30 @@ fn make_pipeline(
     let pipeline_info = [vk::ComputePipelineCreateInfo::default()
         .stage(stage)
         .layout(layout)];
-    // SAFETY: the create info outlives the call and names a shader module still alive.
-    let pipelines = unsafe {
-        device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
+    let pipelines = if compile == Compile::Kept {
+        let what = crate::device_lost::noted_compute().map_or_else(
+            || "a compute pipeline".to_owned(),
+            |program| format!("the compute pipeline for the program at {program:#x}"),
+        );
+        let made = crate::compile_watch::compiling(what, &[module], || {
+            // SAFETY: the create info outlives the call and names a shader module still alive.
+            unsafe {
+                device.create_compute_pipelines(
+                    crate::pipeline_cache::cache(),
+                    &pipeline_info,
+                    None,
+                )
+            }
+        });
+        // Kept for the next run as a draw's pipeline is (D744): a guest compute pipeline compiles
+        // in a quarter of a second.
+        crate::pipeline_cache::keep(device);
+        made
+    } else {
+        // SAFETY: the create info outlives the call and names a shader module still alive.
+        unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None) }
     }
     .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
-    // Kept for the next run as a draw's pipeline is (D744): a guest compute pipeline compiles in
-    // a quarter of a second.
-    crate::pipeline_cache::keep(device);
 
     Ok(KeptPipeline {
         shader,
@@ -629,7 +669,7 @@ fn make_pipeline(
 
 impl KeptPipeline {
     /// Releases everything it holds.
-    fn release(self, device: &ash::Device) {
+    pub(crate) fn release(self, device: &ash::Device) {
         // SAFETY: every handle was created on this device for this pipeline, nothing recorded with
         // it is still running (the dispatch waited for its submission), and each is destroyed once.
         unsafe { device.destroy_pipeline(self.pipeline, None) };
@@ -923,6 +963,28 @@ impl Session {
             && offered.custom_border_color_without_format == vk::TRUE
     }
 
+    /// Whether the device has `VK_EXT_device_fault` with its `deviceFault` feature.
+    fn fault_offered(
+        instance: &ash::Instance,
+        physical: vk::PhysicalDevice,
+        extensions: &[vk::ExtensionProperties],
+    ) -> bool {
+        let named = extensions.iter().any(|extension| {
+            extension
+                .extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::ext::device_fault::NAME)
+        });
+        if !named {
+            return false;
+        }
+        let mut offered = vk::PhysicalDeviceFaultFeaturesEXT::default();
+        let mut chained = vk::PhysicalDeviceFeatures2::default().push_next(&mut offered);
+        // SAFETY: the handle came from enumeration on this live instance, and the chained structure
+        // outlives the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut chained) };
+        offered.device_fault == vk::TRUE
+    }
+
     /// Creates the logical device with the features and extensions the emitted modules declare,
     /// returning the core features requested and whether mesh shading was enabled.
     fn create_device(
@@ -971,7 +1033,10 @@ impl Session {
             .occlusion_query_precise(available.occlusion_query_precise == vk::TRUE)
             // `shader_clip_distance` serves the guest's user clip planes, which every translated
             // mesh module writes as clip distances (D830).
-            .shader_clip_distance(available.shader_clip_distance == vk::TRUE);
+            .shader_clip_distance(available.shader_clip_distance == vk::TRUE)
+            // `shader_int64` serves a dispatch's 64-bit buffer atomics, which reach a pair of words
+            // through a 64-bit view of the buffer.
+            .shader_int64(available.shader_int64 == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -980,7 +1045,9 @@ impl Session {
         // outlives the call.
         unsafe { instance.get_physical_device_features2(physical, &mut chained) };
         let mut wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
-            .shader_float16(offered_float16.shader_float16 == vk::TRUE);
+            .shader_float16(offered_float16.shader_float16 == vk::TRUE)
+            // The 64-bit buffer atomics a dispatch's `buffer_atomic_swap_x2` and `_or_x2` are.
+            .shader_buffer_int64_atomics(offered_float16.shader_buffer_int64_atomics == vk::TRUE);
 
         // `VK_EXT_mesh_shader` where the device has it: a guest's primitive shader is a mesh shader
         // (D688), and modules that do not use it are unaffected.
@@ -1001,6 +1068,12 @@ impl Session {
                 .is_ok_and(|name| name == ash::ext::depth_clip_control::NAME)
         });
         let border_offered = Self::custom_border_offered(instance, physical, &extensions);
+        // `VK_EXT_device_fault` where the device has it: a lost device then says what faulted.
+        let fault_offered = Self::fault_offered(instance, physical, &extensions);
+        // The driver's report of every allocation and the heaps' budget, where offered: what the
+        // run's memory breakdown names device memory by (`device_memory`).
+        let (report_offered, budget_offered) =
+            crate::device_memory::offered(instance, physical, &extensions);
         let enabled_extensions: Vec<*const core::ffi::c_char> = [
             (mesh_offered, ash::ext::mesh_shader::NAME.as_ptr()),
             (
@@ -1008,6 +1081,12 @@ impl Session {
                 ash::ext::depth_clip_control::NAME.as_ptr(),
             ),
             (border_offered, ash::ext::custom_border_color::NAME.as_ptr()),
+            (fault_offered, ash::ext::device_fault::NAME.as_ptr()),
+            (
+                report_offered,
+                ash::ext::device_memory_report::NAME.as_ptr(),
+            ),
+            (budget_offered, ash::ext::memory_budget::NAME.as_ptr()),
         ]
         .into_iter()
         .filter_map(|(offered, name)| offered.then_some(name))
@@ -1019,6 +1098,8 @@ impl Session {
         let mut wanted_border = vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default()
             .custom_border_colors(border_offered)
             .custom_border_color_without_format(border_offered);
+        let mut wanted_fault =
+            vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(fault_offered);
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
@@ -1027,12 +1108,37 @@ impl Session {
             .push_next(&mut wanted_float16)
             .push_next(&mut wanted_mesh)
             .push_next(&mut wanted_clip_control)
-            .push_next(&mut wanted_border);
+            .push_next(&mut wanted_border)
+            .push_next(&mut wanted_fault);
+        let mut wanted_report =
+            vk::PhysicalDeviceDeviceMemoryReportFeaturesEXT::default().device_memory_report(true);
+        let mut report = crate::device_memory::report_info();
+        let device_info = if report_offered {
+            device_info
+                .push_next(&mut wanted_report)
+                .push_next(&mut report)
+        } else {
+            device_info
+        };
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
+        crate::device_memory::note_enabled(report_offered, budget_offered, (instance, physical));
+        if fault_offered {
+            crate::device_lost::keep_fault_reader(instance, &device);
+        }
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
         CUSTOM_BORDER_COLOUR.store(border_offered, std::sync::atomic::Ordering::Relaxed);
+        Self::note_enabled_features(instance, physical, &wanted_features);
+        Ok((device, wanted_features, wanted_mesh.mesh_shader))
+    }
+
+    /// Records which of the core features the draws consult were enabled, and the line width limit.
+    fn note_enabled_features(
+        instance: &ash::Instance,
+        physical: vk::PhysicalDevice,
+        wanted_features: &vk::PhysicalDeviceFeatures,
+    ) {
         DEPTH_BIAS_CLAMP.store(
             wanted_features.depth_bias_clamp == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,
@@ -1063,7 +1169,6 @@ impl Session {
             wanted_features.sampler_anisotropy == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,
         );
-        Ok((device, wanted_features, wanted_mesh.mesh_shader))
     }
 
     /// Reads what the device reports and what was enabled into [`Properties`].
@@ -1355,27 +1460,74 @@ fn clock_for(device: &ash::Device) -> Option<DispatchClock> {
 }
 
 /// Adds the time between `clock`'s two stamps, which a finished dispatch wrote, to the `gpu busy`
-/// phase.
-fn read_dispatch_clock(device: &ash::Device, clock: DispatchClock) {
+/// phase, and answers it.
+fn read_dispatch_clock(device: &ash::Device, clock: DispatchClock) -> Option<std::time::Duration> {
     let mut stamps = [0u64; 2];
     // SAFETY: both queries were written by a submission whose fence has signalled; the output holds
     // exactly two 64-bit results.
     let read = unsafe {
         device.get_query_pool_results(clock.pool, 0, &mut stamps, vk::QueryResultFlags::TYPE_64)
     };
-    if read.is_ok() {
-        // Nanoseconds as a float product, then whole: a tick period is a fraction on some devices.
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let nanos = (stamps[1].saturating_sub(stamps[0]) as f64 * clock.period) as u64;
-        orbistoun_gpu::perf::add(
-            orbistoun_gpu::perf::Phase::Gpu,
-            std::time::Duration::from_nanos(nanos),
-        );
+    read.ok()?;
+    // Nanoseconds as a float product, then whole: a tick period is a fraction on some devices.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let nanos = (stamps[1].saturating_sub(stamps[0]) as f64 * clock.period) as u64;
+    let took = std::time::Duration::from_nanos(nanos);
+    orbistoun_gpu::perf::add(orbistoun_gpu::perf::Phase::Gpu, took);
+    Some(took)
+}
+
+/// The device time past which a dispatch is named in the log. The host's display driver resets a
+/// device that holds one submission for about two seconds, so a program creeping towards that is
+/// worth seeing before it loses the device.
+const SLOW_ON_DEVICE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Names a dispatch of `program` over `groups` that held the device for `took`, its uploads and
+/// read-back with it: once it passes [`SLOW_ON_DEVICE`], and again each time the program sets a
+/// new longest, so a program that grows towards a device reset shows how it got there.
+fn note_device_time(program: Option<u64>, groups: [u32; 3], took: std::time::Duration) {
+    static LONGEST: std::sync::Mutex<Option<std::collections::HashMap<Option<u64>, u64>>> =
+        std::sync::Mutex::new(None);
+    let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+    let mut longest = LONGEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = longest
+        .get_or_insert_with(Default::default)
+        .entry(program)
+        .or_default();
+    if !worth_saying(*before, micros) {
+        return;
     }
+    *before = micros;
+    let named = program.map_or_else(
+        || "a module".to_owned(),
+        |p| format!("the program at {p:#x}"),
+    );
+    tracing::info!(
+        "a dispatch held the device {:.1} ms: {named}, {groups:?} groups - its longest yet",
+        took.as_secs_f64() * 1000.0
+    );
+}
+
+/// The latest dispatch's time on the device in nanoseconds, from its timestamps; `u64::MAX` for none
+/// since it was last taken.
+static LAST_DEVICE_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// The device time of the dispatches since the last call, the latest's, where one was timed.
+pub(crate) fn take_device_time() -> Option<std::time::Duration> {
+    let nanos = LAST_DEVICE_TIME.swap(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    (nanos != u64::MAX).then(|| std::time::Duration::from_nanos(nanos))
+}
+
+/// Whether a dispatch that took `micros` on the device is worth a line, where its program's
+/// longest said before is `before`: past [`SLOW_ON_DEVICE`], and longer than that.
+fn worth_saying(before: u64, micros: u64) -> bool {
+    micros >= u64::try_from(SLOW_ON_DEVICE.as_micros()).unwrap_or(u64::MAX) && micros > before
 }
 
 /// Stamps `command` with `clock`'s query `at`: the first, at the top of the pipe, resets the pair
@@ -1578,23 +1730,44 @@ fn dispatch_core(
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
 
     let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+    // Read before the submission takes the note.
+    let program = crate::device_lost::noted_compute();
+    let serial = crate::device_lost::submit(crate::device_lost::Kind::Dispatch);
+    let submitted = std::time::Instant::now();
     // A fence for this submission alone: a device wait also waited for whatever else the device
     // was doing, such as a frame being shown.
     //
     // SAFETY: the command buffer has finished recording, the queue belongs to this device, and the
     // fence was reset unsignalled for this dispatch and is used by nothing else.
     let waited = unsafe { device.queue_submit(queue, &submits, fence) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))
+        .map_err(crate::device_lost::vulkan("queue_submit"))
         .and_then(|()| {
             span(Span::DeviceRunWait, || {
                 // SAFETY: the fence was submitted with the work just above.
                 unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
-                    .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))
+                    .map_err(crate::device_lost::vulkan("wait_for_fences"))
             })
         });
+    if waited.is_err() {
+        // About two seconds is the display driver's reset of a device held too long; far less is
+        // a fault in the work itself.
+        tracing::error!(
+            "the dispatch of {} over {groups:?} groups failed {:.0} ms after it was submitted",
+            program.map_or_else(
+                || "a module".to_owned(),
+                |p| format!("the program at {p:#x}")
+            ),
+            submitted.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     waited?;
-    if let Some(clock) = clock {
-        read_dispatch_clock(device, clock);
+    crate::device_lost::complete(serial);
+    if let Some(took) = clock.and_then(|clock| read_dispatch_clock(device, clock)) {
+        note_device_time(program, groups, took);
+        LAST_DEVICE_TIME.store(
+            u64::try_from(took.as_nanos()).unwrap_or(u64::MAX - 1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     drop(running);
     let _reading = SpanGuard::start(Span::DeviceReadBack);
@@ -1803,6 +1976,9 @@ pub struct GuestDispatch {
     /// Whether an access left the window or went through a descriptor whose addressing is not
     /// modelled; the result is then not the guest's and must not reach its memory.
     pub escaped: bool,
+    /// The byte offset of the backward branch of a loop the module cut for running past its cap,
+    /// where it cut one (D949); what the dispatch wrote is then not the guest's either.
+    pub loop_cut: Option<u32>,
     /// Each stored image's texels after the dispatch, in the order they were bound (D893).
     pub stored: Vec<Vec<u32>>,
     /// Each traced buffer's words after the dispatch and its write mask, by slot (D746, D809);
@@ -1811,7 +1987,8 @@ pub struct GuestDispatch {
 }
 
 /// Words of the observation a guest dispatch module declares: the register-observation layout,
-/// whose word zero it uses for its escape flag.
+/// whose words it uses for its escape flag and the loop it cut
+/// ([`orbistoun_spirv::DISPATCH_ESCAPE_WORD`], [`orbistoun_spirv::DISPATCH_LOOP_WORD`]).
 const GUEST_OBSERVATION_WORDS: usize = 16;
 
 /// Runs a guest compute dispatch's module: `memory` is the window's contents before, uploaded to
@@ -1851,10 +2028,26 @@ pub fn dispatch_guest_with_buffers(
 /// already holds, as a translation cache does: the hash names its pipeline, and computing it again
 /// for every dispatch cost more than the dispatch.
 ///
+/// The run's diagnostics observe it (`observed`): a dispatch `ORBISTOUN_CAPTURE_DISPATCH` names is
+/// written out before it is submitted, one that loses the device after it fails, with the latest
+/// before it where `ORBISTOUN_CAPTURE_RECENT` keeps them, and `ORBISTOUN_WATCH_GPU` names those
+/// that bind or change its ranges.
+///
 /// # Errors
 ///
 /// As [`dispatch_guest_with_buffers`].
 pub fn dispatch_guest_hashed(
+    module: (&[u32], u64),
+    memory: &[u32],
+    (push, groups): (&[u32], [u32; 3]),
+    images: &crate::compute_images::DispatchImages<'_>,
+    buffers: &[crate::compute_buffers::BufferIn<'_>],
+) -> Result<GuestDispatch, DispatchError> {
+    crate::observed::dispatch(module, memory, (push, groups), images, buffers)
+}
+
+/// [`dispatch_guest_hashed`] without capturing it: what a replay runs.
+pub(crate) fn run_guest_dispatch(
     module: (&[u32], u64),
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
@@ -1966,9 +2159,11 @@ pub fn dispatch_guest_hashed(
     let (observed, after) = dispatched?;
     let stored = stored?.unwrap_or_default();
 
+    let word = |at: u32| observed.get(at as usize).copied().unwrap_or(0);
     Ok(GuestDispatch {
         memory: after,
-        escaped: observed.first().is_some_and(|&flag| flag != 0),
+        escaped: word(orbistoun_spirv::DISPATCH_ESCAPE_WORD) != 0,
+        loop_cut: word(orbistoun_spirv::DISPATCH_LOOP_WORD).checked_sub(1),
         stored,
         buffers: buffers_after?,
     })
@@ -1977,6 +2172,20 @@ pub fn dispatch_guest_hashed(
 #[cfg(test)]
 mod tests {
     use super::{Availability, probe};
+
+    /// A dispatch is named once it passes the slow bound, and again only when its program takes
+    /// longer than it did.
+    #[test]
+    fn a_slow_dispatch_is_named_when_it_sets_a_new_longest() {
+        let bound = u64::try_from(super::SLOW_ON_DEVICE.as_micros()).expect("fits");
+        assert!(!super::worth_saying(0, bound - 1), "under the bound");
+        assert!(super::worth_saying(0, bound), "at the bound");
+        assert!(
+            !super::worth_saying(bound * 2, bound * 2),
+            "no longer than before"
+        );
+        assert!(super::worth_saying(bound * 2, bound * 3), "a new longest");
+    }
 
     /// A probe yields either device properties or a reason there is no device.
     #[test]

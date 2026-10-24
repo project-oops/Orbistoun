@@ -19,7 +19,9 @@ scalar offset, the instruction offset, and the lane's vector offset (`offen`) or
 each pass of a 64-lane waterfall fits.
 
 Where the access still cannot be bound, its refusal names how many distinct descriptors the waves
-reach it with and where their runs ended, or why the waves could not be run.
+reach it with and where their runs ended, or why the waves could not be run. Amended by D951:
+above 256 waves, every wave of a lattice of the dispatch's groups runs instead. What the lattice
+reaches is bound as one buffer with a margin, and an access outside it is an escape.
 
 **Why:** Grand Theft Auto V's compute program at `0x74005b87ce00` picks each lane's store buffer
 from a 65,536-entry descriptor table through a waterfall. The 15,517 buffers the table names span

@@ -12,7 +12,10 @@
 use crate::packet::{self, PacketKind, build::measured};
 
 mod indirect_draw;
+mod whole;
+
 pub use indirect_draw::{DRAW_INDEX_INDIRECT_MULTI, DRAW_INDIRECT_MULTI};
+pub use whole::carried_out_whole;
 
 /// `PKT3_WAIT_REG_MEM` (`sid.h:90`). No measured builder emits it; the open-toolchain GL context
 /// writes it by hand to the public layout.
@@ -675,11 +678,11 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
         result.stopped = Stopped::Malformed { offset: 0 };
         return result;
     }
-    let mut next_segment = segments.iter().peekable();
-    while next_segment
-        .next_if(|segment| segment.first < from)
-        .is_some()
-    {}
+    let mut next_segment = segments
+        .iter()
+        .skip_while(|segment| segment.first < from)
+        .peekable();
+    watch_after(stream, None, memory);
     for packet in walked.packets.iter().filter(|packet| packet.offset >= from) {
         let offset = packet.offset;
         let opcode = match packet.kind {
@@ -706,6 +709,7 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
                 result.stopped_body = body_head(bytes);
                 return result;
             }
+            watch_after(stream, Some((offset, opcode)), memory);
             result.draws += 1;
             continue;
         }
@@ -713,34 +717,8 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
             .chunks_exact(4)
             .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
             .collect();
-        let step = match opcode {
-            measured::DMA_DATA => dma_data(&body, memory, &mut result),
-            measured::RELEASE_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
-                release_mem(&body, memory, &mut result)
-            }),
-            WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
-                wait_reg_mem(&body, memory, &mut result)
-            }),
-            WAIT_REG_MEM64 => crate::perf::span(crate::perf::Span::OtherMemory, || {
-                wait_reg_mem64(&body, memory, &mut result)
-            }),
-            CONTEXT_CONTROL => context_control(&body),
-            packet::build::DISPATCH_DIRECT => {
-                crate::perf::span(crate::perf::Span::CpDispatch, || {
-                    dispatch_direct(stream, offset, &body, memory, &mut result)
-                })
-            }
-            measured::DISPATCH_INDIRECT => crate::perf::span(crate::perf::Span::CpDispatch, || {
-                dispatch_indirect(stream, offset, &body, memory, &mut result)
-            }),
-            WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
-                write_data(&body, memory, &mut result)
-            }),
-            measured::EVENT_WRITE => event_write(&body, memory, &mut result),
-            crate::streamout::STRMOUT_BUFFER_UPDATE => streamout_update(&body, memory, &mut result),
-            // An indirect draw, or a packet that needs the GPU.
-            _ => indirect_draw::run(stream, offset, opcode, &body, memory, &mut result),
-        };
+        let step = carry_out(stream, (offset, opcode), &body, memory, &mut result);
+        watch_after(stream, Some((offset, opcode)), memory);
         if let Err(stop) = step {
             result.stopped = match stop {
                 Stop::NeedsGpu => Stopped::NeedsGpu { offset, opcode },
@@ -768,6 +746,79 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
         }
     }
     result
+}
+
+/// Carries out the packet at byte `offset` of `stream` with `opcode` and `body`, other than a draw.
+fn carry_out(
+    stream: &[u8],
+    (offset, opcode): (u32, u8),
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    match opcode {
+        measured::DMA_DATA => dma_data(body, memory, result),
+        measured::RELEASE_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
+            release_mem(body, memory, result)
+        }),
+        WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
+            wait_reg_mem(body, memory, result)
+        }),
+        WAIT_REG_MEM64 => crate::perf::span(crate::perf::Span::OtherMemory, || {
+            wait_reg_mem64(body, memory, result)
+        }),
+        CONTEXT_CONTROL => context_control(body),
+        packet::build::DISPATCH_DIRECT => crate::perf::span(crate::perf::Span::CpDispatch, || {
+            dispatch_direct(stream, offset, body, memory, result)
+        }),
+        measured::DISPATCH_INDIRECT => crate::perf::span(crate::perf::Span::CpDispatch, || {
+            dispatch_indirect(stream, offset, body, memory, result)
+        }),
+        WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
+            write_data(body, memory, result)
+        }),
+        measured::EVENT_WRITE => event_write(body, memory, result),
+        crate::streamout::STRMOUT_BUFFER_UPDATE => streamout_update(body, memory, result),
+        // An indirect draw, or a packet that needs the GPU.
+        _ => indirect_draw::run(stream, offset, opcode, body, memory, result),
+    }
+}
+
+/// Names each range `ORBISTOUN_WATCH_GPU` watches that changed since it was last compared, as made
+/// by the packet at byte `offset` with `opcode`, or - with no packet, as a stream starts - outside
+/// the command processor ([`crate::memory_watch`]).
+fn watch_after(stream: &[u8], packet: Option<(u32, u8)>, memory: &mut dyn CpMemory) {
+    let changes = crate::memory_watch::changes(&*memory);
+    if changes.is_empty() {
+        return;
+    }
+    let by = match packet {
+        None => "as a stream starts: outside the command processor, by the guest CPU or by work carried out apart from it".to_owned(),
+        Some((offset, opcode)) => {
+            let name = match opcode {
+                measured::DMA_DATA => "DMA_DATA",
+                measured::RELEASE_MEM => "RELEASE_MEM",
+                measured::EVENT_WRITE => "EVENT_WRITE",
+                measured::DISPATCH_INDIRECT => "DISPATCH_INDIRECT",
+                packet::build::DISPATCH_DIRECT => "DISPATCH_DIRECT",
+                WRITE_DATA => "WRITE_DATA",
+                WAIT_REG_MEM | WAIT_REG_MEM64 => "a memory wait",
+                crate::streamout::STRMOUT_BUFFER_UPDATE => "STRMOUT_BUFFER_UPDATE",
+                opcode if is_draw(opcode) => "a draw",
+                _ => "a packet",
+            };
+            let program = matches!(
+                opcode,
+                measured::DISPATCH_INDIRECT | packet::build::DISPATCH_DIRECT
+            )
+            .then(|| memory.dispatch_program(stream, offset))
+            .flatten()
+            .map(|program| format!(", the program at {program:#x}"))
+            .unwrap_or_default();
+            format!("after {name} (opcode {opcode:#x}) at byte {offset:#x}{program}")
+        }
+    };
+    crate::memory_watch::say(&changes, &by);
 }
 
 /// A memory write a stream never made, because the queue stopped at or before it.

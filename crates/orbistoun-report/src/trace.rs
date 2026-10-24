@@ -1338,6 +1338,9 @@ fn describe_end(trace: &CallTrace) -> String {
     if trace.ended_by.as_deref() == Some(SPENT_THE_BUDGET) {
         return SPENT_THE_BUDGET.to_owned();
     }
+    if trace.ended_by.as_deref() == Some(LOST_THE_DEVICE) {
+        return LOST_THE_DEVICE.to_owned();
+    }
     match trace.quiet {
         Some(quiet) if quiet.is_notable() => QUIET_TO_LIMIT.to_owned(),
         _ => RAN_TO_LIMIT.to_owned(),
@@ -1350,6 +1353,10 @@ pub const RAN_TO_LIMIT: &str = "ran to the time limit";
 /// A run the call budget ended, which is not the clock running out: the next step is to
 /// raise the budget rather than find what the guest waits for (D238).
 pub const SPENT_THE_BUDGET: &str = "spent its call budget";
+
+/// A run ended because the host's graphics device was lost: orbistoun's failure, which the run's
+/// log names by the submissions in flight, and neither the guest's decision nor a limit.
+pub const LOST_THE_DEVICE: &str = "lost the graphics device";
 
 /// A run the clock ended after the guest had stopped asking for anything.
 ///
@@ -1811,6 +1818,12 @@ mod tests {
             sample_ms: 250,
         });
         assert_eq!(super::describe_end(&both), super::SPENT_THE_BUDGET);
+
+        // A lost device is its own ending, even after the guest went quiet.
+        let mut lost = trace(47, 20_000_000, None, None);
+        lost.ended_by = Some(super::LOST_THE_DEVICE.to_owned());
+        lost.quiet = both.quiet;
+        assert_eq!(super::describe_end(&lost), super::LOST_THE_DEVICE);
 
         // A guest that stopped itself outranks either: its own decision is not a limit.
         let mut exited = trace(47, 20_000_000, None, None);

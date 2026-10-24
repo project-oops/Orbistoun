@@ -226,26 +226,32 @@ pub fn trace(
 pub fn trace_with(
     decode: &Decode,
     encodings: &EncodingTable,
-    (first_register, count): (u32, u32),
-    (stores, globals, dispatch): (bool, bool, bool),
+    registers: (u32, u32),
+    flags: (bool, bool, bool),
 ) -> DrawBuffers {
-    let named: Vec<Option<(&str, &str)>> = decode
-        .instructions
-        .iter()
-        .map(|instruction| {
-            let family = encodings
-                .encodings()
-                .get(usize::from(instruction.encoding?))?;
-            Some((
-                family.name.as_str(),
-                encodings.mnemonic_for(&family.name, instruction.opcode)?,
-            ))
-        })
-        .collect();
+    trace_skipping(
+        decode,
+        encodings,
+        (registers, flags),
+        &std::collections::BTreeSet::new(),
+    )
+}
+
+/// [`trace_with`] leaving out the accesses at the byte offsets `skipped` names: a dispatch's scratch
+/// accesses, which reach the wave's own private memory and no buffer (D954).
+#[must_use]
+pub fn trace_skipping(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    ((first_register, count), (stores, globals, dispatch)): ((u32, u32), (bool, bool, bool)),
+    skipped: &std::collections::BTreeSet<u32>,
+) -> DrawBuffers {
+    let named = named_instructions(decode, encodings);
     let untraced_by = decode
         .instructions
         .iter()
         .zip(&named)
+        .filter(|(instruction, _)| !skipped.contains(&instruction.offset))
         .find_map(|(instruction, named)| {
             let (_, name) = (*named)?;
             // A pixel shader's image store reaches a harness image, not the guest's: still untraced.
@@ -281,20 +287,35 @@ pub fn trace_with(
     let mut accesses: Vec<(u32, Access)> = Vec::new();
     // A dispatch's global loads are traced as a primitive shader's are (D883).
     let mut stores: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut atomics: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    // Each computed access that reads what an earlier one in its block read, with nothing between
+    // them writing it: that earlier access, whose buffer it shares (D952).
+    let mut shared = BTreeMap::new();
     for ((block, state), lanes) in blocks.iter().zip(reached).zip(indices) {
         let Some(mut held) = state else {
             continue;
         };
         let mut lanes = lanes.unwrap_or_default();
+        let mut sharing = ComputedSharing::new();
         for (instruction, named) in decode.instructions[block.first..block.end]
             .iter()
             .zip(&named[block.first..block.end])
         {
-            if let Some(&(_, name)) = named.as_ref()
+            if skipped.contains(&instruction.offset) {
+                // A scratch access writes vector registers alone, which nothing here traces.
+            } else if let Some(&(_, name)) = named.as_ref()
                 && let Some(access) = access(instruction, name, &held)
             {
                 if bound_buffer_store(name) {
                     stores.insert(instruction.offset);
+                }
+                if name.starts_with("buffer_atomic_") {
+                    atomics.insert(instruction.offset);
+                }
+                if let Access::Computed { through, soffset } = access
+                    && let Some(first) = sharing.reads(instruction.offset, through, soffset)
+                {
+                    shared.insert(instruction.offset, first);
                 }
                 let access = indexed_by(access, instruction, &lanes);
                 accesses.push((instruction.offset, access));
@@ -307,12 +328,24 @@ pub fn trace_with(
             if !lanes.is_empty() {
                 step_lanes(&mut lanes, &held, instruction, *named);
             }
+            sharing.step(instruction, *named);
             step(&mut held, instruction, *named);
         }
     }
     accesses.sort_by_key(|(offset, _)| *offset);
-    let mut buffers = slots(accesses, (decode, encodings), (first_register, count));
-    buffers.stored_only = stored_only(&buffers.served, &stores);
+    let mut buffers = slots(
+        accesses,
+        &shared,
+        (decode, encodings),
+        (first_register, count),
+    );
+    // An atomic writes its buffer but reads it first, so only plain stores leave a buffer unread.
+    let plain_stores: std::collections::BTreeSet<u32> = stores
+        .iter()
+        .copied()
+        .filter(|offset| !atomics.contains(offset))
+        .collect();
+    buffers.stored_only = stored_only(&buffers.served, &plain_stores);
     buffers.stored = buffers
         .served
         .iter()
@@ -320,6 +353,108 @@ pub fn trace_with(
         .map(|(_, &slot)| slot)
         .collect();
     buffers
+}
+
+/// Each instruction's family and mnemonic, [`None`] for one the tables do not name.
+fn named_instructions<'a>(
+    decode: &Decode,
+    encodings: &'a EncodingTable,
+) -> Vec<Option<(&'a str, &'a str)>> {
+    decode
+        .instructions
+        .iter()
+        .map(|instruction| {
+            let family = encodings
+                .encodings()
+                .get(usize::from(instruction.encoding?))?;
+            Some((
+                family.name.as_str(),
+                encodings.mnemonic_for(&family.name, instruction.opcode)?,
+            ))
+        })
+        .collect()
+}
+
+/// Where the descriptor a ray intersection (`image_bvh_intersect_ray`, `image_bvh64_intersect_ray`)
+/// reads its hierarchy through comes from: its four scalar registers, traced as a buffer
+/// descriptor's are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HierarchySource {
+    /// The descriptor's words, from the stage's user data, constants and loads at fixed places.
+    Descriptor([DescriptorWord; 4]),
+    /// A descriptor the program computes, found per dispatch by running the program up to the
+    /// intersection (D753); its scalar offset is `null`, which the instruction has none of.
+    Computed(Box<Computed>),
+}
+
+/// The distinct descriptors a program's ray intersections read their hierarchies through, in
+/// program order, for a stage whose `count` user-data words land in the scalar registers from
+/// `first_register`. The intersection reads its nodes through the window, not a bound buffer, so
+/// these are traced apart from [`trace`]'s slots and whatever else the program writes. An
+/// intersection whose program prefix cannot be rebuilt is left out.
+#[must_use]
+pub fn trace_hierarchies(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+) -> Vec<HierarchySource> {
+    let named = named_instructions(decode, encodings);
+    if !named
+        .iter()
+        .flatten()
+        .any(|(_, name)| crate::model::bvh::is_intersect_ray(name))
+    {
+        return Vec::new();
+    }
+    let Ok(blocks) = crate::blocks::split(decode, |instruction| {
+        let family = encodings
+            .encodings()
+            .get(usize::from(instruction.encoding?))?;
+        Some(family.name.clone())
+    }) else {
+        return Vec::new();
+    };
+    let reached = block_entries(decode, &named, &blocks, entry_state(first_register, count));
+    let mut sources = Vec::new();
+    for (block, state) in blocks.iter().zip(reached) {
+        let Some(mut held) = state else {
+            continue;
+        };
+        for (instruction, named) in decode.instructions[block.first..block.end]
+            .iter()
+            .zip(&named[block.first..block.end])
+        {
+            if let Some((_, name)) = named
+                && crate::model::bvh::is_intersect_ray(name)
+                && let Some(Operand::Scalar(first)) = instruction.operands.get(2)
+            {
+                let source = match descriptor(&held, *first) {
+                    Some(words) => Some(HierarchySource::Descriptor(words)),
+                    None => prefix_words(decode, instruction.offset).map(|prefix| {
+                        HierarchySource::Computed(Box::new(Computed {
+                            prefix,
+                            at: instruction.offset,
+                            through: ComputedAccess::Descriptor {
+                                first: *first,
+                                reads: DescriptorReads::default(),
+                            },
+                            soffset: SOFFSET_NULL,
+                            first_register,
+                            user_data: count,
+                            program_address: None,
+                        }))
+                    }),
+                };
+                if let Some(source) = source
+                    && !sources.contains(&source)
+                {
+                    sources.push(source);
+                }
+            }
+            step(&mut held, instruction, *named);
+        }
+    }
+    sources
 }
 
 /// The slots every access to which is one of `stores` (D809).
@@ -357,6 +492,7 @@ fn prefix_words(decode: &Decode, at: u32) -> Option<Vec<u32>> {
 /// every access's reach through it combined.
 fn slots(
     accesses: Vec<(u32, Access)>,
+    shared: &BTreeMap<u32, u32>,
     (decode, encodings): (&Decode, &EncodingTable),
     (first_register, user_data): (u32, u32),
 ) -> DrawBuffers {
@@ -375,7 +511,8 @@ fn slots(
                     continue;
                 };
                 (
-                    Key::Computed(offset),
+                    // One that shares an earlier access's descriptor is that access's (D952).
+                    Key::Computed(shared.get(&offset).copied().unwrap_or(offset)),
                     BufferSource::Computed(Box::new(Computed {
                         prefix,
                         at: offset,
@@ -397,23 +534,7 @@ fn slots(
             ),
         };
         let slot = if let Some(slot) = keys.iter().position(|k| *k == key) {
-            sources[slot] = match (sources[slot].clone(), source) {
-                (
-                    BufferSource::Descriptor { words, reads },
-                    BufferSource::Descriptor { reads: more, .. },
-                ) => BufferSource::Descriptor {
-                    words,
-                    reads: reads.and(more),
-                },
-                (
-                    BufferSource::Pointer { base, extent },
-                    BufferSource::Pointer { extent: more, .. },
-                ) => BufferSource::Pointer {
-                    base,
-                    extent: extent.max(more),
-                },
-                (kept, _) => kept,
-            };
+            sources[slot] = combined(sources[slot].clone(), source);
             slot
         } else {
             keys.push(key);
@@ -456,13 +577,136 @@ fn slots(
     buffers
 }
 
+/// One buffer's source reaching what a further access through it reaches too.
+fn combined(kept: BufferSource, more: BufferSource) -> BufferSource {
+    match (kept, more) {
+        (
+            BufferSource::Descriptor { words, reads },
+            BufferSource::Descriptor { reads: more, .. },
+        ) => BufferSource::Descriptor {
+            words,
+            reads: reads.and(more),
+        },
+        (BufferSource::Pointer { base, extent }, BufferSource::Pointer { extent: more, .. }) => {
+            BufferSource::Pointer {
+                base,
+                extent: extent.max(more),
+            }
+        }
+        // Accesses through one computed descriptor or base reach what each does (D952).
+        (BufferSource::Computed(mut kept), BufferSource::Computed(more)) => {
+            kept.through = match (kept.through, more.through) {
+                (
+                    ComputedAccess::Descriptor { first, reads },
+                    ComputedAccess::Descriptor { reads: also, .. },
+                ) => ComputedAccess::Descriptor {
+                    first,
+                    reads: reads.and(also),
+                },
+                (
+                    ComputedAccess::Pointer { base, end },
+                    ComputedAccess::Pointer { end: also, .. },
+                ) => ComputedAccess::Pointer {
+                    base,
+                    end: end.max(also),
+                },
+                (through, _) => through,
+            };
+            BufferSource::Computed(kept)
+        }
+        (kept, _) => kept,
+    }
+}
+
 /// What makes two accesses read one buffer: the same descriptor words, or the same base. A computed
-/// one is its own, by its offset.
+/// one is its own, by its offset, or the earlier access's whose descriptor it reads (D952).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Descriptor([DescriptorWord; 4]),
     Pointer(TableBase),
     Computed(u32),
+}
+
+/// What a computed access reads (D952): whether through a base pair rather than a descriptor, its
+/// first register, its scalar offset's code, and for each register it reads - the descriptor's or
+/// the pair's, then the offset's - one past the byte of the instruction in its block that last may
+/// have written it, zero where none in the block has.
+type Reading = (bool, u16, u8, [u32; 5]);
+
+/// The computed accesses of one block, as [`trace_with`] walks it (D952). Two that read the same
+/// registers, which no instruction between them may have written, read the same words: in one block
+/// the second runs exactly when the first has, with nothing in between, so the descriptor a run up
+/// to the first finds is the second's too, and one buffer serves both.
+struct ComputedSharing {
+    /// For each scalar register, one past the byte of the instruction in the block that last may
+    /// have written it; zero where none has.
+    written: Vec<u32>,
+    /// Each earlier access's [`Reading`], with its byte.
+    seen: Vec<(Reading, u32)>,
+}
+
+impl ComputedSharing {
+    fn new() -> Self {
+        Self {
+            written: vec![0; crate::model::SCALAR_REGISTERS as usize],
+            seen: Vec::new(),
+        }
+    }
+
+    /// Records the computed access at byte `at`, answering the earlier access in the block it reads
+    /// the same words as, if there is one. One whose scalar offset is a register no tracing holds -
+    /// `m0`, a lane mask - is its own.
+    fn reads(&mut self, at: u32, through: ComputedAccess, soffset: u8) -> Option<u32> {
+        let (pointer, first, count) = match through {
+            ComputedAccess::Descriptor { first, .. } => (false, first, 4),
+            ComputedAccess::Pointer { base, .. } => (true, base, 2),
+        };
+        let mut writers = [0; 5];
+        for (writer, register) in writers.iter_mut().zip(first..first + count) {
+            *writer = *self.written.get(usize::from(register))?;
+        }
+        match soffset {
+            register if u32::from(register) < crate::model::SCALAR_REGISTERS => {
+                writers[4] = *self.written.get(usize::from(register))?;
+            }
+            // `null`, and an inline constant, read no register.
+            SOFFSET_NULL | 128.. => {}
+            _ => return None,
+        }
+        let reading = (pointer, first, soffset, writers);
+        if let Some(&(_, earlier)) = self.seen.iter().find(|(seen, _)| *seen == reading) {
+            return Some(earlier);
+        }
+        self.seen.push((reading, at));
+        None
+    }
+
+    /// Notes the scalar registers an instruction may write.
+    fn step(&mut self, instruction: &Instruction, named: Option<(&str, &str)>) {
+        for register in written_registers(instruction, named) {
+            if let Some(writer) = self.written.get_mut(register) {
+                *writer = instruction.offset + 1;
+            }
+        }
+    }
+}
+
+/// The scalar registers an instruction may write, as [`step`] carries them: every register it
+/// changes from a state where each holds a value no instruction forms but by moving it - a move
+/// from a register to itself writes the value it held, and is no write.
+fn written_registers(instruction: &Instruction, named: Option<(&str, &str)>) -> Vec<usize> {
+    let marked: Held = (0..crate::model::SCALAR_REGISTERS)
+        .map(|register| Some(DescriptorWord::UserData(u32::MAX - register)))
+        .collect();
+    let mut after = marked.clone();
+    step(&mut after, instruction, named);
+    marked
+        .iter()
+        .zip(&after)
+        .enumerate()
+        .filter(|(_, (before, now))| before != now)
+        .map(|(register, _)| register)
+        .collect()
 }
 
 /// What each scalar register holds, where the program's own writes fix it: [`None`] where it could
@@ -820,13 +1064,13 @@ pub(crate) fn bound_image_access(name: &str) -> bool {
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
 /// offset register.
-const SOFFSET_NULL: u32 = 125;
+const SOFFSET_NULL: u8 = 125;
 
 /// Whether a scalar memory access adds nothing to its immediate: no offset register, and no offset
 /// bits above the sixteen the operand layout gives. Any other is left untraced.
 fn plain_scalar_offset(instruction: &Instruction) -> bool {
     let second = instruction.second_word.unwrap_or(0);
-    (second >> 25) & 0x7f == SOFFSET_NULL && solved_scalar_offset(instruction)
+    (second >> 25) & 0x7f == u32::from(SOFFSET_NULL) && solved_scalar_offset(instruction)
 }
 
 /// Whether a scalar memory access's immediate sets no offset bits above the sixteen the operand
@@ -1153,6 +1397,55 @@ mod tests {
         0x8003_0100,
         END,
     ];
+
+    /// [`COPY`] with its store an atomic minimum: the second buffer is reached only by an atomic.
+    const REDUCE: [u32; 6] = [
+        0xe030_1000, // buffer_load_dword v1, v0, s[8:11], 0 offen
+        0x8002_0100,
+        0xbf8c_3f70, // s_waitcnt vmcnt(0)
+        0xe0fc_1000, // buffer_atomic_fmin v1, v0, s[12:15], 0 offen
+        0x8003_0100,
+        END,
+    ];
+
+    /// A buffer reached only by atomics is written, and read too: an atomic folds its value into
+    /// the word already there, so the words before the run are what it reduces (D809 is for plain
+    /// stores alone). Grand Theft Auto V seeds its scene bounds at +inf and -inf and reduces every
+    /// triangle into them with `buffer_atomic_fmin` and `fmax`; started at zero instead, the bounds
+    /// it read back were never reduced, every spatial key was zero, and the tree built from them
+    /// held cycles that hung the device.
+    #[test]
+    fn a_buffer_reached_only_by_atomics_is_read() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = REDUCE.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let reduce = decode_program(&bytes, &encodings, &operands);
+        let names: Vec<String> = reduce
+            .instructions
+            .iter()
+            .map(|i| crate::instruction_name(i, &encodings))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "buffer_load_dword",
+                "s_waitcnt",
+                "buffer_atomic_fmin",
+                "s_endpgm"
+            ],
+            "the hand-assembled reduction"
+        );
+        let dispatch = trace(&reduce, &encodings, (0, 16), (true, false));
+        assert_eq!(
+            dispatch.stored,
+            std::collections::BTreeSet::from([1]),
+            "the atomic's buffer is written"
+        );
+        assert!(
+            dispatch.stored_only.is_empty(),
+            "the atomic's buffer is read before it is written, so it is not stored to alone"
+        );
+    }
 
     /// A dispatch's image store does not keep its buffers from being traced: the image is bound
     /// whole and written back, as the dispatch's buffers are (D746). Grand Theft Auto V's first
@@ -1628,6 +1921,52 @@ mod tests {
         ));
     }
 
+    /// Computed loads through one descriptor that nothing between them writes, in one block, share
+    /// a buffer, which reaches what each reads (D952). A write to the descriptor between them, or
+    /// a block boundary, gives the later load a buffer of its own.
+    #[test]
+    fn computed_loads_through_one_unwritten_descriptor_share_a_buffer() {
+        let add = [0x8100_ff00, 0x0000_0040]; // s_add_i32 s0, s0, 0x40
+        let first = [0xf420_0200, 0xfa00_0000]; // s_buffer_load_dword s8, s[0:3], 0x0
+        let second = [0xf420_0240, 0xfa00_0004]; // s_buffer_load_dword s9, s[0:3], 0x4
+        let program = [
+            add[0], add[1], first[0], first[1], second[0], second[1], add[0], add[1], first[0],
+            first[1], END,
+        ];
+        let buffers = traced(&program, 4);
+        assert_eq!(
+            buffers
+                .served
+                .iter()
+                .map(|(&at, &slot)| (at, slot))
+                .collect::<Vec<_>>(),
+            [(0x8, 0), (0x10, 0), (0x20, 1)]
+        );
+        let [BufferSource::Computed(shared), BufferSource::Computed(_)] =
+            buffers.sources.as_slice()
+        else {
+            panic!("two computed buffers: {:?}", buffers.sources);
+        };
+        assert_eq!(shared.at, 0x8, "found from the first load's prefix");
+        let super::ComputedAccess::Descriptor { reads, .. } = shared.through else {
+            panic!("through a descriptor");
+        };
+        assert_eq!(reads.scalar_reach, 8, "the second load's word too");
+
+        // s_cbranch_scc0 +0: the next instruction starts a block.
+        let split = [
+            add[0],
+            add[1],
+            first[0],
+            first[1],
+            0xbf85_0000,
+            second[0],
+            second[1],
+            END,
+        ];
+        assert_eq!(traced(&split, 4).sources.len(), 2);
+    }
+
     /// A 32-bit scalar write forgets its own register and not the next: `s_add_i32 s3, s3, s3`
     /// leaves the descriptor in `s[4:7]` the user data's, as PPSA02664's vertex shader writes `s7`
     /// by `s_bfe_u32` below a descriptor in `s[8:11]`. A 64-bit one forgets the pair, and the load
@@ -1971,5 +2310,66 @@ mod tests {
         );
         assert_eq!((computed.first_register, computed.user_data), (0, 6));
         assert_eq!(buffers.served.get(&4), Some(&0));
+    }
+
+    /// Each ray intersection's hierarchy descriptor is traced as a buffer descriptor is: from user
+    /// data, from a table at a user-data base, or - once the program changes a word of it - computed
+    /// per dispatch from the program before it (D753). One descriptor read twice is one source.
+    #[test]
+    fn a_ray_intersection_s_descriptor_is_traced() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let program = [
+            0xf408_0100, // s_load_dwordx4 s[4:7], s[0:1], 0x10
+            0xfa00_0010,
+            WAIT,
+            0xf198_9f01, // image_bvh_intersect_ray v[4:7], v[0:10], s[8:11]
+            0x0002_0400,
+            0xf198_9f01, // image_bvh_intersect_ray v[4:7], v[0:10], s[4:7]
+            0x0001_0400,
+            0xf198_9f01, // image_bvh_intersect_ray v[4:7], v[0:10], s[8:11]
+            0x0002_0400,
+            0x8004_0c04, // s_add_u32 s4, s4, s12
+            0xf198_9f01, // image_bvh_intersect_ray v[4:7], v[0:10], s[4:7]
+            0x0001_0400,
+            END,
+        ];
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
+        let sources = super::trace_hierarchies(&decoded, &encodings, (0, 16));
+        let table = TableBase {
+            low: TableWord::UserData(0),
+            high: TableWord::UserData(1),
+        };
+        let loaded = |offset| DescriptorWord::Loaded { table, offset };
+        let [
+            super::HierarchySource::Descriptor(from_user_data),
+            super::HierarchySource::Descriptor(from_table),
+            super::HierarchySource::Computed(computed),
+        ] = sources.as_slice()
+        else {
+            panic!("two traced descriptors and a computed one: {sources:?}");
+        };
+        assert_eq!(
+            *from_user_data,
+            [8, 9, 10, 11].map(DescriptorWord::UserData)
+        );
+        assert_eq!(
+            *from_table,
+            [loaded(0x10), loaded(0x14), loaded(0x18), loaded(0x1c)]
+        );
+        assert_eq!(
+            (computed.at, computed.through, computed.soffset),
+            (
+                40,
+                super::ComputedAccess::Descriptor {
+                    first: 4,
+                    reads: DescriptorReads::default()
+                },
+                125
+            )
+        );
+        assert_eq!(computed.prefix, program[..10]);
     }
 }

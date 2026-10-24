@@ -146,14 +146,27 @@ struct Spare {
 }
 
 /// The spares, on the session's one device.
-fn spares() -> &'static std::sync::Mutex<Vec<Spare>> {
-    static SPARES: std::sync::Mutex<Vec<Spare>> = std::sync::Mutex::new(Vec::new());
+fn spares() -> &'static orbistoun_gpu::tally::Tallied<Vec<Spare>, 1> {
+    static SPARES: orbistoun_gpu::tally::Tallied<Vec<Spare>, 1> =
+        orbistoun_gpu::tally::Tallied::new(Vec::new(), |spares| {
+            [spares
+                .iter()
+                .filter(|spare| spare.flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE))
+                .map(|spare| spare.size)
+                .sum()]
+        });
     &SPARES
 }
 
 /// The most bytes the spares hold together: two 32 MiB buffers - a display buffer's staging and
 /// bound copies - and the slots' placeholders, with room to spare.
 const SPARE_BYTES_MOST: vk::DeviceSize = 160 << 20;
+
+/// The bytes the spares hold in memory the host can see: what they cost the process beside the
+/// device. As they were last let go, read without their lock.
+pub(crate) fn spare_host_bytes() -> u64 {
+    spares().tallies()[0]
+}
 
 /// Keeps a released buffer among the spares, or destroys it when they hold enough already.
 fn release(
@@ -242,6 +255,7 @@ fn new_buffer_in(
     let allocate = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type);
+    let _for = crate::device_memory::purpose("dispatch buffers");
     // SAFETY: the allocation info is fully initialised and the device is live.
     let memory = match unsafe { device.allocate_memory(&allocate, None) } {
         Ok(memory) => memory,
@@ -274,9 +288,9 @@ pub(crate) struct BoundBuffers {
     /// One per slot of the dispatch's own; every other element of the bound array binds one of
     /// these, which the module never reaches.
     slots: Vec<Slot>,
-    /// For each buffer handed over, in order, the slot that holds it: its own, or the earlier one
-    /// it aliases (D937).
-    held_at: Vec<usize>,
+    /// For each buffer handed over, in order, the slot that holds it - its own, or the one it
+    /// aliases - and how many bytes into it it is bound from (D937, D953).
+    held_at: Vec<(usize, u64)>,
     /// The set's layout, set one of the pipeline.
     pub(crate) layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -367,8 +381,10 @@ pub enum BufferIn<'a> {
     /// A buffer of this many words the program only stores to: nothing is read or uploaded, and
     /// the device starts it at zero.
     Unread(usize),
-    /// The buffer handed at this earlier index, bound here too (D937).
-    Alias(usize),
+    /// The buffer handed at this other index, bound here too from this many bytes into it: the same
+    /// range (D937), or part of one overlapping ranges share (D953). The offset is a multiple of the
+    /// device's `minStorageBufferOffsetAlignment`, or the buffers are refused.
+    Alias(usize, u64),
 }
 
 impl BufferIn<'_> {
@@ -377,10 +393,65 @@ impl BufferIn<'_> {
         match self {
             Self::Words(words) => words.len(),
             Self::Unread(words) => words,
-            Self::Alias(_) => 1,
+            Self::Alias(..) => 1,
         }
         .max(1)
     }
+}
+
+/// The device's `minStorageBufferOffsetAlignment`, at least a word.
+fn alignment_of(instance: &ash::Instance, physical: vk::PhysicalDevice) -> u64 {
+    // SAFETY: the physical device belongs to the live instance.
+    unsafe { instance.get_physical_device_properties(physical) }
+        .limits
+        .min_storage_buffer_offset_alignment
+        .max(4)
+}
+
+/// For each buffer handed over, which of those with a buffer of their own it binds, counted among
+/// them, and from how many bytes into it: its own from zero, or an alias's holder from the alias's
+/// offset (D937, D953).
+///
+/// # Errors
+///
+/// An alias of an alias, or one the device cannot bind: its offset not a multiple of `alignment`,
+/// or not inside the holder.
+fn held_slots(
+    contents: &[BufferIn<'_>],
+    alignment: u64,
+) -> Result<Vec<(usize, u64)>, DispatchError> {
+    let mut own = Vec::with_capacity(contents.len());
+    let mut next = 0;
+    for handed in contents {
+        if matches!(handed, BufferIn::Alias(..)) {
+            own.push(None);
+        } else {
+            own.push(Some(next));
+            next += 1;
+        }
+    }
+    contents
+        .iter()
+        .zip(&own)
+        .map(|(&handed, &slot)| match (handed, slot) {
+            (BufferIn::Alias(holder, offset), None) => {
+                let slot = own.get(holder).copied().flatten().ok_or_else(|| {
+                    DispatchError::Unsupported(
+                        "a buffer aliases one that is itself an alias, or none (D937, D953)"
+                            .to_owned(),
+                    )
+                })?;
+                let bytes = contents[holder].words() as u64 * 4;
+                if offset % alignment != 0 || offset >= bytes {
+                    return Err(DispatchError::Unsupported(format!(
+                        "a buffer shares another's from byte {offset:#x}, which is past its end or not a multiple of the device's storage buffer offset alignment, {alignment:#x} (D953)"
+                    )));
+                }
+                Ok((slot, offset))
+            }
+            (_, slot) => Ok((slot.unwrap_or(0), 0)),
+        })
+        .collect()
 }
 
 /// A dispatch's buffer after it ran: its words, and - for one handed over unread - its write
@@ -427,28 +498,21 @@ impl BoundBuffers {
         let context = (instance, physical, device);
         // Buffers for the dispatch's own slots only: the module reaches no other, so the rest of
         // the array binds one of these.
-        // A buffer handed as an alias binds the slot it names; every other its own (D937).
+        // A buffer handed as an alias binds the one it names, from its offset; every other its own
+        // (D937, D953).
+        let held_at = held_slots(contents, alignment_of(instance, physical))?;
         let mut slots = Vec::with_capacity(contents.len());
-        let mut held_at = Vec::with_capacity(contents.len());
         for &handed in contents {
-            if let BufferIn::Alias(earlier) = handed {
-                let held = *held_at.get(earlier).ok_or_else(|| {
-                    DispatchError::Unsupported(
-                        "a buffer aliases one handed over after it (D937)".to_owned(),
-                    )
-                })?;
-                held_at.push(held);
-                continue;
+            if !matches!(handed, BufferIn::Alias(..)) {
+                slots.push(Slot::create(context, handed)?);
             }
-            held_at.push(slots.len());
-            slots.push(Slot::create(context, handed)?);
         }
         let lists = bind_lists(device, &mut slots)?;
         let bound_at = |index: usize| {
             held_at
                 .get(index)
-                .and_then(|&held| slots.get(held))
-                .unwrap_or(&slots[0])
+                .and_then(|&(held, offset)| Some((slots.get(held)?, offset)))
+                .unwrap_or((&slots[0], 0))
         };
 
         let bindings = layout_bindings();
@@ -474,17 +538,20 @@ impl BoundBuffers {
             .map_err(|e| DispatchError::Vulkan("allocate_descriptor_sets", e))?[0];
         let infos: Vec<vk::DescriptorBufferInfo> = (0..DRAW_BUFFERS_PER_STAGE as usize)
             .map(|index| {
-                let slot = bound_at(index);
+                // An alias from its offset to the holder's end, so the bytes past its own range
+                // are the holder's, as on the guest (D953).
+                let (slot, offset) = bound_at(index);
                 vk::DescriptorBufferInfo::default()
                     .buffer(slot.bound.0)
-                    .offset(0)
-                    .range(slot.staging.size)
+                    .offset(offset)
+                    .range(slot.staging.size - offset)
             })
             .collect();
-        // Every slot of the dispatch's own has a mask; the rest of the array binds slot zero's.
+        // Every slot of the dispatch's own has a mask; the rest of the array binds slot zero's. An
+        // alias marks the holder's mask from its offset, a word for each word.
         let masks: Vec<vk::DescriptorBufferInfo> = (0..DRAW_BUFFERS_PER_STAGE as usize)
             .map(|index| {
-                let slot = bound_at(index);
+                let (slot, offset) = bound_at(index);
                 let (buffer, size) = slot
                     .mask
                     .as_ref()
@@ -493,8 +560,8 @@ impl BoundBuffers {
                     });
                 vk::DescriptorBufferInfo::default()
                     .buffer(buffer)
-                    .offset(0)
-                    .range(size)
+                    .offset(offset)
+                    .range(size - offset)
             })
             .collect();
         let writes = [
@@ -733,11 +800,12 @@ impl BoundBuffers {
                 })
             })
             .collect::<Result<_, DispatchError>>()?;
-        // Each buffer handed over answers its slot's words; an alias, the slot it shares (D937).
+        // Each buffer handed over answers its slot's words; an alias, the slot it shares (D937), as
+        // the host writes back only that slot's.
         Ok(self
             .held_at
             .iter()
-            .filter_map(|&slot| held.get(slot).cloned())
+            .filter_map(|&(slot, _)| held.get(slot).cloned())
             .collect())
     }
 
@@ -1016,14 +1084,18 @@ fn copy_back(
             .map_err(|e| DispatchError::Vulkan("create_fence(copy back)", e))?;
         let commands = [command];
         let submits = [vk::SubmitInfo::default().command_buffers(&commands)];
+        let serial = crate::device_lost::submit(crate::device_lost::Kind::Copy);
         // SAFETY: the recording is complete, the queue is this device's, and the fence is fresh.
         let waited = unsafe { device.queue_submit(queue, &submits, fence) }
-            .map_err(|e| DispatchError::Vulkan("queue_submit(copy back)", e))
+            .map_err(crate::device_lost::vulkan("queue_submit(copy back)"))
             .and_then(|()| {
                 // SAFETY: the fence was submitted with the work just above.
                 unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
-                    .map_err(|e| DispatchError::Vulkan("wait_for_fences(copy back)", e))
+                    .map_err(crate::device_lost::vulkan("wait_for_fences(copy back)"))
             });
+        if waited.is_ok() {
+            crate::device_lost::complete(serial);
+        }
         // SAFETY: the submission it fenced has completed, or was never made.
         unsafe { device.destroy_fence(fence, None) };
         waited
@@ -1153,6 +1225,36 @@ fn memory_barrier(
 
 #[cfg(test)]
 mod tests {
+    /// An alias binds the buffer it names from its offset, whether that buffer is handed over
+    /// before or after it (D953); one into an alias, past the holder's end, or at an offset the
+    /// device cannot bind is refused.
+    #[test]
+    fn an_alias_binds_its_holder_from_its_offset() {
+        use super::{BufferIn, held_slots};
+        let words = [0_u32; 64];
+        let held = held_slots(
+            &[
+                BufferIn::Alias(1, 0x40),
+                BufferIn::Words(&words),
+                BufferIn::Unread(8),
+                BufferIn::Alias(2, 0),
+            ],
+            16,
+        )
+        .expect("bound");
+        assert_eq!(held, [(0, 0x40), (0, 0), (1, 0), (1, 0)]);
+        for (contents, why) in [
+            (
+                [BufferIn::Words(&words), BufferIn::Alias(0, 0x48)],
+                "unaligned",
+            ),
+            ([BufferIn::Words(&words), BufferIn::Alias(0, 0x100)], "past"),
+            ([BufferIn::Alias(1, 0), BufferIn::Alias(0, 0)], "an alias"),
+        ] {
+            assert!(held_slots(&contents, 16).is_err(), "{why}");
+        }
+    }
+
     /// The radix order is a plain sort's, short lists and long, indices high and low.
     #[test]
     fn pairs_order_by_index_as_a_plain_sort_does() {

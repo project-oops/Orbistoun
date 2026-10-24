@@ -262,6 +262,41 @@ pub const DUMP_IMAGE: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// Guest compute programs whose first dispatch, or with `:all` each of their first 32, is written
+/// out whole before it is submitted, so it can be run again alone with
+/// `orbistoun-cli replay-dispatch`. A dispatch that loses the device is written out without it.
+pub const CAPTURE_DISPATCH: Var = Var {
+    name: "ORBISTOUN_CAPTURE_DISPATCH",
+    kind: Kind::Diagnostic,
+    summary: "a comma-separated list of compute program guest addresses: each one's first dispatch is written to dispatch-<addr>/ in ORBISTOUN_FRAME_DIR before it is submitted, for orbistoun-cli replay-dispatch; <addr>:all writes each of its first 32 dispatches to dispatch-<addr>-<n>/",
+    example: "0x400003ce6000:all,0x400003dc3400",
+    effect: Effect::Observes,
+    read_by: "orbistoun-gpu-vulkan",
+};
+
+/// How many of the latest guest compute dispatches are kept, so a loss of the device writes out
+/// the history that led to it.
+pub const CAPTURE_RECENT: Var = Var {
+    name: "ORBISTOUN_CAPTURE_RECENT",
+    kind: Kind::Diagnostic,
+    summary: "a count: the latest that many compute dispatches, within 256 MiB, are copied as they run, and a loss of the device writes them to dispatch-<addr>-r<ordinal>/ in ORBISTOUN_FRAME_DIR, listed in dispatch-recent.txt; unset, nothing is copied",
+    example: "32",
+    effect: Effect::Observes,
+    read_by: "orbistoun-gpu-vulkan",
+};
+
+/// Guest memory ranges whose changes are named: by the command-processor packet after which they
+/// changed, and by the compute dispatch that changed them, captured whole up to a cap; with
+/// `:bound`, every dispatch that binds one.
+pub const WATCH_GPU: Var = Var {
+    name: "ORBISTOUN_WATCH_GPU",
+    kind: Kind::Diagnostic,
+    summary: "<addr>+<len>[:bound], comma-separated: the command-processor packet after which the range's bytes changed is logged, whatever wrote them, and a change found as a stream starts is the guest CPU's or other work's; each compute dispatch whose results change words there is logged by binding and the first 16 captured to dispatch-<addr>-w<n>/; with :bound each dispatch that binds the range is logged with its slots, how each is bound and its atomics, and the first 16 captured to dispatch-<addr>-b<n>/, in ORBISTOUN_FRAME_DIR",
+    example: "0x74009d05d740+0x18:bound",
+    effect: Effect::Observes,
+    read_by: "orbistoun-gpu",
+};
+
 /// A texture to watch for guest writes, instead of the first one the flipped frame sampled that
 /// nothing tracked filled: what fills a texture a frame reads further back than that is found.
 pub const WATCH_TEXTURE: Var = Var {
@@ -438,6 +473,16 @@ pub const HEAP_FILL: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Log every large allocation of the worker's own heap with where it was made.
+pub const HOST_HEAP_SAMPLE: Var = Var {
+    name: "ORBISTOUN_HOST_HEAP_SAMPLE",
+    kind: Kind::Diagnostic,
+    summary: "log each allocation of the worker's own heap of at least this many MiB with a short backtrace, and each such block freed - which holder is the heap's unnamed?",
+    example: "64",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
 /// Serve every allocation from a region at a fixed address, instead of from the host heap.
 pub const HEAP_BASE: Var = Var {
     name: "ORBISTOUN_HEAP_BASE",
@@ -567,6 +612,24 @@ pub const SUBMIT: Var = Var {
 
 /// The value of [`SUBMIT`] that carries submissions out asynchronously.
 pub const SUBMIT_ASYNC: &str = "async";
+
+/// When a flip is shown.
+///
+/// Unset, a flip waits for the display's next blank, 59.94 times a second, as on the console, so a
+/// title runs at 60, 30 or 20 frames a second (D929). `immediate` shows each flip on the blank under
+/// way, so a title runs as fast as the host lets it; `perf`, `bench` and `ab` set it, so their
+/// numbers measure the emulator rather than the display.
+pub const FLIP_PACING: Var = Var {
+    name: "ORBISTOUN_FLIP_PACING",
+    kind: Kind::Setting,
+    summary: "`immediate` shows each flip at once rather than at the display's next blank, so a title runs as fast as the host lets it",
+    example: "immediate",
+    read_by: "orbistoun-video",
+    effect: Effect::Observes,
+};
+
+/// The value of [`FLIP_PACING`] that shows each flip at once.
+pub const FLIP_PACING_IMMEDIATE: &str = "immediate";
 
 /// How the window plays a title, each variable unless it is already set: on the host clock (D723),
 /// with its GPU work alongside it (D821). A run measured for its speed - `perf`, `bench`, `ab` -
@@ -862,6 +925,16 @@ pub const WATCHPOINT: Var = Var {
     effect: Effect::Observes,
 };
 
+/// Count watchpoint traces only from a flip on.
+pub const WATCH_FROM: Var = Var {
+    name: "ORBISTOUN_WATCH_FROM",
+    kind: Kind::Diagnostic,
+    summary: "the guest flip from which watchpoint traces are counted and tallied - the phase a question is about, without the boot and loading frames before it",
+    example: "5560",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
 /// Write self-identifying values into the memory-query structure.
 pub const MARK_QUERY: Var = Var {
     name: "ORBISTOUN_MARK_QUERY",
@@ -892,6 +965,9 @@ pub const REGISTRY: &[Var] = &[
     FRAME_DIR,
     WATCH_TEXTURE,
     DUMP_IMAGE,
+    CAPTURE_DISPATCH,
+    CAPTURE_RECENT,
+    WATCH_GPU,
     CAPTURE_POSITIONS,
     LIMIT,
     COMMIT,
@@ -919,13 +995,16 @@ pub const REGISTRY: &[Var] = &[
     CLOCK,
     AUDIO,
     SUBMIT,
+    FLIP_PACING,
     RUNTIME_GLOBALS,
     HEAP_FILL,
+    HOST_HEAP_SAMPLE,
     HEAP_BASE,
     START_MODULES,
     FINDINGS,
     WATCH,
     WATCHPOINT,
+    WATCH_FROM,
     POKE,
     HOLD,
     FIND,
@@ -992,6 +1071,9 @@ mod tests {
         super::FRAME_DIR,
         super::WATCH_TEXTURE,
         super::DUMP_IMAGE,
+        super::CAPTURE_DISPATCH,
+        super::CAPTURE_RECENT,
+        super::WATCH_GPU,
         super::CAPTURE_POSITIONS,
         super::LIMIT,
         super::COMMIT,
@@ -1019,8 +1101,10 @@ mod tests {
         super::CLOCK,
         super::AUDIO,
         super::SUBMIT,
+        super::FLIP_PACING,
         super::RUNTIME_GLOBALS,
         super::HEAP_FILL,
+        super::HOST_HEAP_SAMPLE,
         super::HEAP_BASE,
         super::START_MODULES,
         super::FINDINGS,
@@ -1039,6 +1123,7 @@ mod tests {
         super::PEEK,
         super::MARK_QUERY,
         super::WATCHPOINT,
+        super::WATCH_FROM,
     ];
 
     /// Every declared constant is in the registry.

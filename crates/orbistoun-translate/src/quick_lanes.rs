@@ -841,7 +841,7 @@ pub fn run(
     run_from(
         state,
         program,
-        (lanes, 4 * program.steps.len()),
+        (lanes, &mut (4 * program.steps.len() + 1)),
         (read, &mut 0),
     )
 }
@@ -850,13 +850,13 @@ pub fn run(
 /// [`crate::evaluate::wave_lane_addresses`] answers: the user data from `s0`, then the group ids;
 /// each lane with a thread its id components from `v0` and its execution-mask bit.
 ///
-/// The run follows at most `bound` steps: a dispatch's loop can take far more than the model
-/// follows, and the native run is what follows it.
+/// The run follows at most `allowed` steps, each counted off it: a dispatch's loop can take far
+/// more than the model follows, and the native run is what follows it.
 pub fn run_wave(
     program: &Program,
     user_data: &[u32],
     (width, wave): (u32, &crate::evaluate::WaveEntry),
-    (bound, read): (usize, &mut dyn FnMut(u64) -> Option<u32>),
+    (allowed, read): (&mut usize, &mut dyn FnMut(u64) -> Option<u32>),
 ) -> Result<crate::evaluate::LaneAddresses, u32> {
     let width = width.clamp(1, 64);
     let lanes = u32::try_from(wave.threads.len())
@@ -891,33 +891,32 @@ pub fn run_wave(
     state.scalars[EXEC] = Some(mask as u32);
     state.scalars[EXEC + 1] = Some((mask >> 32) as u32);
     let mut last = 0;
-    run_from(state, program, (lanes, bound), (read, &mut last)).ok_or(last)
+    run_from(state, program, (lanes, allowed), (read, &mut last)).ok_or(last)
 }
 
 /// The run [`run`] and [`run_wave`] share, from the wave's entry; `last` holds the byte of the step
 /// it took last, which is the one it declined at when it answers `None`, or [`u32::MAX`] where it
-/// ran out of steps.
+/// ran out of steps. Each step is counted off `allowed`.
 fn run_from(
     mut state: Lanes,
     program: &Program,
-    (lanes, bound): (u32, usize),
+    (lanes, allowed): (u32, &mut usize),
     (read, last): (&mut dyn FnMut(u64) -> Option<u32>, &mut u32),
 ) -> Option<crate::evaluate::LaneAddresses> {
     let modelled = state.modelled;
     let mut found = Vec::new();
     let mut at = 0usize;
-    let mut steps = 0usize;
     while let Some(&step) = program.steps.get(at) {
         if program.offsets[at] > program.until {
             break;
         }
         // A run its bound cuts short is declined: the model refuses it by name.
-        if steps > bound {
+        let Some(left) = allowed.checked_sub(1) else {
             *last = u32::MAX;
             return None;
-        }
+        };
+        *allowed = left;
         *last = program.offsets[at];
-        steps += 1;
         at += 1;
         match step {
             Step::Nothing => {}

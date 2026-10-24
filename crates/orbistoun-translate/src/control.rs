@@ -220,11 +220,21 @@ fn emit_loop<M: Model + ?Sized>(
             if is_terminator(instruction, family_of) {
                 continue;
             }
+            // An instruction whose lanes each do the same work runs them as one loop, where the
+            // model runs the whole wave in one invocation, rather than each emitted in turn.
+            let looped = model::lane_looped(model, instruction) && model.open_lane_loop();
             model::instruction(model, instruction)?;
+            if looped {
+                model.close_lane_loop();
+            }
         }
         translated += model.instructions() - before;
 
-        let next = successor(model, decode, block, blocks, exit)?;
+        let mut next = successor(model, decode, block, blocks, exit)?;
+        if jumps_back(block, blocks, index) {
+            let branch = decode.instructions[block.end - 1].offset;
+            next = cap_loop(model, (next, to_u32(index)?), exit, branch);
+        }
         store_counter(model, next);
         model.builder().function(op::BRANCH, &[after.0]);
     }
@@ -247,6 +257,65 @@ fn emit_loop<M: Model + ?Sized>(
     // The epilogue goes here, written by the caller.
     model.builder().function(op::LABEL, &[merge.0]);
     Ok(translated)
+}
+
+/// Backward jumps one invocation takes before the loop it is in is cut and reported (D949).
+///
+/// Counted across every loop of the program, so it bounds the work of one invocation, which is what
+/// the host's watchdog bounds. A loop of three scalar instructions run to the cap takes tens of
+/// milliseconds (`a_loop_at_the_cap_runs_and_one_past_it_is_cut` prints it), so a much heavier body
+/// is still cut inside the watchdog, and no loop a guest bounds by its data comes near it.
+pub const LOOP_CAP: u32 = 1 << 20;
+
+/// Whether the branch ending `block`, the arm at `index`, can jump back: its taken target is that
+/// block or one before it.
+fn jumps_back(block: &Block, all: &[Block], index: usize) -> bool {
+    match block.terminator {
+        Terminator::Jump { target } | Terminator::Branch { target, .. } => {
+            blocks::block_at(all, target).is_some_and(|to| to <= index)
+        }
+        Terminator::End | Terminator::Fallthrough { .. } => false,
+    }
+}
+
+/// Counts a backward jump against the model's loop budget, and sends the invocation to `exit` - the
+/// program's end, as `s_endpgm` does - once its jumps pass [`LOOP_CAP`], recording the loop it cut
+/// by its backward branch's offset, `branch` (D949). `next` is the block the arm `index` leaves for;
+/// it jumps back where it is at or before `index`. A model with no budget runs the loop as the
+/// guest wrote it.
+fn cap_loop<M: Model + ?Sized>(
+    model: &mut M,
+    (next, index): (Id, u32),
+    exit: u32,
+    branch: u32,
+) -> Id {
+    let Some(budget) = model.loop_budget() else {
+        return next;
+    };
+    let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
+    let own = model.constant(index);
+    let (zero, one) = (model.constant(0), model.constant(1));
+    let (cap, end) = (model.constant(LOOP_CAP), model.constant(exit));
+    let b = model.builder();
+    let backward = b.id();
+    b.function(
+        op::ULESS_THAN_EQUAL,
+        &[bool_type.0, backward.0, next.0, own.0],
+    );
+    let step = b.id();
+    b.function(op::SELECT, &[u32_type.0, step.0, backward.0, one.0, zero.0]);
+    let before = b.id();
+    b.function(op::LOAD, &[u32_type.0, before.0, budget.0]);
+    let after = b.id();
+    b.function(op::IADD, &[u32_type.0, after.0, before.0, step.0]);
+    b.function(op::STORE, &[budget.0, after.0]);
+    let cut = b.id();
+    b.function(op::UGREATER_THAN, &[bool_type.0, cut.0, after.0, cap.0]);
+    model.note_loop_cut(cut, branch);
+    let b = model.builder();
+    let chosen = b.id();
+    b.function(op::SELECT, &[u32_type.0, chosen.0, cut.0, end.0, next.0]);
+    chosen
 }
 
 /// `value` as a program counter value.
@@ -352,13 +421,16 @@ fn branch_condition_value<M: Model + ?Sized>(
     let (low, high) = model.read_lane_mask(name)?;
     // Only the lanes this model simulates. A one-lane fragment module's mask can carry bits
     // for lanes it does not have (an all-ones entry mask, a whole-quad expansion), so "is any
-    // lane live" is asked of its own lanes.
+    // lane live" is asked of its own lanes; a wave of 32's upper half is a register of its own,
+    // which its compares leave as it was.
     let lanes = model.lanes();
-    let any = if lanes < 32 {
-        let existing = model.constant((1 << lanes) - 1);
-        model.binary(op::BITWISE_AND, low, existing)
-    } else {
-        model.binary(op::BITWISE_OR, low, high)
+    let any = match lanes.cmp(&32) {
+        std::cmp::Ordering::Less => {
+            let existing = model.constant((1 << lanes) - 1);
+            model.binary(op::BITWISE_AND, low, existing)
+        }
+        std::cmp::Ordering::Equal => low,
+        std::cmp::Ordering::Greater => model.binary(op::BITWISE_OR, low, high),
     };
     let zero = model.constant(0);
     let bool_type = model.bool_type();

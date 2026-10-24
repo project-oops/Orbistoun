@@ -27,6 +27,16 @@ const PGM_HI: u32 = 0xB834 / 4;
 const PGM_RSRC1: u32 = 0xB848 / 4;
 /// `COMPUTE_PGM_RSRC2`.
 const PGM_RSRC2: u32 = 0xB84C / 4;
+/// `COMPUTE_TMPRING_SIZE`: `WAVES` in bits 11:0 and `WAVESIZE`, each wave's scratch, in bits 24:12
+/// (`gfx10.json`).
+const TMPRING_SIZE: u32 = 0xB860 / 4;
+/// `COMPUTE_TMPRING_SIZE.WAVESIZE` counts 1 KiB units before GFX11 (Mesa
+/// `src/amd/common/ac_gpu_info.c:1617`, `scratch_wavesize_granularity_shift`, applied at
+/// `src/amd/common/ac_shader_util.c:1078-1079`).
+const WAVESIZE_UNIT_SHIFT: u32 = 10;
+/// The most scratch a wave is given, in bytes: 256 KiB, a private array of 64 Ki words a wave that
+/// a module still declares (D954). `WAVESIZE` reaches 8 MiB; a dispatch asking more is refused.
+const MOST_SCRATCH_WAVE_BYTES: u32 = 256 << 10;
 /// `COMPUTE_USER_DATA_0`; sixteen follow.
 const USER_DATA_0: u32 = 0xB900 / 4;
 /// User-data registers a compute wave can take.
@@ -156,6 +166,50 @@ fn thread_groups(
     Ok((groups, partial))
 }
 
+/// The byte offsets of a dispatch's program's scratch accesses (D954): none where it has no
+/// scratch.
+#[must_use]
+pub fn scratch_accesses(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+) -> std::collections::BTreeSet<u32> {
+    if state.inputs.scratch_wave_bytes == 0 {
+        return std::collections::BTreeSet::new();
+    }
+    let user_sgprs = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
+    orbistoun_translate::scratch::accesses(
+        decode,
+        encodings,
+        Some(orbistoun_translate::scratch::offset_register(
+            user_sgprs,
+            &state.inputs,
+        )),
+    )
+}
+
+/// The scratch each wave of a dispatch holds, in bytes (D954): none where `RSRC2.SCRATCH_EN` is
+/// clear, else `COMPUTE_TMPRING_SIZE.WAVESIZE` in its 1 KiB units.
+fn scratch_wave_bytes(rsrc2_word: u32, tmpring: Option<u32>) -> Result<u32, &'static str> {
+    if rsrc2_word & rsrc2::SCRATCH_EN == 0 {
+        return Ok(0);
+    }
+    let Some(tmpring) = tmpring else {
+        return Err(
+            "the program asks for scratch (SCRATCH_EN) and COMPUTE_TMPRING_SIZE was never written, so how much each wave holds is unknown",
+        );
+    };
+    let bytes = ((tmpring >> 12) & 0x1FFF) << WAVESIZE_UNIT_SHIFT;
+    if bytes == 0 {
+        return Err(
+            "the program asks for scratch (SCRATCH_EN) and COMPUTE_TMPRING_SIZE gives none",
+        );
+    }
+    if bytes > MOST_SCRATCH_WAVE_BYTES {
+        return Err("the program asks for more scratch a wave than a module holds (D954)");
+    }
+    Ok(bytes)
+}
+
 /// The program a dispatch at `packet_offset` runs, from `COMPUTE_PGM_LO`/`HI` in force there: `None`
 /// when either was never written.
 #[must_use]
@@ -176,7 +230,8 @@ pub fn program_at(writes: &[RegisterWrite], packet_offset: u32) -> Option<u64> {
 ///
 /// A register the dispatch depends on that the stream never wrote, or a field asking for something
 /// not modelled: a partial group, a grid in threads no group shape covers, ordered append, scratch
-/// memory, a trap handler or exceptions, the group-size register, or a start that is not zero.
+/// memory whose size `COMPUTE_TMPRING_SIZE` does not give, a trap handler or exceptions, the
+/// group-size register, or a start that is not zero.
 pub fn state_at(
     writes: &[RegisterWrite],
     packet_offset: u32,
@@ -200,10 +255,6 @@ pub fn state_at(
     };
     for (mask, why) in [
         (
-            rsrc2::SCRATCH_EN,
-            "scratch memory (SCRATCH_EN) is not modelled",
-        ),
-        (
             rsrc2::TRAP_PRESENT,
             "a trap handler (TRAP_PRESENT) is not modelled",
         ),
@@ -220,6 +271,7 @@ pub fn state_at(
             return Err(why);
         }
     }
+    let scratch_wave_bytes = scratch_wave_bytes(rsrc2_word, latest(TMPRING_SIZE))?;
     let user_sgprs = (rsrc2_word >> rsrc2::USER_SGPR_SHIFT) & rsrc2::USER_SGPR_MASK;
     if user_sgprs > USER_DATA_WORDS {
         return Err("more user SGPRs than there are compute user-data registers");
@@ -271,6 +323,9 @@ pub fn state_at(
             integer_images: [false; 2],
             integer_fetched: 0,
             first_thread: 0,
+            // Set where the preparation binds its buffers (D951).
+            sampled_buffers: 0,
+            scratch_wave_bytes,
         },
         width: if initiator_word & initiator::CS_W32_EN != 0 {
             Width::Wave32
@@ -339,17 +394,35 @@ pub fn place_window_except(
     served: &BTreeMap<u32, u32>,
     readable: impl Fn(u64, u64) -> bool,
 ) -> Result<Option<Window>, &'static str> {
+    place_window_over(state, (decode, encodings), (served, &[]), readable)
+}
+
+/// [`place_window_except`] over `hierarchies` as well, the `(first byte, bytes)` ranges of the
+/// hierarchies its ray intersections read through the window: the window then spans as many as
+/// [`HIERARCHY_WINDOW_WORDS`].
+fn place_window_over(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    (served, hierarchies): (&BTreeMap<u32, u32>, &[(u64, u64)]),
+    readable: impl Fn(u64, u64) -> bool,
+) -> Result<Option<Window>, &'static str> {
     let families = encodings.encodings();
     let mut span: Option<(u64, u64)> = None;
+    // A wave's scratch is its own private memory, which no window holds (D954).
+    let scratch = scratch_accesses(state, (decode, encodings));
     for instruction in &decode.instructions {
-        if served.contains_key(&instruction.offset) {
+        if served.contains_key(&instruction.offset) || scratch.contains(&instruction.offset) {
             continue;
         }
         let is_buffer = instruction
             .encoding
             .and_then(|e| families.get(usize::from(e)))
             .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
-            .is_some_and(|name| name.starts_with("buffer_"));
+            // A cache invalidation names no descriptor and reaches no memory.
+            .is_some_and(|name| {
+                name.starts_with("buffer_")
+                    && !orbistoun_translate::model::invalidates_a_cache(name)
+            });
         if !is_buffer {
             continue;
         }
@@ -372,15 +445,24 @@ pub fn place_window_except(
             Some((low, high)) => (low.min(base), high.max(end)),
         });
     }
+    for &(base, bytes) in hierarchies {
+        let end = base.saturating_add(bytes);
+        span = Some(span.map_or((base, end), |(low, high)| (low.min(base), high.max(end))));
+    }
     // A program that addresses no buffer - an image copy - has no window to place.
     let Some((low, high)) = span else {
         return Ok(None);
     };
+    let most = if hierarchies.is_empty() {
+        MOST_WINDOW_WORDS
+    } else {
+        HIERARCHY_WINDOW_WORDS
+    };
     let needed_words = (high - low).div_ceil(4).max(1);
-    if needed_words > u64::from(MOST_WINDOW_WORDS) {
+    if needed_words > u64::from(most) {
         return Err("the program's buffers span more guest memory than one window addresses");
     }
-    let words = u32::try_from(needed_words.next_power_of_two()).unwrap_or(MOST_WINDOW_WORDS);
+    let words = u32::try_from(needed_words.next_power_of_two()).unwrap_or(most);
     let length = u64::from(words) * 4;
     // From the lowest buffer's own base, then down a page at a time while the window still
     // reaches the highest.
@@ -399,6 +481,185 @@ pub fn place_window_except(
             ));
         }
         base = (base - PAGE) & !(PAGE - 1);
+    }
+}
+
+/// The most words a window over a ray intersection's hierarchy spans: 128 MiB, the storage-buffer
+/// range Vulkan requires every device to bind (`maxStorageBufferRange`, at least 2^27 bytes in the
+/// specification's required limits). A hierarchy's nodes are addressed from one base by pointers
+/// the guest's own traversal follows, so one window holds it whole or not at all.
+const HIERARCHY_WINDOW_WORDS: u32 = 1 << 25;
+
+/// The most bytes a hierarchy descriptor's size field is believed for, and how far from its base a
+/// hierarchy with no believable size is taken to reach at most: half of
+/// [`HIERARCHY_WINDOW_WORDS`], leaving the program's buffers room in the same window.
+const HIERARCHY_MOST_BYTES: u64 = 64 << 20;
+
+/// The `(first byte, bytes)` a ray intersection's descriptor names: its base, bits 39:0 in 256-byte
+/// units, and its size, bits 105:64 (RDNA 2 instruction set, table 49). The field holds the size
+/// less one, in bytes, as Mesa fills it with `bvh_size - 1`
+/// (`src/amd/vulkan/nir/radv_nir_rt_common.c:584-585`; the unit assumed).
+///
+/// A field of zero, or one naming more than [`HIERARCHY_MOST_BYTES`], says nothing of where the
+/// nodes lie - Mesa's own descriptor spans all memory from base zero, 2^42 bytes (`:579`), and
+/// reaches its nodes by 64-bit pointers - so the hierarchy is taken to reach the largest power of
+/// two from its base, at most that bound, that `readable` vouches for. `None` where not even a page
+/// at its base is readable.
+fn hierarchy_span(words: [u32; 4], readable: impl Fn(u64, u64) -> bool) -> Option<(u64, u64)> {
+    let base = (u64::from(words[1] & 0xff) << 32 | u64::from(words[0])) << 8;
+    let field = u64::from(words[3] & 0x3ff) << 32 | u64::from(words[2]);
+    if field != 0 && field < HIERARCHY_MOST_BYTES {
+        return Some((base, field + 1));
+    }
+    let mut bytes = HIERARCHY_MOST_BYTES;
+    while bytes >= PAGE {
+        if readable(base, bytes) {
+            return Some((base, bytes));
+        }
+        bytes /= 2;
+    }
+    None
+}
+
+/// The ranges of the hierarchies a dispatch's ray intersections read, each descriptor resolved as
+/// a buffer's is: from user data and tables, and a computed one by the program before its
+/// intersection or, where that depends on the group's ids, group by group (D753, D914) - with why
+/// any was left out. A descriptor only a wave's lanes decide is not run wave by wave: the host's
+/// run of the waves cannot follow the intersection it would loop through.
+fn hierarchy_spans(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    memory: &impl crate::pipeline::GuestMemory,
+) -> (Vec<(u64, u64)>, Vec<String>) {
+    use orbistoun_translate::draw_buffers::{HierarchySource, trace_hierarchies};
+    let count = state.user_data.len().min(crate::backend::USER_DATA_WORDS);
+    let sources = trace_hierarchies(
+        decode,
+        encodings,
+        (0, u32::try_from(count).unwrap_or(u32::MAX)),
+    );
+    let (mut spans, mut left_out) = (Vec::new(), Vec::new());
+    if sources.is_empty() {
+        return (spans, left_out);
+    }
+    let mut words = [0u32; crate::backend::USER_DATA_WORDS];
+    for (word, value) in words.iter_mut().zip(&state.user_data) {
+        *word = value.unwrap_or(0);
+    }
+    // A descriptor whose base is the program's own constant data is found from where the program
+    // was loaded (D842).
+    let program_address =
+        crate::pipeline::decode_reads_own_address(decode, encodings).then_some(state.program);
+    let readable =
+        |at: u64, len: u64| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some());
+    for source in sources {
+        let found: Result<Vec<[u32; 4]>, String> = match source {
+            HierarchySource::Descriptor(descriptor) => descriptor
+                .iter()
+                .map(|&word| crate::draw_buffers::resolve_word(word, &words, memory))
+                .collect::<Result<Vec<u32>, _>>()
+                .map(|values| vec![[values[0], values[1], values[2], values[3]]])
+                .map_err(str::to_owned),
+            HierarchySource::Computed(mut computed) => {
+                computed.program_address = program_address;
+                match crate::draw_buffers::evaluate_computed(&computed, (&words, &[]), memory) {
+                    Ok(found) => Ok(found.map(|(values, _)| values).into_iter().collect()),
+                    Err(why) => crate::draw_buffers::dispatch_group_descriptors(
+                        &computed,
+                        (&words[..count], state.inputs, state.groups),
+                        memory,
+                    )
+                    .map(|reached| {
+                        reached
+                            .descriptors
+                            .iter()
+                            .map(|&(values, _)| values)
+                            .collect()
+                    })
+                    .map_err(|by_group| format!("{why}; replayed group by group: {by_group}")),
+                }
+            }
+        };
+        match found {
+            Ok(descriptors) => {
+                for descriptor in descriptors {
+                    match hierarchy_span(descriptor, readable) {
+                        Some(span) => spans.push(span),
+                        None => left_out.push(format!(
+                            "the descriptor {descriptor:#x?} names a hierarchy that is not readable guest memory"
+                        )),
+                    }
+                }
+            }
+            Err(why) => left_out.push(format!("a hierarchy descriptor: {why}")),
+        }
+    }
+    (spans, left_out)
+}
+
+/// A dispatch's window ([`place_window_except`]) over the hierarchies its ray intersections read
+/// as well ([`hierarchy_spans`]), where one window holds them with the program's buffers and shares
+/// no byte with a buffer it binds on its own (`bound`, D746). Otherwise over its buffers alone, a
+/// node outside it then reading as no hit, and why said once for the program.
+///
+/// # Errors
+///
+/// As [`place_window`], over the buffers alone.
+pub(crate) fn place_dispatch_window(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    (served, bound): (&BTreeMap<u32, u32>, &[(u64, u64)]),
+    memory: &impl crate::pipeline::GuestMemory,
+) -> Result<Option<Window>, &'static str> {
+    let readable =
+        |at: u64, len: u64| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some());
+    let (hierarchies, mut left_out) = hierarchy_spans(state, (decode, encodings), memory);
+    let mut placed = None;
+    if !hierarchies.is_empty() {
+        match place_window_over(
+            state,
+            (decode, encodings),
+            (served, &hierarchies),
+            readable,
+        ) {
+            Ok(Some(window))
+                if !bound.iter().any(|&range| {
+                    crate::pipeline::overlaps(
+                        range,
+                        (window.address(), u64::from(window.words()) * 4),
+                    )
+                }) =>
+            {
+                placed = Some(window);
+            }
+            Ok(_) => left_out.push(format!(
+                "the window over {hierarchies:#x?} would share bytes with a buffer the dispatch binds on its own (D746)"
+            )),
+            Err(why) => left_out.push(format!("a window over {hierarchies:#x?}: {why}")),
+        }
+    }
+    if !left_out.is_empty() {
+        note_uncovered_hierarchy(state.program, &left_out);
+    }
+    match placed {
+        Some(window) => Ok(Some(window)),
+        None => place_window_except(state, (decode, encodings), served, readable),
+    }
+}
+
+/// Says, once for each program, why a hierarchy its ray intersections read is not in its window.
+fn note_uncovered_hierarchy(program: u64, why: &[String]) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(program));
+    if first {
+        tracing::info!(
+            "the dispatch program at {program:#x} reads a hierarchy its window does not hold: {}",
+            why.join("; ")
+        );
     }
 }
 
@@ -566,6 +827,8 @@ mod tests {
                 integer_images: [false; 2],
                 integer_fetched: 0,
                 first_thread: 0,
+                sampled_buffers: 0,
+                scratch_wave_bytes: 0,
             }
         );
         assert_eq!(state.width, Width::Wave64);
@@ -650,7 +913,7 @@ mod tests {
         scratch.push(write(PGM_RSRC2, 0x99));
         assert!(
             state_at(&scratch, 0x100, [1, 1, 1], 0x45).is_err(),
-            "scratch"
+            "scratch whose size COMPUTE_TMPRING_SIZE never gave"
         );
         let mut late = writes;
         for w in &mut late {
@@ -661,6 +924,101 @@ mod tests {
         assert!(
             state_at(&late, 0x100, [1, 1, 1], 0x45).is_err(),
             "program written after"
+        );
+    }
+
+    /// A dispatch given scratch holds `COMPUTE_TMPRING_SIZE.WAVESIZE` KiB a wave (D954), and none
+    /// without `SCRATCH_EN` whatever the ring register says; no size, or more than a module holds,
+    /// is refused.
+    #[test]
+    fn a_dispatchs_scratch_is_sized_by_its_ring() {
+        let mut writes = clear_writes();
+        writes.push(write(PGM_RSRC2, 0x99));
+        // `WAVES` 0x40, `WAVESIZE` 3.
+        writes.push(write(TMPRING_SIZE, (3 << 12) | 0x40));
+        let state = state_at(&writes, 0x100, [1, 1, 1], 0x45).expect("readable");
+        assert_eq!(state.inputs.scratch_wave_bytes, 3 << 10);
+        assert_eq!(
+            orbistoun_translate::scratch::offset_register(12, &state.inputs),
+            13,
+            "after the twelve user-data words and the x group id"
+        );
+
+        let unscratched = state_at(
+            &[clear_writes(), vec![write(TMPRING_SIZE, 3 << 12)]].concat(),
+            0x100,
+            [1, 1, 1],
+            0x45,
+        )
+        .expect("readable");
+        assert_eq!(unscratched.inputs.scratch_wave_bytes, 0);
+
+        assert_eq!(
+            scratch_wave_bytes(0x99, Some(0x40)).ok(),
+            None,
+            "none given"
+        );
+        assert_eq!(
+            scratch_wave_bytes(0x99, Some(0x1fff << 12)).ok(),
+            None,
+            "8 MiB a wave"
+        );
+        assert_eq!(
+            scratch_wave_bytes(0x99, Some(256 << 12)),
+            Ok(MOST_SCRATCH_WAVE_BYTES)
+        );
+    }
+
+    /// A buffer access adding the wave's scratch offset reaches the wave's own scratch, not the
+    /// buffer its descriptor names, so no window is placed over that descriptor (D954).
+    #[test]
+    fn a_scratch_access_places_no_window() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = orbistoun_shader::OperandTable::builtin().expect("operands");
+        // buffer_store_dword v0, off, s[8:11], s13 offset:4; s_endpgm
+        let words: [u32; 3] = [0xe070_0004, 0x0d02_0000, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = orbistoun_shader::decode_program(&bytes, &encodings, &operands);
+        assert!(decode.terminated && decode.is_trustworthy());
+        let mut writes = clear_writes();
+        writes.push(write(PGM_RSRC2, 0x99));
+        writes.push(write(TMPRING_SIZE, 1 << 12));
+        let state = state_at(&writes, 0x100, [1, 1, 1], 0x45).expect("readable");
+        assert_eq!(
+            scratch_accesses(&state, (&decode, &encodings)),
+            std::collections::BTreeSet::from([0])
+        );
+        assert_eq!(
+            place_window(&state, &decode, &encodings, |_, _| true).expect("placed"),
+            None,
+            "nothing reaches guest memory"
+        );
+        // Without scratch the same access is the buffer's, and the window covers it.
+        let plain = state_at(&clear_writes(), 0x100, [1, 1, 1], 0x45).expect("readable");
+        assert!(
+            place_window(&plain, &decode, &encodings, |_, _| true)
+                .expect("placed")
+                .is_some()
+        );
+    }
+
+    /// A cache invalidation names no descriptor and reaches no memory, so a program whose only
+    /// buffer instructions are `buffer_gl1_inv` and `buffer_gl0_inv` places no window, rather than
+    /// being refused for a descriptor not in scalar registers.
+    #[test]
+    fn a_cache_invalidation_places_no_window() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = orbistoun_shader::OperandTable::builtin().expect("operands");
+        // buffer_gl1_inv; buffer_gl0_inv; s_endpgm
+        let words: [u32; 5] = [0xe1c8_0000, 0, 0xe1c4_0000, 0, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = orbistoun_shader::decode_program(&bytes, &encodings, &operands);
+        assert!(decode.terminated && decode.is_trustworthy());
+        let state = state_at(&clear_writes(), 0x100, [1, 1, 1], 0x45).expect("readable");
+        assert_eq!(
+            place_window(&state, &decode, &encodings, |_, _| true),
+            Ok(None),
+            "nothing reaches guest memory"
         );
     }
 
@@ -709,6 +1067,23 @@ mod tests {
         unknown.user_data[8] = None;
         assert!(place_window(&unknown, &decode, &encodings, |_, _| true).is_err());
     }
+
+    /// A hierarchy descriptor names its base in 256-byte units over bits 39:0 and its size less one
+    /// over bits 105:64. A size of zero, or Mesa's whole-memory one (2^42 bytes from base zero,
+    /// `radv_nir_rt_common.c:579-585`), is not believed: the hierarchy then reaches the largest
+    /// readable power of two from its base, and nowhere where its base is not readable.
+    #[test]
+    fn a_hierarchy_spans_what_its_descriptor_names() {
+        const BASE: u64 = 0x1212_3400_0000;
+        let readable = |at: u64, len: u64| at >= BASE && at + len <= BASE + 0x10_0000;
+        let sorting = 1 << 31;
+        let words = [0x1234_0000, 0x12 | sorting, 0xffff, 1 << 24];
+        assert_eq!(hierarchy_span(words, readable), Some((BASE, 0x1_0000)));
+        let no_size = [words[0], words[1], 0, words[3]];
+        assert_eq!(hierarchy_span(no_size, readable), Some((BASE, 0x10_0000)));
+        let whole = [0, sorting, u32::MAX, 0x3ff | 1 << 24 | 1 << 31];
+        assert_eq!(hierarchy_span(whole, readable), None);
+    }
 }
 
 /// One of a dispatch's own buffers as the host hands it to the device (D746, D809).
@@ -719,10 +1094,11 @@ pub enum BufferBefore {
     /// A buffer of this many words the program only stores to: guest memory is not read, and
     /// what the run stored is found from its write mask.
     Unread(usize),
-    /// The buffer at an earlier slot again, bound to the same guest range (D937): the device binds
-    /// that one buffer here too, so what either slot stores the other reads, and only that slot's
-    /// words are written back.
-    Alias(usize),
+    /// The buffer at another slot again, from this many bytes into it: bound to the same guest
+    /// range (D937), or to part of a range it shares with overlapping ones the dispatch writes
+    /// (D953). The device binds that one buffer here too, from the offset, so what either slot
+    /// stores the other reads, and only that slot's words are written back.
+    Alias(usize, u64),
 }
 
 /// A device's list of stored words as runs of consecutive indices, each its first index and values.

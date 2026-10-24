@@ -239,6 +239,23 @@ pub struct PerfReport {
     /// are not shares of the window to be summed.
     #[serde(default)]
     pub spans: Vec<(String, f64, u64)>,
+    /// The worker's memory as the host counted it at the window's end; `None` where the host does
+    /// not say.
+    #[serde(default)]
+    pub memory: Option<ProcessMemory>,
+}
+
+/// A process's memory as its host counts it, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProcessMemory {
+    /// Its pages resident in physical memory now.
+    pub working_set: u64,
+    /// The most it has had resident at once.
+    pub peak_working_set: u64,
+    /// Its private memory committed now, resident or not: what runs a host out of memory.
+    pub private: u64,
+    /// The most private memory it has had committed at once.
+    pub peak_private: u64,
 }
 
 /// How a frame's bytes are laid out in its region.

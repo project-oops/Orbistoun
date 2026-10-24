@@ -27,6 +27,8 @@ tracing = { workspace = true }
 zerocopy = { workspace = true }
 # Whether guest memory was written since a point, asked of the host (commit 8beebaa).
 orbistoun-mem = { workspace = true }
+# The ranges `ORBISTOUN_WATCH_GPU` names, compared after each packet (`memory_watch`).
+orbistoun-env = { workspace = true }
 # The stack area of the call in progress, for builders with more than six arguments.
 orbistoun-thunk = { workspace = true }
 # The perf spans as Tracy zones, in a `tracy` build (D829).

@@ -150,6 +150,8 @@ fn translated_with(
                 integer_images,
                 integer_fetched: 0,
                 first_thread: 0,
+                sampled_buffers: 0,
+                scratch_wave_bytes: 0,
             }),
             per_invocation: per_invocation(),
             ..UserData::default()
@@ -1270,6 +1272,8 @@ fn a_dispatch_stores_to_a_volume() {
                     integer_images: [false, true],
                     integer_fetched: 0,
                     first_thread: 0,
+                    sampled_buffers: 0,
+                    scratch_wave_bytes: 0,
                 }),
                 per_invocation: per_invocation(),
                 ..UserData::default()
@@ -1353,6 +1357,8 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
                     integer_images: [false, false],
                     integer_fetched: 0,
                     first_thread: 0,
+                    sampled_buffers: 0,
+                    scratch_wave_bytes: 0,
                 }),
                 per_invocation: per_invocation(),
                 ..UserData::default()
@@ -1522,6 +1528,8 @@ fn a_sixteen_word_load_names_two_images_of_its_table() {
                     integer_images: [false; 2],
                     integer_fetched: 0,
                     first_thread: 0,
+                    sampled_buffers: 0,
+                    scratch_wave_bytes: 0,
                 }),
                 per_invocation: per_invocation(),
                 ..UserData::default()
@@ -1657,6 +1665,8 @@ fn a_dispatch_fetches_from_two_images() {
                     integer_images: [false; 2],
                     integer_fetched: 0,
                     first_thread: 0,
+                    sampled_buffers: 0,
+                    scratch_wave_bytes: 0,
                 }),
                 per_invocation: per_invocation(),
                 ..UserData::default()

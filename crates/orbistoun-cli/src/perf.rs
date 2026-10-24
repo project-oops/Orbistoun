@@ -88,6 +88,25 @@ fn record(
             unsafe { std::env::set_var(var.name, value) };
         }
     }
+    // Except the display's pacing: flips shown at once, so a title runs as fast as the emulator
+    // lets it and a measurement compares with the ones before D929, unless the environment says
+    // otherwise. The run says which it was.
+    if std::env::var_os(orbistoun_env::FLIP_PACING.name).is_none() {
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var(
+                orbistoun_env::FLIP_PACING.name,
+                orbistoun_env::FLIP_PACING_IMMEDIATE,
+            );
+        };
+    }
+    let pacing = std::env::var(orbistoun_env::FLIP_PACING.name).unwrap_or_default();
+    let pacing = if pacing == orbistoun_env::FLIP_PACING_IMMEDIATE {
+        "flips shown at once"
+    } else {
+        "flips at the display's blank (59.94 Hz)"
+    };
+    println!("  pacing: {pacing}");
     // Longer than the run, so the capture ends when the worker's client goes, with all of it.
     let capture = orbistoun_perf::Capture::start(tools, &trace, port, seconds + 120)
         .context("starting tracy-capture")?;

@@ -11,6 +11,16 @@
 
 use std::collections::BTreeMap;
 
+mod census;
+pub(crate) use census::{HELD, shared_held};
+mod dispatch_modules;
+mod per_segment;
+mod table_textures;
+mod texel_cache;
+
+use dispatch_modules::DispatchModules;
+use texel_cache::TexelCache;
+
 use orbistoun_shader::{
     Capture, EncodingTable, Operand, OperandTable, ShaderCorpus, ShaderError, decode_program,
 };
@@ -640,12 +650,18 @@ mod refusal_tests {
 /// what its waves reach it with, each run on the host (D900, [`crate::draw_buffers::reached_range`]).
 /// Refused with `why`, how many distinct descriptors the waves reach it with and where their runs
 /// ended, or why they could not be run.
+///
+/// With the range, whether it was placed from a lattice of the dispatch's groups (D951): the
+/// module then reads the buffer relative to its base, and checks each access against it. Its
+/// margin gives way where it would overlap a buffer in `held` that what the lattice reached does
+/// not, as a sampled dispatch's global loads' does (D950).
 fn probed_range(
     why: impl std::fmt::Display,
     source: &orbistoun_translate::draw_buffers::BufferSource,
     (words, state): (&[u32; USER_DATA_WORDS], &crate::dispatch::DispatchState),
+    held: &[(u64, u64)],
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), String> {
+) -> Result<((u64, u64), bool), String> {
     let orbistoun_translate::draw_buffers::BufferSource::Computed(computed) = source else {
         return Err(why.to_string());
     };
@@ -660,6 +676,7 @@ fn probed_range(
     let by_group = match by_group {
         Ok(reached) => {
             return crate::draw_buffers::reached_range(computed, &reached)
+                .map(|range| (range, false))
                 .map_err(|bound| format!("{why}; replayed group by group: {bound}"));
         }
         Err(refused) => refused,
@@ -689,17 +706,38 @@ fn probed_range(
         ),
         memory,
     ) {
-        Ok(reached) => crate::draw_buffers::reached_range(computed, &reached).map_err(|bound| {
-            let ends: Vec<String> = reached
-                .ends
-                .iter()
-                .map(|(at, waves)| format!("{waves} at {at:#x}"))
-                .collect();
-            format!(
-                "{why}; run wave by wave, their runs ending {}: {bound}",
-                ends.join(", ")
-            )
-        }),
+        // Too many waves to run them all, a lattice of the groups was run (D951).
+        Ok(reached) if reached.sampled.is_some() => {
+            let found = crate::draw_buffers::sampled_reached_range(computed, &reached, memory)
+                .map_err(|bound| {
+                    format!(
+                        "{why}; run wave by wave over a sample of {} groups: {bound}",
+                        reached.sampled.unwrap_or(0)
+                    )
+                })?;
+            let range = if found.range != found.read
+                && held.iter().any(|&range| overlaps(range, found.range))
+            {
+                found.read
+            } else {
+                found.range
+            };
+            note_sampled_computed(state, &found, range);
+            Ok((range, true))
+        }
+        Ok(reached) => crate::draw_buffers::reached_range(computed, &reached)
+            .map(|range| (range, false))
+            .map_err(|bound| {
+                let ends: Vec<String> = reached
+                    .ends
+                    .iter()
+                    .map(|(at, waves)| format!("{waves} at {at:#x}"))
+                    .collect();
+                format!(
+                    "{why}; run wave by wave, their runs ending {}: {bound}",
+                    ends.join(", ")
+                )
+            }),
         Err(probe) => Err(format!(
             "{why}; replayed group by group: {by_group}; run wave by wave: {probe}{}",
             sampled_note(run(Some(SAMPLED_GROUPS)))
@@ -742,6 +780,123 @@ fn note_wave_by_wave(program: u64, why: &impl std::fmt::Display) {
             "the dispatch program at {program:#x} runs every wave to find a buffer: replayed group by group, {why}"
         );
     }
+}
+
+/// Says, once for each program, that a dispatch's computed buffer was bound from a lattice of its
+/// groups run wave by wave (D951): how many of how many, the range the descriptors they reached
+/// span, and the range bound, which an escape is measured against.
+fn note_sampled_computed(
+    state: &crate::dispatch::DispatchState,
+    found: &crate::draw_buffers::GlobalRange,
+    bound: (u64, u64),
+) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(state.program));
+    if first {
+        let groups: u64 = state.groups.iter().map(|&n| u64::from(n)).product();
+        tracing::info!(
+            "the dispatch program at {:#x} binds a computed buffer from a sample of {} groups (of {groups}) (D951): read {:#x}..{:#x}, bound {:#x}..{:#x}",
+            state.program,
+            found.sampled.unwrap_or(0),
+            found.read.0,
+            found.read.0 + found.read.1,
+            bound.0,
+            bound.0 + bound.1,
+        );
+    }
+}
+
+/// Says, once for each program, that a dispatch's global loads were bound from a sample of its
+/// groups (D950): how many, what they read, and the range bound, which an escape is measured
+/// against.
+fn note_sampled_global(
+    state: &crate::dispatch::DispatchState,
+    found: &crate::draw_buffers::GlobalRange,
+    groups: u64,
+) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(state.program));
+    if first {
+        tracing::info!(
+            "the dispatch program at {:#x}, {:?} groups, binds its global loads from {groups} sampled groups (D950): they read {:#x}+{:#x}, bound as {:#x}+{:#x}",
+            state.program,
+            state.groups,
+            found.read.0,
+            found.read.1,
+            found.range.0,
+            found.range.1,
+        );
+    }
+}
+
+/// The guest range a dispatch's buffer other than its global loads' binds, at the next slot after
+/// `held`: resolved from its user data, or found by running its groups or waves (D900, D914). One
+/// placed from a sample of its groups is read relative to its own base, and its slot is marked in
+/// `sampled` (D951).
+///
+/// # Errors
+///
+/// Why the range could not be found, or a sampled buffer past those the push block has room for.
+fn dispatch_buffer_range(
+    source: &orbistoun_translate::draw_buffers::BufferSource,
+    (state, words): (&crate::dispatch::DispatchState, &[u32; USER_DATA_WORDS]),
+    (held, sampled): (&[(u64, u64)], &mut u32),
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), String> {
+    let (range, from_sample) = crate::draw_buffers::resolve_range(source, (words, 0, &[]), memory)
+        .map(|range| (range, false))
+        .or_else(|why| probed_range(why, source, (words, state), held, memory))?;
+    if from_sample {
+        let slot = held.len();
+        let most = orbistoun_translate::wavefront::MOST_SAMPLED_BUFFERS;
+        if slot >= 32 || sampled.count_ones() >= most {
+            return Err(format!(
+                "slot {slot} is placed from a sample of the dispatch's groups, past the {most} such buffers a dispatch's push block carries the bases of (D951)"
+            ));
+        }
+        *sampled |= 1 << slot;
+    }
+    Ok(range)
+}
+
+/// The guest range a dispatch's global loads' buffer binds (D883): what its waves read, and for a
+/// dispatch too large to run whole, a sample of its groups' with a margin (D950). The margin gives
+/// way where it would overlap a buffer in `held` that what the waves read does not.
+fn dispatch_global_buffer(
+    global: &orbistoun_translate::draw_buffers::GlobalLoads,
+    (state, words): (&crate::dispatch::DispatchState, &[u32; USER_DATA_WORDS]),
+    held: &[(u64, u64)],
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), String> {
+    let count = state.user_data.len().min(USER_DATA_WORDS);
+    let found = crate::draw_buffers::dispatch_global_range(
+        global,
+        (
+            &words[..count],
+            state.inputs,
+            state.groups,
+            state.width.lanes(),
+        ),
+        memory,
+    )?;
+    if let Some(groups) = found.sampled {
+        note_sampled_global(state, &found, groups);
+    }
+    Ok(
+        if found.range != found.read && held.iter().any(|&range| overlaps(range, found.range)) {
+            found.read
+        } else {
+            found.range
+        },
+    )
 }
 
 /// How many groups' first waves a refusal of a dispatch too large to run whole runs, to say what
@@ -1235,6 +1390,10 @@ pub struct Submission {
     /// pending while one was queued, before that submission had drawn it (D882): carried out, its
     /// draws are prepared again from the stream, after the ones ahead of it.
     pub read_ahead_of_draws: bool,
+    /// Whether its draws' textures and buffers were left unbound because it is carried out a draw
+    /// segment at a time (D729), each segment binding its own as it is drawn; what reads it whole
+    /// binds them first ([`Pipeline::bind_left_resources`]).
+    pub resources_per_segment: bool,
     /// Whether it was handed to an asynchronous compute queue (`sceAgcDriverSubmitAcb`): stopped at
     /// a wait, it steps aside rather than stopping the queue (D891).
     pub asynchronous_compute: bool,
@@ -2396,8 +2555,9 @@ pub struct Pipeline {
     store: Option<crate::translations::TranslationStore>,
     /// Fills not yet matched against a depth target, which may clear one a later submission binds.
     depth_fills: crate::depth::PendingFills,
-    /// Guest dispatch modules, by the program's bytes, its entry state and its window.
-    dispatch_modules: BTreeMap<u64, (DispatchModule, orbistoun_translate::wavefront::ImageSources)>,
+    /// Guest dispatch modules, by the program's bytes, its entry state and its window, within a
+    /// budget.
+    dispatch_modules: DispatchModules,
     /// Each primitive shader's traced format words, by address and user-data count, with the hash
     /// of the bytes they were traced from ([`Self::format_words`]).
     format_words: BTreeMap<(u64, u32), (u64, Option<FormatWords>)>,
@@ -2438,6 +2598,10 @@ type FormatsResolved = (
 /// a megabyte - with its [`crate::content_hash`].
 type DispatchModule = (std::sync::Arc<[u32]>, u64);
 
+/// Where a dispatch's slot is bound in another's buffer (D937, D953): that slot, and how many bytes
+/// into its buffer this one's own range starts; `None` for a slot with a buffer of its own.
+pub type SharedBuffer = Option<(usize, u64)>;
+
 /// A guest compute dispatch made ready to run: its module, the window it was built against, and the
 /// push-constant block carrying its user data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2463,9 +2627,11 @@ pub struct PreparedDispatch {
     /// Whether each of them, by slot, is one the program only stores to (D809): its words before
     /// the run are not read, and what the run stored is found from its write mask.
     pub unread: Vec<bool>,
-    /// For each slot bound to exactly the same guest range as an earlier one, that slot (D937):
-    /// the device binds one buffer at both.
-    pub aliases: Vec<Option<usize>>,
+    /// For each slot bound to exactly the same guest range as an earlier one, that slot (D937),
+    /// and for each bound to part of a range it shares with overlapping ones the dispatch writes,
+    /// the slot holding that range (D953); with how many bytes into the holder's buffer the slot's
+    /// own range starts. The device binds one buffer at all of them.
+    pub aliases: Vec<SharedBuffer>,
 }
 
 impl Pipeline {
@@ -2519,7 +2685,7 @@ impl Pipeline {
             next_resource: 1,
             store: None,
             depth_fills: crate::depth::PendingFills::default(),
-            dispatch_modules: BTreeMap::new(),
+            dispatch_modules: DispatchModules::default(),
             format_words: BTreeMap::new(),
             untraced_formats: BTreeMap::new(),
             unresolved_formats: BTreeMap::new(),
@@ -2554,16 +2720,17 @@ impl Pipeline {
         keep_dispatch_program(address, program);
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers, formats, (unread, aliases), global_base) = self
+        let (served, buffers, formats, (unread, aliases), (global_base, sampled)) = self
             .dispatch_buffers(state, &decoded, memory)
             .map_err(|why| {
                 dispatch_refusal(why, (&decoded, &self.encodings), (address, program))
             })?;
-        let placed = crate::dispatch::place_window_except(
+        // The window holds the hierarchies its ray intersections read too, where it can.
+        let placed = crate::dispatch::place_dispatch_window(
             state,
             (&decoded, &self.encodings),
-            &served,
-            |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
+            (&served, &buffers),
+            memory,
         )
         .map_err(str::to_owned)?;
         if let Some(window) = placed {
@@ -2587,7 +2754,7 @@ impl Pipeline {
                 (&decoded, program, address),
                 state,
                 (placed, formats),
-                integer_images,
+                (integer_images, sampled),
             )?;
             let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
             let wanted = (fetched_integer(&images), stored_integer(&images)?);
@@ -2621,6 +2788,19 @@ impl Pipeline {
                     block[orbistoun_translate::wavefront::GLOBAL_BASE_PUSH_WORD as usize] =
                         base as u32;
                 }
+                // Each buffer placed from a sample's guest base, its low half and bits 47:32, in
+                // slot order, as the module reads an access through it relative to (D951).
+                let at = orbistoun_translate::wavefront::SAMPLED_BASES_PUSH_WORD as usize;
+                for (place, (base, _)) in buffers
+                    .iter()
+                    .enumerate()
+                    .filter(|&(slot, _)| sampled >> slot & 1 != 0)
+                    .map(|(_, &range)| range)
+                    .enumerate()
+                {
+                    block[at + 2 * place] = base as u32;
+                    block[at + 2 * place + 1] = (base >> 32) as u32 & 0xffff;
+                }
                 block
             },
             groups: state.groups,
@@ -2648,9 +2828,14 @@ impl Pipeline {
             return None;
         }
         let families = self.encodings.encodings();
+        // A store to scratch lands in the wave's own private memory, not the guest's (D954).
+        let scratch = crate::dispatch::scratch_accesses(state, (&decoded, &self.encodings));
         // Where each buffer store or atomic is, by its offset in the program.
         let mut stores = Vec::new();
         for instruction in &decoded.instructions {
+            if scratch.contains(&instruction.offset) {
+                continue;
+            }
             let Some(name) = instruction
                 .encoding
                 .and_then(|e| families.get(usize::from(e)))
@@ -2684,11 +2869,11 @@ impl Pipeline {
         spans.sort_unstable();
         spans.dedup();
         if through_window {
-            let placed = crate::dispatch::place_window_except(
+            let placed = crate::dispatch::place_dispatch_window(
                 state,
                 (&decoded, &self.encodings),
-                &served,
-                |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
+                (&served, &buffers),
+                memory,
             )
             .ok()?;
             spans.extend(placed.map(|window| (window.address(), u64::from(window.words()) * 4)));
@@ -2716,6 +2901,8 @@ impl Pipeline {
             UserData {
                 count,
                 draw_buffers: true,
+                // Its scratch accesses reach no buffer, as the translation leaves them (D954).
+                compute: Some(state.inputs),
                 // A descriptor whose base is the program's own constant data is found from where
                 // the program was loaded (D842).
                 program_address: decode_reads_own_address(decoded, &self.encodings)
@@ -2729,58 +2916,52 @@ impl Pipeline {
             *word = value.unwrap_or(0);
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
-        let mut aliases: Vec<Option<usize>> = Vec::with_capacity(traced.sources.len());
+        let mut aliases: Vec<SharedBuffer> = Vec::with_capacity(traced.sources.len());
         let mut global_base = None;
+        let mut global_slot = None;
+        let mut sampled = 0_u32;
         for source in &traced.sources {
             // The global loads' buffer is what every wave of the dispatch reads (D883).
             let range =
                 if let orbistoun_translate::draw_buffers::BufferSource::Global(global) = source {
-                    let count = state.user_data.len().min(USER_DATA_WORDS);
-                    let range = crate::draw_buffers::dispatch_global_range(
-                        global,
-                        (
-                            &words[..count],
-                            state.inputs,
-                            state.groups,
-                            state.width.lanes(),
-                        ),
-                        memory,
-                    )?;
+                    let range = dispatch_global_buffer(global, (state, &words), &ranges, memory)?;
                     global_base = Some(range.0);
+                    global_slot = Some(ranges.len());
                     range
                 } else {
-                    crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)
-                        .or_else(|why| probed_range(why, source, (&words, state), memory))?
+                    dispatch_buffer_range(source, (state, &words), (&ranges, &mut sampled), memory)?
                 };
             note_if_unreadable(memory, state.program, range, source);
-            // Two copies of one byte disagree only where the dispatch writes one of them: read-only
-            // copies of the same bytes agree (D746).
-            let slot = u32::try_from(ranges.len()).unwrap_or(u32::MAX);
-            let written = |slot: u32| traced.stored.contains(&slot);
             if let Some(earlier) = alias_earlier(&mut ranges, &aliases, range) {
-                aliases.push(Some(earlier));
+                aliases.push(Some((earlier, 0)));
                 ranges.push(ranges[earlier]);
                 continue;
             }
             aliases.push(None);
-            if let Some((held, other)) = ranges
-                .iter()
-                .zip(0..)
-                .find(|&(&held, other)| overlaps(held, range) && (written(slot) || written(other)))
-            {
-                // Named by both ranges and which is written, so the program's two views of one
-                // buffer are found.
-                return Err(format!(
-                    "two buffers the dispatch binds overlap, one of them written, and two copies of one byte would disagree (D746): slot {other} at {:#x}, {:#x} bytes{}, and slot {slot} at {:#x}, {:#x} bytes{}",
-                    held.0,
-                    held.1,
-                    if written(other) { ", written" } else { "" },
-                    range.0,
-                    range.1,
-                    if written(slot) { ", written" } else { "" },
-                ));
-            }
             ranges.push(range);
+        }
+        // Two copies of one byte disagree only where the dispatch writes one of them: read-only
+        // copies of the same bytes agree (D746). Overlapping ranges one of which is written are one
+        // buffer (D953), but for a buffer that starts at a base of its own (D883, D951).
+        let written = |slot: usize| u32::try_from(slot).is_ok_and(|s| traced.stored.contains(&s));
+        let own_base =
+            |slot: usize| global_slot == Some(slot) || (slot < 32 && sampled >> slot & 1 != 0);
+        let before = ranges.clone();
+        if let Err((other, slot)) =
+            share_written_overlaps((&mut ranges, &mut aliases), written, own_base)
+        {
+            // Named by both ranges and which is written, so the program's two views of one
+            // buffer are found.
+            let (held, range) = (before[other], before[slot]);
+            return Err(format!(
+                "two buffers the dispatch binds overlap, one of them written, and one starts at a base of its own, so they cannot be one buffer (D746, D953): slot {other} at {:#x}, {:#x} bytes{}, and slot {slot} at {:#x}, {:#x} bytes{}",
+                held.0,
+                held.1,
+                if written(other) { ", written" } else { "" },
+                range.0,
+                range.1,
+                if written(slot) { ", written" } else { "" },
+            ));
         }
         let formats =
             orbistoun_translate::wavefront::reads_buffer_formats(decoded, &self.encodings).then(
@@ -2805,7 +2986,7 @@ impl Pipeline {
                     && aliases
                         .iter()
                         .enumerate()
-                        .filter(|&(_, alias)| *alias == Some(slot))
+                        .filter(|&(_, alias)| alias.is_some_and(|(holder, _)| holder == slot))
                         .all(|(other, _)| stored_only(other))
             })
             .collect();
@@ -2814,13 +2995,13 @@ impl Pipeline {
             ranges,
             formats,
             (unread, aliases),
-            global_base,
+            (global_base, sampled),
         ))
     }
 
-    /// A dispatch's program translated for its entry state, its window, its buffers' formats and its
-    /// images' numeric types, from the cache where it was translated before, with where its images
-    /// come from.
+    /// A dispatch's program translated for its entry state, its window, its buffers' formats, its
+    /// images' numeric types and the buffers placed from a sample (D951), from the cache where it
+    /// was translated before, with where its images come from.
     fn dispatch_module(
         &mut self,
         (decoded, program, address): (&orbistoun_shader::Decode, &[u8], u64),
@@ -2829,12 +3010,13 @@ impl Pipeline {
             Window,
             Option<orbistoun_translate::wavefront::BufferFormats>,
         ),
-        (integer_fetched, integer_stored): (u32, bool),
+        ((integer_fetched, integer_stored), sampled_buffers): ((u32, bool), u32),
     ) -> Result<(DispatchModule, orbistoun_translate::wavefront::ImageSources), String> {
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
         let inputs = orbistoun_translate::wavefront::ComputeInputs {
             integer_images: [false, integer_stored],
             integer_fetched,
+            sampled_buffers,
             ..state.inputs
         };
         // A program reading its own address - a descriptor whose base is its own constant data -
@@ -2908,9 +3090,16 @@ impl Pipeline {
             ^ u64::from(state.vertex_streamout) << 61
             // A streamout wave's first vertex is compiled in (D861).
             ^ u64::from(inputs.first_thread).rotate_left(36)
+            // Which buffers are read relative to a base of their own is compiled in (D951).
+            ^ if sampled_buffers == 0 {
+                0
+            } else {
+                (0x5341_4d50_0000_0000 ^ u64::from(sampled_buffers)).rotate_left(28)
+            }
             ^ local_words_salt(state.local_words)
+            ^ scratch_salt(inputs.scratch_wave_bytes)
             ^ per_lane_salt(user_data.per_invocation);
-        Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
+        Ok(if let Some(cached) = self.dispatch_modules.get(key) {
             cached.clone()
         } else {
             // The cheapest model the program runs exactly in: one invocation per lane where it
@@ -2932,7 +3121,7 @@ impl Pipeline {
             let hash = crate::content_hash(&kept.module);
             let module = (std::sync::Arc::from(kept.module), hash);
             self.dispatch_modules
-                .insert(key, (module.clone(), sources.clone()));
+                .keep(key, (module.clone(), sources.clone()));
             (module, sources)
         })
     }
@@ -3172,6 +3361,19 @@ impl Pipeline {
         registered: &[RegisteredShader],
         memory: &impl GuestMemory,
     ) -> Submission {
+        self.prepare_over(carried_in, stream, (queue, registered), memory, true)
+    }
+
+    /// [`Self::submit_over`], binding its draws' textures and buffers where `bind` says to, and
+    /// otherwise marking them left for its draw segments ([`Submission::resources_per_segment`]).
+    fn prepare_over(
+        &mut self,
+        carried_in: BTreeMap<u32, u32>,
+        stream: &[u8],
+        (queue, registered): (Queue, &[RegisteredShader]),
+        memory: &impl GuestMemory,
+        bind: bool,
+    ) -> Submission {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
         // The tables its indirect loads name, read once, now: what it carries forward and its
@@ -3281,9 +3483,7 @@ impl Pipeline {
                 &mut submission.report,
             );
         });
-        span(Span::PrepareTextures, || {
-            self.bind_resources(&mut submission, memory);
-        });
+        self.bind_or_leave(&mut submission, memory, bind);
         // Every chunk a draw is carried out as, as D741 counted them (D787).
         submission.report.draws = submission
             .commands
@@ -4348,7 +4548,19 @@ struct DetiledImages(Vec<(DispatchSurface, Vec<u8>, std::sync::Arc<[u32]>)>);
 /// How many detiled images are kept: a dispatch binds two, and a frame runs a few.
 const DETILED_KEPT: usize = 8;
 
+/// The most bytes the detiled images keep, their source bytes and texels together: eight
+/// frame-sized images of a 4K title are a gibibyte and more.
+const DETILED_BYTES_MOST: usize = 256 << 20;
+
 impl DetiledImages {
+    /// The bytes it keeps: each image's source bytes and texels.
+    pub(crate) fn bytes(&self) -> usize {
+        self.0
+            .iter()
+            .map(|(_, bytes, texels)| bytes.capacity() + texels.len() * 4)
+            .sum()
+    }
+
     /// `spanned`, `surface`'s bytes, detiled: the texels kept for them where the surface and the
     /// bytes are the ones kept, else detiled now and kept.
     fn detile(&mut self, surface: &DispatchSurface, spanned: &[u8]) -> std::sync::Arc<[u32]> {
@@ -4370,7 +4582,10 @@ impl DetiledImages {
             spanned.len() as u64,
             started.elapsed(),
         );
-        if self.0.len() >= DETILED_KEPT {
+        let adding = spanned.len() + texels.len() * 4;
+        while !self.0.is_empty()
+            && (self.0.len() >= DETILED_KEPT || self.bytes() + adding > DETILED_BYTES_MOST)
+        {
             self.0.remove(0);
         }
         self.0.push((*surface, spanned.to_vec(), texels.clone()));
@@ -7435,7 +7650,7 @@ fn note_if_unreadable(
 /// through one descriptor reach such ranges.
 fn alias_earlier(
     ranges: &mut [(u64, u64)],
-    aliases: &[Option<usize>],
+    aliases: &[SharedBuffer],
     range: (u64, u64),
 ) -> Option<usize> {
     let earlier = ranges
@@ -7446,6 +7661,85 @@ fn alias_earlier(
     Some(earlier)
 }
 
+/// Makes each set of overlapping buffers a dispatch binds, one of them written, one buffer (D953):
+/// held by the one at the lowest base, the earliest on a tie, its range widened to span them all,
+/// and every other bound to it from where its own range starts, as are the slots that shared that
+/// one's buffer already (D937). Ranges overlap a set through any of its members; read-only copies
+/// of the same bytes stay apart, since they agree.
+///
+/// `Err` names two overlapping slots, one written, of which `own_base` says one starts at a base
+/// of its own - the global loads' buffer (D883), or one placed from a sample (D951) - which the
+/// module reads relative to that base, so it cannot be part of another's buffer.
+fn share_written_overlaps(
+    (ranges, aliases): (&mut [(u64, u64)], &mut [SharedBuffer]),
+    written: impl Fn(usize) -> bool,
+    own_base: impl Fn(usize) -> bool,
+) -> Result<(), (usize, usize)> {
+    let slots = ranges.len();
+    let heads: Vec<usize> = (0..slots).filter(|&slot| aliases[slot].is_none()).collect();
+    // A buffer is written where any slot binding it is.
+    let writes = |head: usize| {
+        written(head)
+            || (0..slots)
+                .any(|slot| aliases[slot].is_some_and(|(at, _)| at == head) && written(slot))
+    };
+    let mut set: Vec<usize> = (0..slots).collect();
+    let root = |set: &[usize], mut slot: usize| {
+        while set[slot] != slot {
+            slot = set[slot];
+        }
+        slot
+    };
+    for (index, &a) in heads.iter().enumerate() {
+        for &b in &heads[index + 1..] {
+            if overlaps(ranges[a], ranges[b]) && (writes(a) || writes(b)) {
+                if own_base(a) || own_base(b) {
+                    return Err((a, b));
+                }
+                let (first, second) = (root(&set, a), root(&set, b));
+                set[second.max(first)] = first.min(second);
+            }
+        }
+    }
+    let roots: Vec<usize> = heads.iter().map(|&head| root(&set, head)).collect();
+    for &head in &heads {
+        let members: Vec<usize> = heads
+            .iter()
+            .zip(&roots)
+            .filter(|&(_, &of)| of == head)
+            .map(|(&member, _)| member)
+            .collect();
+        if members.len() < 2 {
+            continue;
+        }
+        let Some(&holder) = members
+            .iter()
+            .min_by_key(|&&member| (ranges[member].0, member))
+        else {
+            continue;
+        };
+        let low = ranges[holder].0;
+        let high = members
+            .iter()
+            .map(|&member| ranges[member].0.saturating_add(ranges[member].1))
+            .max()
+            .unwrap_or(low);
+        for &member in members.iter().filter(|&&member| member != holder) {
+            let offset = ranges[member].0 - low;
+            aliases[member] = Some((holder, offset));
+            for alias in aliases.iter_mut() {
+                if let Some((at, within)) = alias
+                    && *at == member
+                {
+                    *alias = Some((holder, offset + *within));
+                }
+            }
+        }
+        ranges[holder] = (low, high - low);
+    }
+    Ok(())
+}
+
 /// The accesses a dispatch's own buffers take, by instruction offset, each buffer's guest range as
 /// `(address, bytes)`, by slot (D746), and each buffer's descriptor format word, by slot, for a
 /// program converting by it (D738).
@@ -7453,14 +7747,16 @@ type DispatchBuffers = (
     BTreeMap<u32, u32>,
     Vec<(u64, u64)>,
     Option<orbistoun_translate::wavefront::BufferFormats>,
-    // Which slots are only stored to (D809), and which share an earlier slot's buffer (D937).
-    (Vec<bool>, Vec<Option<usize>>),
-    // Where the global loads' buffer starts, where the program has global loads (D883).
-    Option<u64>,
+    // Which slots are only stored to (D809), and which share another slot's buffer, from how far
+    // into it (D937, D953).
+    (Vec<bool>, Vec<SharedBuffer>),
+    // Where the global loads' buffer starts, where the program has global loads (D883); and the
+    // slots placed from a sample of the dispatch's groups, one bit each (D951).
+    (Option<u64>, u32),
 );
 
 /// Whether two `(address, bytes)` ranges share a byte.
-fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
+pub(crate) fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
     a < b.saturating_add(b_bytes) && b < a.saturating_add(a_bytes)
 }
 
@@ -7673,6 +7969,8 @@ fn bind_textures_noting(
     // And the user data's, the same way: a stream sets the same words before each of many draws,
     // and asking the host whether a large texture was written since is not free.
     let mut read_from_user: BTreeMap<UserTextureKey, Option<RenderCommand>> = BTreeMap::new();
+    // And a table slot's whole answer, by its table: its descriptor is not read again for each draw.
+    let mut tables = table_textures::TableBindings::default();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
@@ -7748,7 +8046,7 @@ fn bind_textures_noting(
                         out.extend(bound);
                         continue;
                     }
-                    match table_source_bound(
+                    match tables.bound(
                         source,
                         (user, stencil),
                         (memory, texels),
@@ -9515,10 +9813,7 @@ fn texel_texture(
         Some(cached) if cached.hash == hash => cached.texels.clone(),
         _ => row_words(rows, count),
     };
-    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
-    }
-    texels.insert(
+    texels.keep(
         key,
         CachedTexels {
             since,
@@ -9777,10 +10072,7 @@ fn kept_or_read(
     let read = read(span)?;
     let hash = crate::content_hash(&read) ^ u64::from(encoding_tag(encoding));
     let shared: std::sync::Arc<[u32]> = read.into();
-    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
-    }
-    texels.insert(
+    texels.keep(
         key,
         CachedTexels {
             since,
@@ -10111,12 +10403,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
     let swizzled = kept.unwrap_or_else(|| {
         crate::perf::span(crate::perf::Span::TextureSwizzle, || {
             let swizzled = swizzle_texels(&texels, format, selects);
-            if let Ok(mut kept) = swizzled_kept().lock() {
-                if kept.len() >= TEXEL_CACHE_ENTRIES {
-                    crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
-                }
-                kept.insert(key, std::sync::Arc::clone(&swizzled));
-            }
+            keep_swizzled(key, &swizzled);
             swizzled
         })
     });
@@ -10219,12 +10506,7 @@ fn packed_byte_texture(bound: RenderCommand, selects: [u32; 4]) -> RenderCommand
                     })
                 })
                 .collect();
-            if let Ok(mut kept) = swizzled_kept().lock() {
-                if kept.len() >= TEXEL_CACHE_ENTRIES {
-                    crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
-                }
-                kept.insert(key, std::sync::Arc::clone(&packed));
-            }
+            keep_swizzled(key, &packed);
             packed
         })
     });
@@ -10341,13 +10623,46 @@ const PACKED_BYTES_TAG: u64 = 0x0b17_e5b1_7e5b_17e5;
 /// texels' combined with the format and selects, but the levels of one chain share it, so the
 /// extent is part of the key; a frame binds the same few textures many times, and a large one took
 /// tens of milliseconds to swizzle at every binding.
-fn swizzled_kept() -> &'static std::sync::Mutex<SwizzledKept> {
-    static KEPT: std::sync::OnceLock<std::sync::Mutex<SwizzledKept>> = std::sync::OnceLock::new();
-    KEPT.get_or_init(Default::default)
+fn swizzled_kept() -> &'static crate::tally::Tallied<SwizzledKept, 1> {
+    SWIZZLED_KEPT.get_or_init(|| {
+        crate::tally::Tallied::new(SwizzledKept::default(), |kept| {
+            [swizzled_bytes_in(kept) as u64]
+        })
+    })
 }
+
+static SWIZZLED_KEPT: std::sync::OnceLock<crate::tally::Tallied<SwizzledKept, 1>> =
+    std::sync::OnceLock::new();
 
 /// Swizzled texels by (hash, width, height).
 type SwizzledKept = std::collections::HashMap<(u64, u32, u32), std::sync::Arc<[u32]>>;
+
+/// The most bytes the swizzled-texel cache keeps before it restarts, as the texel cache it is
+/// filled from is held to its own: a frame-sized texture of a 4K title is tens of megabytes.
+const SWIZZLED_BYTES_MOST: usize = 256 << 20;
+
+/// Keeps `texels` under `key`, emptying the cache first when it holds [`TEXEL_CACHE_ENTRIES`] or
+/// would hold more than [`SWIZZLED_BYTES_MOST`].
+fn keep_swizzled(key: (u64, u32, u32), texels: &std::sync::Arc<[u32]>) {
+    let Ok(mut kept) = swizzled_kept().lock() else {
+        return;
+    };
+    if kept.len() >= TEXEL_CACHE_ENTRIES
+        || swizzled_bytes_in(&kept) + texels.len() * 4 > SWIZZLED_BYTES_MOST
+    {
+        crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
+    }
+    kept.insert(key, std::sync::Arc::clone(texels));
+}
+
+fn swizzled_bytes_in(kept: &SwizzledKept) -> usize {
+    kept.values().map(|texels| texels.len() * 4).sum()
+}
+
+/// The bytes the swizzled-texel cache held when it was last let go, read without its lock.
+pub(crate) fn swizzled_bytes() -> u64 {
+    SWIZZLED_KEPT.get().map_or(0, |kept| kept.tallies()[0])
+}
 
 /// Each texel's channels as `selects` pick them from `format`'s. A one-byte texel's are its X and
 /// constants, so each word is a constant and X multiplied into the lanes that select it - one
@@ -10429,9 +10744,6 @@ struct CachedTexels {
     hash: u64,
     texels: std::sync::Arc<[u32]>,
 }
-
-/// Texels read from guest memory, by where they lie and their shape.
-type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 
 /// A tiled texture's first viewed level, read whole, detiled into row-major texels and bound: a
 /// four-byte texel a word, a one-byte texel its byte in the low eight bits.
@@ -10552,6 +10864,38 @@ struct KeptLevels {
 /// How many chains' levels are kept before all are let go.
 const LEVELS_KEPT: usize = 1024;
 
+/// The most bytes the kept chains hold, their levels and joined chains together, before all are
+/// let go: a joined chain is its base's texels again.
+const LEVELS_BYTES_MOST: usize = 256 << 20;
+
+impl KeptLevels {
+    fn bytes(&self) -> usize {
+        self.texels.capacity() * 4 + self.joined.as_ref().map_or(0, |(_, chain)| chain.len() * 4)
+    }
+}
+
+/// The kept chains, by what their levels are read from.
+fn kept_levels() -> &'static crate::tally::Tallied<std::collections::HashMap<u64, KeptLevels>, 1> {
+    KEPT_LEVELS.get_or_init(|| {
+        crate::tally::Tallied::new(std::collections::HashMap::new(), |kept| {
+            [levels_bytes_in(kept) as u64]
+        })
+    })
+}
+
+static KEPT_LEVELS: std::sync::OnceLock<
+    crate::tally::Tallied<std::collections::HashMap<u64, KeptLevels>, 1>,
+> = std::sync::OnceLock::new();
+
+fn levels_bytes_in(kept: &std::collections::HashMap<u64, KeptLevels>) -> usize {
+    kept.values().map(KeptLevels::bytes).sum()
+}
+
+/// The bytes the kept chains held when they were last let go, read without their lock.
+pub(crate) fn kept_levels_bytes() -> u64 {
+    KEPT_LEVELS.get().map_or(0, |kept| kept.tallies()[0])
+}
+
 /// `base`'s chain through `last`: its hash - the base's joined with the levels' - and its texels,
 /// the base's then each level's after it. The levels are read and detiled once and kept while the
 /// host reports nothing written to them, and the chain is kept with them for the same base: a guest
@@ -10564,8 +10908,6 @@ fn kept_chain(
     memory: &impl GuestMemory,
 ) -> Option<(u64, std::sync::Arc<[u32]>)> {
     use std::hash::{Hash, Hasher};
-    static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, KeptLevels>>> =
-        std::sync::OnceLock::new();
     let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(4)?;
     let mut surfaces = Vec::new();
     for level in descriptor.base_level + 1..=last {
@@ -10598,8 +10940,7 @@ fn kept_chain(
             .hash(&mut hasher);
         hasher.finish()
     };
-    let mut kept = KEPT
-        .get_or_init(Default::default)
+    let mut kept = kept_levels()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unchanged = kept.get(&key).is_some_and(|levels| {
@@ -10624,7 +10965,12 @@ fn kept_chain(
                 .collect();
             texels.extend(surface.detile_mapped(&words, |w| w));
         }
-        if kept.len() >= LEVELS_KEPT && !kept.contains_key(&key) {
+        texels.shrink_to_fit();
+        // A chain joins its base's texels too, so room is left for those as well.
+        let adding = (texels.capacity() + base.len() + texels.len()) * 4;
+        if (kept.len() >= LEVELS_KEPT && !kept.contains_key(&key))
+            || levels_bytes_in(&kept) + adding > LEVELS_BYTES_MOST
+        {
             crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
         }
         let hash = crate::content_hash(&texels);
@@ -10819,10 +11165,7 @@ fn read_tiled_base(
         );
         (hash, shared)
     };
-    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
-    }
-    texels.insert(
+    texels.keep(
         key,
         CachedTexels {
             since,
@@ -10949,10 +11292,7 @@ fn read_block_texture(
     }
     let hash = crate::content_hash(&blocks);
     let shared: std::sync::Arc<[u32]> = blocks.into();
-    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
-    }
-    texels.insert(
+    texels.keep(
         key,
         CachedTexels {
             since,
@@ -11063,8 +11403,8 @@ fn uncompressed_by_keys(mut words: [u32; 8], memory: &impl GuestMemory) -> [u32;
     words
 }
 
-/// How many textures the cache holds before it restarts: enough for a frame's set, and a bound for
-/// a guest streaming new textures every frame.
+/// How many re-picked textures the swizzle caches hold before they restart: enough for a frame's
+/// set, and a bound for a guest streaming new textures every frame.
 const TEXEL_CACHE_ENTRIES: usize = 64;
 
 /// Each stage's `SPI_SHADER_PGM_RSRC2`, vertex (the geometry set) then fragment: `gfx103.json` maps
@@ -11205,6 +11545,16 @@ fn local_words_salt(words: Option<u32>) -> u64 {
     })
 }
 
+/// A wave's scratch is a private array its size declares (D954), so a dispatch with another size is
+/// another module; none salts nothing, which keeps the keys of modules made before.
+fn scratch_salt(wave_bytes: u32) -> u64 {
+    if wave_bytes == 0 {
+        0
+    } else {
+        content_hash(&wave_bytes.to_le_bytes()).rotate_left(52) | (1 << 3)
+    }
+}
+
 /// What a draw stage's module key takes from its user-data layout: where its words land, how many,
 /// and the local share it declares.
 /// What sets a module translated for its program's address apart (D842): nothing for one translated
@@ -11255,7 +11605,10 @@ fn reads_own_address(
 }
 
 /// Whether a decoded program reads its own address: has an `s_getpc_b64` (D842).
-fn decode_reads_own_address(decoded: &orbistoun_shader::Decode, encodings: &EncodingTable) -> bool {
+pub(crate) fn decode_reads_own_address(
+    decoded: &orbistoun_shader::Decode,
+    encodings: &EncodingTable,
+) -> bool {
     decoded.instructions.iter().any(|instruction| {
         instruction
             .encoding
@@ -11423,20 +11776,22 @@ fn reaches_guest_memory(
     encodings: &EncodingTable,
     (served, drops_stores): (&BTreeMap<u32, u32>, bool),
 ) -> Option<String> {
-    const ACCESSES: [&str; 6] = [
+    // A ray intersection reads a hierarchy's node through the window, its descriptor as values.
+    const ACCESSES: [&str; 7] = [
         "s_buffer_load",
         "global_",
         "flat_",
         "scratch_",
         "buffer_",
         "tbuffer_",
+        "image_bvh",
     ];
     let named = named_instructions(decoded, encodings, drops_stores);
     // Every scalar register something other than an image instruction reads: its sources, and the
     // first operand of a compare, which writes nothing.
     let reads = |instruction: &orbistoun_shader::Instruction, name: &str| {
         let mut read = Vec::new();
-        if name.starts_with("image_") {
+        if name.starts_with("image_") && !name.starts_with("image_bvh") {
             return read;
         }
         let first = usize::from(!is_scalar_compare(name));
@@ -14765,7 +15120,7 @@ mod tests {
 
     /// A dispatch whose buffers no window spans binds each on its own (D746): STKT00001's copy,
     /// from one buffer to another 128 MiB away, prepares with both ranges bound and no window,
-    /// and two ranges that share a byte are refused.
+    /// and two ranges that share a byte are one buffer (D953).
     #[test]
     fn a_dispatch_binds_buffers_no_window_spans() {
         use super::Pipeline;
@@ -14844,19 +15199,159 @@ mod tests {
             pipeline.dispatch_write_spans(&state(DESTINATION), &memory),
             Some(vec![(DESTINATION, 256)])
         );
+        // Two ranges that share a byte, one written, are one buffer spanning both, the later bound
+        // from where its own range starts in it (D953).
         let overlapping = pipeline
             .prepare_dispatch(&state(SOURCE + 16), &memory)
-            .expect_err("two copies of one byte");
-        assert!(overlapping.contains("overlap"), "{overlapping}");
+            .expect("overlapping buffers prepare as one");
+        assert_eq!(overlapping.buffers, [(SOURCE, 272), (SOURCE + 16, 256)]);
+        assert_eq!(overlapping.aliases, [None, Some((0, 16))]);
+        assert!(!overlapping.unread[0], "a slot loads from the buffer");
         // The same range bound to both slots is one buffer, written through either (D937).
         let aliased = pipeline
             .prepare_dispatch(&state(SOURCE), &memory)
             .expect("one buffer bound twice prepares");
         assert_eq!(aliased.buffers, [(SOURCE, 256), (SOURCE, 256)]);
-        assert_eq!(aliased.aliases, [None, Some(0)]);
+        assert_eq!(aliased.aliases, [None, Some((0, 0))]);
         assert!(
             !aliased.unread[0],
             "the buffer is read before the run, since a slot loads from it"
+        );
+    }
+
+    /// Overlapping ranges one of which is written are one buffer, held by the lowest (D953), as run
+    /// 305's refused dispatches bound them: a 0x20-byte written range that a 0xe40f-byte written
+    /// one ends inside. A set grows through any member over an overlap with a written one; a slot
+    /// already sharing a member's buffer (D937) follows it; read-only copies stay apart; and a
+    /// buffer at a base of its own cannot join.
+    #[test]
+    fn overlapping_written_buffers_are_one_buffer() {
+        use super::share_written_overlaps;
+        let none = |_: usize| false;
+        // Slot 1, written, inside slot 0's end; slot 2 the same range as slot 1 (D937).
+        let mut ranges = [
+            (0x7400_9d05_f880, 0xe40f),
+            (0x7400_9d06_dc80, 0x20),
+            (0x7400_9d06_dc80, 0x20),
+        ];
+        let mut aliases = [None, None, Some((1, 0))];
+        share_written_overlaps((&mut ranges, &mut aliases), |slot| slot == 1, none)
+            .expect("shared");
+        assert_eq!(ranges[0], (0x7400_9d05_f880, 0xe420), "spans both");
+        assert_eq!(aliases, [None, Some((0, 0xe400)), Some((0, 0xe400))]);
+
+        // Written 0 overlaps 1 and 4, written 3 overlaps 2, and 1 and 2 overlap only read: two
+        // buffers, {4, 0, 1} held by 4, the lowest, and {2, 3} held by 2. The bytes 1 and 2 share
+        // nothing writes, so their two copies agree.
+        let mut ranges = [
+            (0x100, 0x40),
+            (0x130, 0x40),
+            (0x160, 0x40),
+            (0x190, 0x10),
+            (0x80, 0x90),
+        ];
+        let mut aliases = [None; 5];
+        let written = |slot: usize| slot == 0 || slot == 3;
+        share_written_overlaps((&mut ranges, &mut aliases), written, none).expect("shared");
+        assert_eq!((ranges[4], ranges[2]), ((0x80, 0xf0), (0x160, 0x40)));
+        assert_eq!(
+            aliases,
+            [
+                Some((4, 0x80)),
+                Some((4, 0xb0)),
+                None,
+                Some((2, 0x30)),
+                None
+            ]
+        );
+
+        let mut ranges = [(0x100, 0x40), (0x120, 0x40)];
+        let mut aliases = [None; 2];
+        share_written_overlaps((&mut ranges, &mut aliases), none, none).expect("read-only");
+        assert_eq!(aliases, [None, None], "two read-only copies agree");
+        assert_eq!(
+            share_written_overlaps((&mut ranges, &mut aliases), |_| true, |slot| slot == 1),
+            Err((0, 1)),
+            "a buffer read from a base of its own cannot be another's"
+        );
+    }
+
+    /// A dispatch's ray intersection reads its hierarchy's nodes through the window, so the window
+    /// covers the range its descriptor in user data names: the base in 256-byte units, the size
+    /// less one in bits 105:64. A size field of zero takes the largest readable span from the
+    /// base, and a hierarchy outside guest memory leaves the dispatch prepared with no window.
+    #[test]
+    fn a_dispatch_s_window_covers_the_hierarchy_it_intersects() {
+        use super::Pipeline;
+        use crate::dispatch::DispatchState;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        const PROGRAM: u64 = 0x1_0000;
+        const HIERARCHY: u64 = 0x4_0a60_0000;
+        struct Memory(Vec<(u64, Vec<u8>)>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                self.0.iter().find_map(|(base, bytes)| {
+                    let start = usize::try_from(address.checked_sub(*base)?).ok()?;
+                    bytes.get(start..start.checked_add(length)?)
+                })
+            }
+        }
+        // image_bvh_intersect_ray v[4:7], v[0:10], s[8:11]; s_endpgm.
+        let mut program: Vec<u8> = [0xf198_9f01_u32, 0x0002_0400, 0xbf81_0000, 0xbf9f_0000]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        program.resize(super::MAX_SHADER_BYTES, 0);
+        // Box sorting and barycentrics on, as Mesa builds it (`radv_nir_rt_common.c:582-585`).
+        let state = |base: u64, size_field: u32| {
+            let mut user_data = vec![Some(0); 12];
+            user_data[8] = Some((base >> 8) as u32);
+            user_data[9] = Some((base >> 40) as u32 & 0xff | 1 << 31);
+            user_data[10] = Some(size_field);
+            user_data[11] = Some(1 << 31 | 1 << 24);
+            DispatchState {
+                program: PROGRAM,
+                user_data,
+                inputs: ComputeInputs {
+                    thread_id_components: 1,
+                    threads: [64, 1, 1],
+                    ..ComputeInputs::default()
+                },
+                width: Width::Wave64,
+                dx10_clamp: None,
+                local_words: None,
+                groups: [1, 1, 1],
+                vertex_streamout: false,
+            }
+        };
+        let memory = Memory(vec![(PROGRAM, program), (HIERARCHY, vec![0; 0x8000])]);
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        let window = |state: &DispatchState, pipeline: &mut Pipeline| {
+            pipeline
+                .prepare_dispatch(state, &memory)
+                .expect("the intersection prepares")
+                .window
+                .map(|window| (window.address(), window.words()))
+        };
+        assert_eq!(
+            window(&state(HIERARCHY, 0xfff), &mut pipeline),
+            Some((HIERARCHY, 0x1000 / 4)),
+            "the 4 KiB the descriptor names"
+        );
+        assert_eq!(
+            window(&state(HIERARCHY, 0), &mut pipeline),
+            Some((HIERARCHY, 0x8000 / 4)),
+            "no size: as far as guest memory is readable from the base"
+        );
+        assert_eq!(
+            window(&state(0x8_0000_0000, 0xfff), &mut pipeline),
+            None,
+            "a hierarchy outside guest memory"
         );
     }
 

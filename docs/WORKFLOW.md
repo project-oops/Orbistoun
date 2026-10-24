@@ -482,6 +482,46 @@ breakpoint fires after the access completes, so each line reports `after the acc
 next instruction; naming the instruction itself would mean disassembling a vendor binary
 (D276).
 
+A guest compute dispatch that loses the device or holds it too long is run again alone from a
+capture rather than through the title. `ORBISTOUN_CAPTURE_DISPATCH` names programs by the
+address the run's log gives them; each one's first dispatch is written to `dispatch-<addr>/` in
+`ORBISTOUN_FRAME_DIR` before it is submitted; `<addr>:all` writes each of its first 32 to
+`dispatch-<addr>-<n>/`. A dispatch that loses the device is written to `dispatch-<addr>-lost/`
+without being asked. `ORBISTOUN_CAPTURE_RECENT=<n>` keeps a copy of the latest `n` dispatches,
+within 256 MiB, as they run, and a loss of the device writes them too, to
+`dispatch-<addr>-r<ordinal>/`, listed oldest first in `dispatch-recent.txt` with any too large to
+keep; unset, nothing is copied. A capture holds the module, the user data, the grid, the
+guest-memory window and each bound image and buffer, with the guest range of the window and each buffer and the
+dispatch's place among the run's. `replay-dispatch` rebuilds the same bindings and reports each
+run's device time, whether it lost the device, and a hash of its output, so two builds are
+compared on one dispatch; `--out` writes what it left, named as the inputs are, to compare with
+the next dispatch's inputs. `ORBISTOUN_WATCH_GPU=<addr>+<len>` compares a range after each
+command-processor packet and names the packet after which it changed, whatever wrote it: a
+dispatch through any binding or atomic, a draw, `DMA_DATA`, `WRITE_DATA`, `RELEASE_MEM` or
+`EVENT_WRITE`. A change found as a stream starts was made outside the command processor, by the
+guest CPU or by work carried out apart from it. Each dispatch that changes the range is also
+logged by binding and the first 16 are captured to `dispatch-<addr>-w<n>/` from the inputs they
+were handed, so a replay makes the same change. With `:bound`, each dispatch that binds the range
+is logged with its slots, how each is bound and whether its atomics reach them, and the first 16
+are captured to `dispatch-<addr>-b<n>/`.
+
+```bash
+ORBISTOUN_CAPTURE_DISPATCH=0x3dc3400 ./bin/orbistoun run <title>
+orbistoun-cli replay-dispatch <frames>/dispatch-3dc3400 --repeat 5 --out replayed
+```
+
+What a title's shaders cost is measured from its kept translations rather than by running it.
+`shader-census` makes every kept translation again with this build's translator and sets each
+module's words against the guest instructions it came from; `--compile` also has the driver
+compile each one, on up to four threads, with no pipeline cache, and times it. A compute module is
+compiled as a dispatch's pipeline is; a draw's pipeline needs state the store does not keep, so a
+draw's module is timed as a shader module alone, which a driver that compiles at pipeline creation
+does in no time. `--write` keeps every row as TSV, so two builds' censuses diff line for line.
+
+```bash
+orbistoun-cli shader-census <title> [--compile] [--top N] [--write <file>]
+```
+
 ## Outputs
 
 | Artifact | Where | Written by |

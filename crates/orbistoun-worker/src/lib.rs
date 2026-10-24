@@ -24,6 +24,7 @@ pub mod fault;
 pub mod flip_origins;
 pub mod frame_region;
 mod media;
+mod memory;
 mod memscan;
 pub mod page_guard;
 pub mod profile;
@@ -67,6 +68,7 @@ pub fn serve<R: BufRead + Send + 'static, W: Write>(
     service: &Service,
     on_hangup: impl FnOnce() + Send + 'static,
 ) -> io::Result<()> {
+    memory::sample_heap_from_env();
     let (sender, receiver) = std::sync::mpsc::channel::<io::Result<Request>>();
     let reader = std::thread::spawn(move || {
         let mut input = input;
@@ -589,6 +591,8 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::install_draw_executor(render::execute_draws);
     // Compute dispatches, carried out at submit over guest memory the same way.
     orbistoun_gpu::agc_driver::install_dispatch_executor(render::execute_dispatch);
+    // A lost device ends the run, once the submissions it was running are logged.
+    orbistoun_gpu_vulkan::on_device_lost(report::end_on_device_loss);
     // Read back when the drawn frame is written into guest memory: at the flip by default, or after
     // every submission under `ORBISTOUN_TARGET_WRITEBACK=submit` (D714).
     orbistoun_gpu::agc_driver::install_frame_reader(render::read_frame);

@@ -95,6 +95,13 @@ pub mod op {
     pub const ATOMIC_AND: u16 = 240;
     /// Ors a value into the word a pointer names, as one indivisible step.
     pub const ATOMIC_OR: u16 = 241;
+    /// Replaces the word a pointer names with a value, as one indivisible step, answering what it
+    /// held.
+    pub const ATOMIC_EXCHANGE: u16 = 229;
+    /// Exclusive-ors a value into the word a pointer names, as one indivisible step.
+    pub const ATOMIC_XOR: u16 = 242;
+    /// Subtracts a value from the word a pointer names, as one indivisible step.
+    pub const ATOMIC_I_SUB: u16 = 235;
     /// Adds a value to the word a pointer names, as one indivisible step, answering what it held.
     pub const ATOMIC_I_ADD: u16 = 234;
     /// Keeps the unsigned minimum of the word a pointer names and a value, as one indivisible step,
@@ -133,6 +140,8 @@ pub mod op {
     ///
     /// Must immediately precede the block's branch; that is what makes a backward branch a loop.
     pub const LOOP_MERGE: u16 = 246;
+    /// A value chosen by the block control came from: pairs of a value and that block.
+    pub const PHI: u16 = 245;
     /// Declares where a selection converges.
     pub const SELECTION_MERGE: u16 = 247;
     /// Integer equality, producing a boolean.
@@ -426,6 +435,10 @@ pub mod decoration {
     pub const NON_READABLE: u32 = 25;
     /// Marks memory the module only ever reads: a draw's bound buffers.
     pub const NON_WRITABLE: u32 = 24;
+    /// Every access really reaches memory: none is merged, hoisted out of a loop or left out.
+    pub const VOLATILE: u32 = 21;
+    /// What another invocation writes, in any workgroup, is what a later access reads.
+    pub const COHERENT: u32 = 23;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -486,6 +499,12 @@ pub mod capability {
     /// 16-bit integer types, for narrowing a packed field to the width of a half before it is read
     /// as one.
     pub const INT16: u32 = 22;
+    /// 64-bit integer types, for a guest's 64-bit buffer atomics. A device without `shaderInt64`
+    /// refuses a module declaring this.
+    pub const INT64: u32 = 11;
+    /// Atomics on 64-bit integers. A device without `shaderBufferInt64Atomics` refuses a module
+    /// declaring this.
+    pub const INT64_ATOMICS: u32 = 12;
 }
 
 /// Execution scopes, for the group operations.
@@ -1959,6 +1978,14 @@ pub const GDS_BINDING: u32 = 6;
 /// PPSA25872's program declares in `m0`. An access past it is dropped, as one past `m0` is.
 pub const GDS_WORDS: u32 = 0x4000;
 
+/// Where a guest dispatch module's observation says whether an access left the memory it reaches
+/// exactly: non-zero once one did.
+pub const DISPATCH_ESCAPE_WORD: u32 = 0;
+
+/// Where a guest dispatch module's observation names a loop it cut (D949): the byte offset of the
+/// loop's backward branch plus one, and zero where it cut none.
+pub const DISPATCH_LOOP_WORD: u32 = 1;
+
 /// Whether `module` declares a variable at `binding` of descriptor set zero: an `OpDecorate ...
 /// Binding binding` beside an `OpDecorate ... DescriptorSet 0` on the same target.
 #[must_use]
@@ -2531,8 +2558,7 @@ static SHAPES: &[ShapeEntry] = &[
         &[0, 1, 2],
         None,
         RestStride::Every,
-    ),
-    // Result type, result, pointer, scope, semantics and value.
+    ), // Result type, result, pointer, scope, semantics and value.
     (
         op::ATOMIC_AND,
         Some(1),
@@ -2542,6 +2568,27 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     (
         op::ATOMIC_OR,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_EXCHANGE,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_XOR,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_I_SUB,
         Some(1),
         &[0, 2, 3, 4, 5],
         None,
@@ -2952,6 +2999,8 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     // Operand two is a loop-control literal.
     (op::LOOP_MERGE, None, &[0, 1], None, RestStride::Every),
+    // Result type, result, then (value, parent block) pairs, every one an identifier.
+    (op::PHI, Some(1), &[0], Some(2), RestStride::Every),
     // Operand one is a selection-control literal.
     (op::SELECTION_MERGE, None, &[0], None, RestStride::Every),
     // Selector, default label, then (literal, label) repeated - so the tail starts at

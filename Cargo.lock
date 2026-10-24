@@ -3047,6 +3047,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-firmware",
  "orbistoun-gpu",
+ "orbistoun-gpu-vulkan",
  "orbistoun-hle",
  "orbistoun-names",
  "orbistoun-nid",
@@ -3157,6 +3158,7 @@ name = "orbistoun-gpu"
 version = "0.1.0"
 dependencies = [
  "orbistoun-core",
+ "orbistoun-env",
  "orbistoun-hle",
  "orbistoun-kernel",
  "orbistoun-mem",

@@ -195,6 +195,9 @@ fn initialize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if pointer < address {
         return refused();
     }
+    // The context is the fiber's stack, committed before code runs on it: a fault committing a
+    // stack page is delivered on the stack itself.
+    orbistoun_mem::lazy::commit(address, size);
 
     let Ok(mut table) = fibers().lock() else {
         return refused();

@@ -19,7 +19,8 @@ zero. A branch whose condition is known is followed.
 The module reads the range relative to its guest base, the address's low half, which the dispatch
 puts in its push block after the partial-group words. A load whose lanes' addresses or mask the
 host cannot know is refused by name, and so is a dispatch of more waves than a dispatch runs
-through the host in one preparation.
+through the host in one preparation. Amended by D950: such a dispatch runs a sample of its groups,
+and a load outside the range it places is an escape.
 
 **Why:** Grand Theft Auto V's first compute program loads bytes from addresses each lane forms,
 `global_load_ubyte v0, v[1:2], off`. A guest dispatch writes guest memory for real, so an access

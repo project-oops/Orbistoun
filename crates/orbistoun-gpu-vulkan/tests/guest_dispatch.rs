@@ -146,6 +146,8 @@ fn translated_for(
                 integer_images: [false; 2],
                 integer_fetched: 0,
                 first_thread: 0,
+                sampled_buffers: 0,
+                scratch_wave_bytes: 0,
             }),
             per_invocation: subgroup,
             ..UserData::default()

@@ -530,6 +530,9 @@ pub unsafe fn spawn(
     // The new thread's logical time starts at this one's (D735).
     let born = orbistoun_hle::clocks::thread_time();
     if let Some((low, size)) = supplied_stack {
+        // Committed before the thread runs on it: a fault committing a stack page is delivered on
+        // the stack itself.
+        orbistoun_mem::lazy::commit(low, size);
         let body = move || {
             orbistoun_hle::clocks::begin_thread_at(born);
             become_thread(handle);
