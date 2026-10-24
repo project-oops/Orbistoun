@@ -1010,6 +1010,11 @@ pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
 /// The guest's flips so far: the frames a target's idleness is counted in.
 static FLIPS: AtomicU64 = AtomicU64::new(0);
 
+/// The guest's flips so far.
+pub(crate) fn flips() -> u64 {
+    FLIPS.load(Ordering::Relaxed)
+}
+
 /// The flip idle targets were last let go of at.
 static LET_GO_AT: AtomicU64 = AtomicU64::new(u64::MAX);
 

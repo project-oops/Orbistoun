@@ -31,7 +31,10 @@ fn device() -> Option<&'static Mutex<Sender<Job>>> {
                     ON_DEVICE_THREAD.with(|on| on.set(true));
                     crate::profile::watch_this_thread("device");
                     for job in jobs {
+                        RUNNING_SINCE
+                            .store(since_start() + 1, std::sync::atomic::Ordering::Relaxed);
                         job();
+                        RUNNING_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
                     }
                 })
                 .ok()
@@ -62,9 +65,46 @@ pub fn on_device<'a, R: Send + 'a>(work: impl FnOnce() -> R + Send + 'a) -> Opti
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .send(job)
         .ok()?;
-    orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DeviceAnswerWait, || {
+    AWAITING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let answer = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DeviceAnswerWait, || {
         answered.recv().ok().flatten()
-    })
+    });
+    AWAITING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    answer
+}
+
+/// When the job the device thread runs now began, in nanoseconds since [`since_start`]'s start,
+/// plus one; zero while it runs none.
+static RUNNING_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Callers waiting for the device thread to answer them.
+static AWAITING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Nanoseconds since the first time this was asked.
+fn since_start() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX - 1)
+}
+
+/// What the device thread is doing: how long the job it runs now has run, if it runs one, how many
+/// callers wait for its answer, and the jobs and bytes handed to it without waiting and not yet
+/// run (`None` where that count's lock is held now). Takes no lock that a job holds.
+pub(crate) fn state() -> (Option<std::time::Duration>, u64, Option<(usize, usize)>) {
+    let since = RUNNING_SINCE.load(std::sync::atomic::Ordering::Relaxed);
+    let running = (since != 0)
+        .then(|| std::time::Duration::from_nanos(since_start().saturating_sub(since - 1)));
+    let handed = handed_over().held.try_lock().ok().map(|held| *held);
+    (
+        running,
+        AWAITING.load(std::sync::atomic::Ordering::Relaxed),
+        handed,
+    )
 }
 
 /// Hands `work`, which owns about `bytes` of memory, to the device thread to run after everything

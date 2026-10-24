@@ -5795,8 +5795,7 @@ impl Model for Wavefront<'_> {
 
     fn close_lane_loop(&mut self) {
         self.end_lane_loop(None);
-    }
-    // A mask is built over every modelled lane, running or not, as the lanes emitted one by one
+    } // A mask is built over every modelled lane, running or not, as the lanes emitted one by one
     // build it.
     fn open_carrying_lane_loop(&mut self, carried: (Id, Id)) -> Option<(Id, Id)> {
         if !self.loops_lanes() || self.modelled < 2 {

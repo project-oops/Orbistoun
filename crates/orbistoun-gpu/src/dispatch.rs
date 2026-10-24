@@ -139,30 +139,35 @@ fn partial_group(
 /// threads, as radv sets up an unaligned dispatch (`USE_THREAD_DIMENSIONS`,
 /// `radv_cmd_buffer.c:14795-14863`): along each dimension the groups that cover it, the last
 /// running the remainder under `PARTIAL_TG_EN` (`partial`), or a whole group's where the grid divides
-/// evenly (D905). Without `PARTIAL_TG_EN` the last group is a whole one, its threads past the grid
-/// running too (D940, assumed).
+/// evenly (D905). Without `PARTIAL_TG_EN` the last group runs the remainder all the same: no thread
+/// past the grid runs. D940 assumed the opposite; Grand Theft Auto V's bounding-volume refit at
+/// `0x3ce6d00`, 0x128 threads of 64 under `0x61` with no bound of its own, is consistent only with
+/// this, as its tree optimiser counts each node's arrivals (`guest-observed`).
 fn thread_groups(
     grid: [u32; 3],
     full: [u32; 3],
     partial: Option<[u32; 3]>,
 ) -> Result<([u32; 3], Option<[u32; 3]>), &'static str> {
     let mut groups = [0; 3];
+    let mut remainders = [0; 3];
     for i in 0..3 {
         if full[i] == 0 {
             return Err("a grid given in threads, in groups of none");
         }
         groups[i] = grid[i].div_ceil(full[i]);
-        let remainder = match grid[i] % full[i] {
+        remainders[i] = match grid[i] % full[i] {
             0 => full[i],
             threads => threads,
         };
         match partial {
-            Some(partial) if partial[i] != remainder => {
+            Some(partial) if partial[i] != remainders[i] => {
                 return Err("a grid given in threads whose partial group is not its remainder");
             }
             _ => {}
         }
     }
+    // A grid every group size divides runs whole groups alone.
+    let partial = partial.or_else(|| (remainders != full).then_some(remainders));
     Ok((groups, partial))
 }
 
@@ -858,8 +863,11 @@ mod tests {
     /// A grid given in threads (`USE_THREAD_DIMENSIONS`) runs the groups that cover it, as radv
     /// sets one up for an unaligned dispatch (`radv_cmd_buffer.c:14795-14863`): Grand Theft Auto V's
     /// first dispatch gives `0x4800` threads of 64 under initiator `0x61`. A remainder runs in a
-    /// partial last group of exactly that many threads (D905), and without one in a whole last group
-    /// (D940): GTA V gives 0x477 threads of 64 under `0x61`.
+    /// partial last group of exactly that many threads (D905), with `PARTIAL_TG_EN` or without it:
+    /// GTA V gives 0x477 threads of 64 under `0x61`, and a whole last group's threads past the grid
+    /// would not be its own. Its bounding-volume refit at `0x3ce6d00` has no bound of its own: those
+    /// threads walk to the root and count as arrivals there, and the tree optimiser at `0x3dc9a00`
+    /// then restructures the root twice at once and leaves the tree with cycles.
     #[test]
     fn a_grid_given_in_threads_runs_the_groups_covering_it() {
         let state = state_at(&clear_writes(), 0x100, [0x4800, 1, 1], 0x61).expect("runs");
@@ -879,11 +887,17 @@ mod tests {
             })
         );
 
-        let whole = state_at(&clear_writes(), 0x100, [0x477, 1, 1], 0x61).expect("runs");
+        let unflagged = state_at(&clear_writes(), 0x100, [0x477, 1, 1], 0x61).expect("runs");
         assert_eq!(
-            (whole.groups, whole.inputs.partial),
-            ([0x12, 1, 1], None),
-            "a remainder with no partial group runs a whole last group"
+            (unflagged.groups, unflagged.inputs.partial),
+            (
+                [0x12, 1, 1],
+                Some(PartialGroups {
+                    last: [0x11, 0, 0],
+                    threads: [0x37, 1, 1],
+                })
+            ),
+            "a remainder with no partial group named runs the remainder alone"
         );
         assert!(
             state_at(&partial, 0x100, [101, 1, 1], 0x63).is_err(),

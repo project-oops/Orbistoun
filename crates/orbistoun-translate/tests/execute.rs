@@ -8634,6 +8634,38 @@ fn the_local_share_takes_pairs_bytes_and_ors() {
     assert_eq!(vector(&registers, 6), 0xab, "byte 5 alone");
 }
 
+/// Grand Theft Auto V's in-world compute program writes and reads 64-bit pairs through the local
+/// share (`ds_write2_b64`, DS 78; `ds_read2_b64`, DS 119), each offset in units of eight bytes: a
+/// pair written at offsets 1 and 3 lands at bytes 8 and 24 and reads back as four words, and the
+/// one-word pair read at word offsets 2 and 7 finds the first pair's low word and the second's high.
+#[test]
+fn the_local_share_takes_sixty_four_bit_pairs() {
+    if !device_or_skip("the_local_share_takes_sixty_four_bit_pairs") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 0)];
+    program.extend(v_mov_literal(1, 0x11));
+    program.extend(v_mov_literal(2, 0x22));
+    program.extend(v_mov_literal(3, 0x33));
+    program.extend(v_mov_literal(4, 0x44));
+    program.extend(ds("ds_write2_b64", [1, 3], [0, 1, 3, 0]));
+    // Only v0-v7 are observed, so the reads land over the values written.
+    program.extend(ds("ds_read2_b64", [1, 3], [0, 0, 0, 4]));
+    program.extend(ds("ds_read2_b32", [2, 7], [0, 0, 0, 1]));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [4, 5, 6, 7].map(|n| vector(&registers, n)),
+        [0x11, 0x22, 0x33, 0x44],
+        "both pairs back, in order"
+    );
+    assert_eq!(
+        [1, 2].map(|n| vector(&registers, n)),
+        [0x11, 0x44],
+        "bytes 8 and 28: the offsets count eight bytes"
+    );
+}
+
 /// Grand Theft Auto V's scene compute program clamps indices with the unsigned minimum and
 /// maximum (VOP2 19 and 20), forms an address with the 24-bit unsigned multiply-add (VOP3 323,
 /// `v_mad_u32_u24 v0, 12, v6, 0x600`) and reads a three-word element from the local share

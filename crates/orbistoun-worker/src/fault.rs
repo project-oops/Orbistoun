@@ -10,6 +10,10 @@
 const DEVICE_LOST: &str =
     "the host's graphics device was lost; the log names the submissions it was running";
 
+/// A worker that ended its stalled run, as `ORBISTOUN_STALL_REPORT` asked.
+const STALLED: &str =
+    "the run stalled and was ended; the log's stall report names where each queue and thread stood";
+
 /// A fault this maps by name, with the platform code that identifies it.
 ///
 /// Windows reports these as exit codes taken from the exception that killed the
@@ -83,6 +87,9 @@ pub fn describe(code: Option<i32>, _signal: Option<i32>) -> String {
     if code == crate::report::DEVICE_LOST_EXIT {
         return DEVICE_LOST.to_owned();
     }
+    if code == crate::report::STALLED_EXIT {
+        return STALLED.to_owned();
+    }
     let raw = code as u32;
     FAULTS.iter().find(|(c, _)| *c == raw).map_or_else(
         || format!("the worker exited with status {raw:#010x}"),
@@ -110,6 +117,7 @@ pub fn describe(code: Option<i32>, signal: Option<i32>) -> String {
             "the guest reached the call budget it was given".to_owned()
         }
         Some(c) if c == crate::report::DEVICE_LOST_EXIT => DEVICE_LOST.to_owned(),
+        Some(c) if c == crate::report::STALLED_EXIT => STALLED.to_owned(),
         Some(code) => format!("the worker exited with status {code}"),
         None => "the worker ended without reporting a status".to_owned(),
     }
@@ -153,6 +161,13 @@ mod tests {
     fn a_lost_device_is_named() {
         let described = describe(Some(crate::report::DEVICE_LOST_EXIT), None);
         assert_eq!(described, super::DEVICE_LOST);
+    }
+
+    /// A run ended on a stall says so.
+    #[test]
+    fn a_stalled_run_is_named() {
+        let described = describe(Some(crate::report::STALLED_EXIT), None);
+        assert_eq!(described, super::STALLED);
     }
 
     /// An unrecognised status is reported as its number: hex on Windows, where exception codes

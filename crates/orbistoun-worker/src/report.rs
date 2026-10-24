@@ -2571,7 +2571,7 @@ fn tested_answers(counts: &[(usize, u64)]) -> Vec<orbistoun_report::trace::Teste
 ///
 /// Names the slot when it cannot name the function, so two different unlabelled stubs never read as
 /// one function called twice (D366).
-fn labelled(index: usize) -> String {
+pub(crate) fn labelled(index: usize) -> String {
     label_of(index).map_or_else(|| format!("unknown#{index}"), str::to_owned)
 }
 
@@ -2600,7 +2600,7 @@ fn tail_of_recorded() -> Vec<TracedCall> {
 /// handle (D806). For an address wait, the address and the word it holds now, which tells a wake
 /// that never came from one that came for another value. Nothing is read for any other call, whose
 /// first argument may be no address.
-fn waited_on(call: &str, first: u64) -> Option<String> {
+pub(crate) fn waited_on(call: &str, first: u64) -> Option<String> {
     use orbistoun_kernel::sync;
     // With what each holds, so a wake that never came reads apart from one that was missed.
     if let Ok(handle) = i32::try_from(first)
@@ -2634,7 +2634,7 @@ fn waited_on(call: &str, first: u64) -> Option<String> {
 
 /// Where a call made with the guest stack at `rsp` returns to: the stack's top word, as the guest's
 /// `call` left it, read only where the stack is mapped guest memory.
-fn called_from(rsp: u64) -> Option<u64> {
+pub(crate) fn called_from(rsp: u64) -> Option<u64> {
     if rsp == 0 || rsp % 8 != 0 || !orbistoun_thunk::is_mapped(rsp) {
         return None;
     }
@@ -3185,6 +3185,22 @@ pub fn end_on_device_loss() {
             summarise_calls("when the graphics device was lost", &trace);
             std::process::exit(DEVICE_LOST_EXIT);
         });
+}
+
+/// Exit status for a run ended because it stalled: nothing flipped and the command processor
+/// completed nothing for as long as `ORBISTOUN_STALL_REPORT` allows, and it asked for the end.
+pub const STALLED_EXIT: i32 = 0x0B11;
+
+/// Ends a stalled run once its stall report is written, writing the trace and the exit report as
+/// a limit does. Called from the stall watchdog's own thread, which touches no guest thread.
+pub(crate) fn end_on_stall() -> ! {
+    let module = MODULE.get().map_or("unknown", String::as_str);
+    note_ended_by(orbistoun_report::trace::STALLED);
+    what_the_guest_asked_for();
+    let trace = collect_calls(module, "Entered");
+    persist(&trace);
+    summarise_calls("when it stalled", &trace);
+    std::process::exit(STALLED_EXIT);
 }
 
 /// How many imports [`inside_line`] names.

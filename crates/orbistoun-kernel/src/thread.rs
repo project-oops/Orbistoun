@@ -9,6 +9,9 @@
 //! counts by default, not the host's. An affinity request is mapped onto the host and the
 //! original is kept (see [`AffinityPolicy`], D150).
 
+mod cpu_time;
+pub use cpu_time::cpu_time;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -793,6 +796,7 @@ pub fn current() -> ThreadHandle {
 /// Called once, at the top of a spawned thread, before any guest code runs on it.
 pub fn become_thread(handle: ThreadHandle) {
     current_handle().with(|c| c.set(handle));
+    cpu_time::note_current(handle);
     // Recorded here rather than at registration: a thread is created by one thread and runs on
     // another.
     let mut effective = Affinity::default();

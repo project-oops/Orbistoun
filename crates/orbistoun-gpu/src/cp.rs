@@ -682,7 +682,7 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
         .iter()
         .skip_while(|segment| segment.first < from)
         .peekable();
-    watch_after(stream, None, memory);
+    after_packet(stream, None, memory);
     for packet in walked.packets.iter().filter(|packet| packet.offset >= from) {
         let offset = packet.offset;
         let opcode = match packet.kind {
@@ -709,7 +709,7 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
                 result.stopped_body = body_head(bytes);
                 return result;
             }
-            watch_after(stream, Some((offset, opcode)), memory);
+            after_packet(stream, Some((offset, opcode, true)), memory);
             result.draws += 1;
             continue;
         }
@@ -718,7 +718,7 @@ pub fn execute_from(stream: &[u8], from: u32, memory: &mut dyn CpMemory) -> CpEx
             .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
             .collect();
         let step = carry_out(stream, (offset, opcode), &body, memory, &mut result);
-        watch_after(stream, Some((offset, opcode)), memory);
+        after_packet(stream, Some((offset, opcode, step.is_ok())), memory);
         if let Err(stop) = step {
             result.stopped = match stop {
                 Stop::NeedsGpu => Stopped::NeedsGpu { offset, opcode },
@@ -784,17 +784,31 @@ fn carry_out(
     }
 }
 
-/// Names each range `ORBISTOUN_WATCH_GPU` watches that changed since it was last compared, as made
-/// by the packet at byte `offset` with `opcode`, or - with no packet, as a stream starts - outside
-/// the command processor ([`crate::memory_watch`]).
-fn watch_after(stream: &[u8], packet: Option<(u32, u8)>, memory: &mut dyn CpMemory) {
+/// Packets the command processor carried out to completion this run.
+static PACKETS_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many packets the command processor has carried out to completion this run: a wait polled
+/// and not yet satisfied is not one, so a queue standing at a wait leaves this still.
+#[must_use]
+pub fn packets_done() -> u64 {
+    PACKETS_DONE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// After the packet at byte `offset` with `opcode` - `done` where it completed - or, with no
+/// packet, as a stream starts: counts a completed packet, and names each range
+/// `ORBISTOUN_WATCH_GPU` watches that changed since it was last compared, as made by that packet or
+/// outside the command processor ([`crate::memory_watch`]).
+fn after_packet(stream: &[u8], packet: Option<(u32, u8, bool)>, memory: &mut dyn CpMemory) {
+    if packet.is_some_and(|(_, _, done)| done) {
+        PACKETS_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let changes = crate::memory_watch::changes(&*memory);
     if changes.is_empty() {
         return;
     }
     let by = match packet {
         None => "as a stream starts: outside the command processor, by the guest CPU or by work carried out apart from it".to_owned(),
-        Some((offset, opcode)) => {
+        Some((offset, opcode, _)) => {
             let name = match opcode {
                 measured::DMA_DATA => "DMA_DATA",
                 measured::RELEASE_MEM => "RELEASE_MEM",

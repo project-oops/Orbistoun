@@ -18,8 +18,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod attachments;
 mod census;
 mod last_bound;
+mod stall;
 
 pub use census::host_held;
+pub use stall::{MemoryWait, QueueState, Stands, describe as describe_queue, queue_states};
 
 use last_bound::bind_last_submission;
 
@@ -6484,6 +6486,12 @@ mod command_processor {
             let (bytes, submission) = *work;
             run_submission(&bytes, submission);
         }
+    }
+
+    /// How many submissions are queued and not yet carried out; `None` where the queue is held
+    /// now, so a report made during a stall never waits on it.
+    pub(super) fn queued() -> Option<usize> {
+        IN_FLIGHT.0.try_lock().ok().map(|queued| queued.len())
     }
 
     pub(super) fn settle(limit: std::time::Duration) -> bool {

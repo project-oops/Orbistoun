@@ -51,6 +51,8 @@ pub const SUPPORTED: &[&str] = &[
     "ds_write_b32",
     "ds_write2_b32",
     "ds_read2_b32",
+    "ds_write2_b64",
+    "ds_read2_b64",
     "ds_read_b96",
     "ds_write_b96",
     "ds_min_u32",
@@ -3221,6 +3223,8 @@ pub const LANE_LOOPED: &[&str] = &[
     "ds_write_b32",
     "ds_read2_b32",
     "ds_write2_b32",
+    "ds_read2_b64",
+    "ds_write2_b64",
     "ds_read_b64",
     "ds_read_b96",
     "ds_read_b128",
@@ -3835,7 +3839,8 @@ fn memory_instruction<M: Model + ?Sized>(
         "ds_write_b32" | "ds_read_b32" | "ds_read_b96" | "ds_write2_b32" | "ds_read2_b32"
         | "ds_write_b8" | "ds_read_u8" | "ds_or_b32" | "ds_write_b96" | "ds_write_b128"
         | "ds_min_u32" | "ds_max_u32" | "ds_add_rtn_u32" | "ds_add_u32" | "ds_min_f32"
-        | "ds_max_f32" | "ds_write_b64" | "ds_read_b64" | "ds_read_b128" => {
+        | "ds_max_f32" | "ds_write_b64" | "ds_read_b64" | "ds_read_b128" | "ds_write2_b64"
+        | "ds_read2_b64" => {
             local_share_instruction(model, instruction, name)?;
             model.after_local_access();
             Ok(())
@@ -7351,7 +7356,9 @@ fn local_share_instruction<M: Model + ?Sized>(
         "ds_read_b96" => local_share_words(model, instruction, 3),
         "ds_write_b96" => local_share_write_words(model, instruction, 3),
         "ds_write_b128" => local_share_write_words(model, instruction, 4),
-        "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
+        "ds_write2_b32" | "ds_read2_b32" | "ds_write2_b64" | "ds_read2_b64" => {
+            local_share_pair(model, instruction, name)
+        }
         _ => local_share_merge(model, instruction, name),
     }
 }
@@ -7492,7 +7499,10 @@ fn within_global_share<M: Model + ?Sized>(model: &mut M, byte_address: Id) -> Id
 
 /// `ds_write2_b32 address, a, b offset0 offset1` and `ds_read2_b32 d, address offset0 offset1`: two
 /// words at the address plus each eight-bit offset in words (AMD's published RDNA instruction set,
-/// `DS_WRITE2_B32`, `DS_READ2_B32`); a read fills `d` and the register after it.
+/// `DS_WRITE2_B32`, `DS_READ2_B32`); a read fills `d` and the register after it. The `_b64` forms
+/// move two words at each, their offsets counted in eight bytes (`DS_WRITE2_B64`, `DS_READ2_B64`):
+/// a write takes each value from a register and the one after it, and a read fills four registers
+/// from `d`.
 fn local_share_pair<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7502,19 +7512,21 @@ fn local_share_pair<M: Model + ?Sized>(
         offset: instruction.offset,
         detail,
     };
-    let word_offsets = |first: &Operand, second: &Operand| match (first, second) {
+    // Words an element holds, so its offsets' unit is that many words.
+    let words: u32 = if name.ends_with("_b64") { 2 } else { 1 };
+    let element_offsets = |first: &Operand, second: &Operand| match (first, second) {
         (Operand::Immediate(a), Operand::Immediate(b)) => u32::try_from(*a)
             .ok()
             .zip(u32::try_from(*b).ok())
-            .map(|(a, b)| [a * 4, b * 4]),
+            .map(|(a, b)| [a * 4 * words, b * 4 * words]),
         _ => None,
     };
-    let reading = name == "ds_read2_b32";
+    let reading = name.starts_with("ds_read2_");
     let (address, offsets, registers) = match instruction.operands.as_slice() {
         [Operand::Vector(destination), address, first, second] if reading => (
             address,
-            word_offsets(first, second),
-            [u32::from(*destination), u32::from(*destination) + 1],
+            element_offsets(first, second),
+            [u32::from(*destination), u32::from(*destination) + words],
         ),
         [
             address,
@@ -7524,7 +7536,7 @@ fn local_share_pair<M: Model + ?Sized>(
             second,
         ] if !reading => (
             address,
-            word_offsets(first, second),
+            element_offsets(first, second),
             [u32::from(*a), u32::from(*b)],
         ),
         _ => {
@@ -7536,17 +7548,20 @@ fn local_share_pair<M: Model + ?Sized>(
     let offsets = offsets.ok_or_else(|| refuse("a pair access's offsets are not immediates"))?;
     for lane in running_lanes(model) {
         let base = model.read_source(instruction, address, lane)?;
-        for (offset, register) in offsets.into_iter().zip(registers) {
-            let offset = model.constant(offset);
-            let byte_address = model.add(base, offset);
-            let index = model.local_word_index(byte_address);
-            if reading {
-                let value = model.read_local(index)?;
-                model.write_vector_lane(register, lane, value);
-            } else {
-                let value =
-                    model.read_source(instruction, &Operand::Vector(register as u16), lane)?;
-                model.write_local(index, value, lane)?;
+        for (offset, first) in offsets.into_iter().zip(registers) {
+            for word in 0..words {
+                let (offset, register) = (offset + 4 * word, first + word);
+                let offset = model.constant(offset);
+                let byte_address = model.add(base, offset);
+                let index = model.local_word_index(byte_address);
+                if reading {
+                    let value = model.read_local(index)?;
+                    model.write_vector_lane(register, lane, value);
+                } else {
+                    let value =
+                        model.read_source(instruction, &Operand::Vector(register as u16), lane)?;
+                    model.write_local(index, value, lane)?;
+                }
             }
         }
     }

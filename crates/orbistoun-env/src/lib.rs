@@ -274,6 +274,17 @@ pub const CAPTURE_DISPATCH: Var = Var {
     read_by: "orbistoun-gpu-vulkan",
 };
 
+/// How long a run may go without a flip and without a command-processor packet completing before it
+/// logs a stall report, and whether it then ends.
+pub const STALL_REPORT: Var = Var {
+    name: "ORBISTOUN_STALL_REPORT",
+    kind: Kind::Diagnostic,
+    summary: "<seconds>[:end], 300 when unset, off for none: after that long with no flip and no command-processor packet completed, one report names where each queue stands and what it waits for, what the device thread and each guest thread is doing and how busy each is; with :end the run then ends and writes its exit report",
+    example: "120:end",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// How many of the latest guest compute dispatches are kept, so a loss of the device writes out
 /// the history that led to it.
 pub const CAPTURE_RECENT: Var = Var {
@@ -967,6 +978,7 @@ pub const REGISTRY: &[Var] = &[
     DUMP_IMAGE,
     CAPTURE_DISPATCH,
     CAPTURE_RECENT,
+    STALL_REPORT,
     WATCH_GPU,
     CAPTURE_POSITIONS,
     LIMIT,
@@ -1073,6 +1085,7 @@ mod tests {
         super::DUMP_IMAGE,
         super::CAPTURE_DISPATCH,
         super::CAPTURE_RECENT,
+        super::STALL_REPORT,
         super::WATCH_GPU,
         super::CAPTURE_POSITIONS,
         super::LIMIT,

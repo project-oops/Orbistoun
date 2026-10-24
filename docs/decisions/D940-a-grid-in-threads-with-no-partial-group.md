@@ -1,6 +1,6 @@
 # D940 - A grid in threads with no partial group runs whole groups
 
-**Status:** decided
+**Status:** superseded by D959 (threads past the grid do not run; guest-observed)
 **Date:** 2026-10-21
 **known_by:** assumed
 

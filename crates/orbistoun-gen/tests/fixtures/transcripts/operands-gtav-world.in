@@ -1,9 +1,9 @@
 // Grand Theft Auto V's in-world compute programs' instructions whose operand layouts the other
 // probes do not solve: the lane permute through the local data share's crossbar, the 64-bit and
 // one-word buffer atomics its scans publish and poll with, the local share's add that answers
-// nothing, the long-form complement and the funnel shift; and the cache invalidations and the
-// rest of the one-word buffer accesses, so that a program using one is refused by its name rather
-// than for an operand nothing laid out.
+// nothing, the long-form complement and the funnel shift; the local share's paired 64-bit write
+// and read; and the cache invalidations and the rest of the one-word buffer accesses, so that a
+// program using one is refused by its name rather than for an operand nothing laid out.
 // Every field is sampled at its top and at two other values, so no narrower window explains it.
 //
 // target triple: amdgcn-amd-amdhsa
@@ -129,3 +129,17 @@ buffer_atomic_add_x2 v[2:3], v40, s[8:11], s3 offen
 buffer_atomic_add_x2 v[254:255], v255, s[100:103], s105 offen
 buffer_atomic_add_x2 v[128:129], v0, s[64:67], s101 idxen
 buffer_atomic_add_x2 v[17:18], v128, s[36:39], s0 offen glc
+
+// ---- DS: the paired 64-bit write, an address, two value pairs and two offsets in 8-byte units --
+ds_write2_b64 v1, v[2:3], v[4:5] offset0:4 offset1:9
+ds_write2_b64 v200, v[8:9], v[254:255] offset0:1 offset1:255
+ds_write2_b64 v0, v[130:131], v[76:77] offset0:255 offset1:2
+ds_write2_b64 v77, v[0:1], v[2:3] offset0:128 offset1:64
+ds_write2_b64 v255, v[254:255], v[200:201] offset0:12 offset1:200
+
+// ---- DS: the paired 64-bit read, four destination words, an address and two offsets ----------
+ds_read2_b64 v[4:7], v1 offset0:4 offset1:9
+ds_read2_b64 v[200:203], v9 offset0:1 offset1:255
+ds_read2_b64 v[0:3], v130 offset0:255 offset1:2
+ds_read2_b64 v[252:255], v77 offset0:128 offset1:64
+ds_read2_b64 v[77:80], v255 offset0:12 offset1:200

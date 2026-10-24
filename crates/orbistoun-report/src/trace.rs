@@ -1341,6 +1341,9 @@ fn describe_end(trace: &CallTrace) -> String {
     if trace.ended_by.as_deref() == Some(LOST_THE_DEVICE) {
         return LOST_THE_DEVICE.to_owned();
     }
+    if trace.ended_by.as_deref() == Some(STALLED) {
+        return STALLED.to_owned();
+    }
     match trace.quiet {
         Some(quiet) if quiet.is_notable() => QUIET_TO_LIMIT.to_owned(),
         _ => RAN_TO_LIMIT.to_owned(),
@@ -1357,6 +1360,10 @@ pub const SPENT_THE_BUDGET: &str = "spent its call budget";
 /// A run ended because the host's graphics device was lost: orbistoun's failure, which the run's
 /// log names by the submissions in flight, and neither the guest's decision nor a limit.
 pub const LOST_THE_DEVICE: &str = "lost the graphics device";
+
+/// A run ended because it stalled - no flip and no command-processor packet completed for as long
+/// as `ORBISTOUN_STALL_REPORT` allows - once its stall report was written, as the run asked.
+pub const STALLED: &str = "stalled: no flip and no command-processor packet completed";
 
 /// A run the clock ended after the guest had stopped asking for anything.
 ///
@@ -1824,6 +1831,12 @@ mod tests {
         lost.ended_by = Some(super::LOST_THE_DEVICE.to_owned());
         lost.quiet = both.quiet;
         assert_eq!(super::describe_end(&lost), super::LOST_THE_DEVICE);
+
+        // So is a stall the run asked to end on.
+        let mut stalled = trace(47, 20_000_000, None, None);
+        stalled.ended_by = Some(super::STALLED.to_owned());
+        stalled.quiet = both.quiet;
+        assert_eq!(super::describe_end(&stalled), super::STALLED);
 
         // A guest that stopped itself outranks either: its own decision is not a limit.
         let mut exited = trace(47, 20_000_000, None, None);

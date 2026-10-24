@@ -482,6 +482,15 @@ breakpoint fires after the access completes, so each line reports `after the acc
 next instruction; naming the instruction itself would mean disassembling a vendor binary
 (D276).
 
+A run that goes `ORBISTOUN_STALL_REPORT` seconds, 300 unless set, with no flip and no
+command-processor packet completed logs one stall report: each queue and compute stream with the
+packet it stands at and, at a memory wait, the address, reference, mask, comparison, what the word
+holds and the last `RELEASE_MEM` that wrote it; what the device thread is doing and how many
+callers wait on it; and each guest thread, busiest first, with its share of a core over two
+seconds, the import it is inside with its first argument, whether it spins in a sleep or yield
+poll loop, and what its waiting loop's registers hold. `<seconds>:end` then ends the run with its
+exit report; `off` turns it off.
+
 A guest compute dispatch that loses the device or holds it too long is run again alone from a
 capture rather than through the title. `ORBISTOUN_CAPTURE_DISPATCH` names programs by the
 address the run's log gives them; each one's first dispatch is written to `dispatch-<addr>/` in

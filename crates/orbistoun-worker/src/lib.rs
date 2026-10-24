@@ -31,6 +31,7 @@ pub mod profile;
 pub mod render;
 pub mod report;
 pub mod session;
+mod stall;
 pub mod tls_backstop;
 pub mod waits;
 pub mod watch;
@@ -593,6 +594,8 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::install_dispatch_executor(render::execute_dispatch);
     // A lost device ends the run, once the submissions it was running are logged.
     orbistoun_gpu_vulkan::on_device_lost(report::end_on_device_loss);
+    // A run that stops flipping and stops completing packets says where everything stands.
+    stall::start();
     // Read back when the drawn frame is written into guest memory: at the flip by default, or after
     // every submission under `ORBISTOUN_TARGET_WRITEBACK=submit` (D714).
     orbistoun_gpu::agc_driver::install_frame_reader(render::read_frame);
