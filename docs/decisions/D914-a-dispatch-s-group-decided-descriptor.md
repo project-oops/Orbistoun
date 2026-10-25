@@ -14,7 +14,9 @@ A dispatch of more than 65536 groups is not replayed. When neither run can follo
 refusal reports what the first waves of sixteen groups reach the access with: how many distinct
 descriptors, their bases, and which registers they cannot know. Amended by D951: the wave-by-wave
 run no longer stops at a bound on waves. Above 256 waves it runs a lattice of groups, and an access
-outside the range the lattice places is an escape.
+outside the range the lattice places is an escape. Amended by D982: where the backend runs
+device-addressed dispatches, neither run is made. The dispatch is prepared device-addressed (D964),
+and the runs stay for a program device addressing refuses.
 
 A dispatch's program that reads its own address (`s_getpc_b64`) is now told where it was loaded,
 as a draw's is (D842). This applies to its translation and to the tracing of its buffers, so a

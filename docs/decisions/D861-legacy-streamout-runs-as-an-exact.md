@@ -16,7 +16,10 @@ well, its stores dropped there (D881).
   (`ComputeInputs::first_thread`). This holds however the wave's lanes are held: the whole wave in
   one invocation, one lane an invocation (D880) or two (D973). Run one lane an invocation, a wave
   once held its lane's place in the wave alone, so every wave past a draw's first read vertex ids
-  from zero. Its user data is the `USER_DATA_VS` words, then the words
+  from zero. The wave's first vertex is read from the push block at `FIRST_THREAD_PUSH_WORD`, the
+  word after the device table's, not compiled in. One module then serves every wave of every draw
+  of a program, as `every_wave_of_every_draw_shares_one_module` checks. Compiled in, each first
+  vertex was another module name, translation and driver compile. Its user data is the `USER_DATA_VS` words, then the words
   `SO_EN` and `SO_BASEn_EN` add:
   - `streamout_config`, the wave's vertex count in bits 22:16;
   - `streamout_write_index`, the wave's first vertex counted from the draw's, since the offsets

@@ -39,7 +39,8 @@ converts by the format the descriptor names, decoded as the module runs, and a d
 swizzled and lane-indexed addressing is carried out rather than refused. A ray intersection reads its node by device
 address. Amended by D970: a scalar load of an image descriptor from a table is read by device
 address too. The image still binds from the load that reaches it, and the program may read the
-words as values.
+words as values. Amended by D982: a dispatch whose buffer only a host run of its groups or waves
+would find (D914, D950, D951) is prepared device-addressed too, without the run.
 
 **Apertures.** A flat access routes by its address's high half before it reaches guest memory:
 `0x80000000` reaches the workgroup's local data share, and `0x70000000` reaches the lane's private

@@ -27,3 +27,7 @@ pass's textures do.
   descriptor that varies by wave cannot be bound however it is found.
 - Extending the static tracer to each new rewrite form: one rule per program shape, and untraced
   forms keep arriving.
+
+**Amended by D983:** a descriptor whose registers hold a record the program selected from a table at
+run time is not run for. Every image the table names is bound in an array, and the module finds the
+one the registers hold as it runs, so a descriptor that varies by wave or by group is read exactly.

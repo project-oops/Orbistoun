@@ -38,8 +38,8 @@ buffer would change them, and the other six would never be served.
 **Measured.** On a 480 s GTA V run, before and after, the program's slow preparations on the
 command processor fell from 49 to 21. Cycles where the command processor was served stall about
 12 s, not 24 s. The guest thread's queued writes still run the sample once a cycle, about 12 s.
-Making that run cheaper, or binding the table whole as D966 binds a table selected at run time, is
-what removes the rest.
+Amended by D982: where the backend runs device-addressed dispatches, such a dispatch is prepared
+device-addressed and runs no sample at all. The memo keys on whether host runs are allowed.
 
 **The test.** `a_dispatch_s_buffers_are_kept_until_what_they_read_changes` stores through a
 descriptor loaded from a table in guest memory. It asks for the write spans twice over the same

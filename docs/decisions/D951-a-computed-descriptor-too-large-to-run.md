@@ -48,6 +48,11 @@ missed.
 The run report notes once per program that a computed buffer was bound from a sample: how many
 groups ran of how many, what they reached, and the range bound.
 
+Amended by D982: where the backend runs device-addressed dispatches, no sample is run, of a
+computed descriptor or of global loads (D950). The dispatch is prepared device-addressed (D964).
+The sample stays for a program device addressing refuses, and for a backend without it. Grand
+Theft Auto V's sample at `0x74005b87e400` cost 0.6 to 2.4 s a dispatch, twice per dispatch.
+
 **Why:** Grand Theft Auto V's in-world frame spent more than ten minutes preparing dispatches of the
 program at `0x400003e1f500` and never got past it. Its computed descriptor depends on its lanes, so
 the D914 replay cannot answer it, and D900 ran every wave on the host interpreter, refusing only

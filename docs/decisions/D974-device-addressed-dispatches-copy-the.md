@@ -38,6 +38,30 @@ the host's write-watch cannot watch it.
   grain.
 - *Failure.* A dispatch that fails has its copies dropped, not copied back.
 
+**One walk of the write-watch a dispatch.** All the copied runs are marked together
+(`orbistoun_mem::watch::mark_all`), and the hand-off check after the dispatch harvests them
+together (`harvest_all`). Each chunk is then answered from the record (`recorded_since`). Each
+reservation the runs lie in is walked once, from the first run in it to the end of the last. The
+guest's record of its reservations (`mappings::reservation_of`) says which reservation that is,
+not the host.
+
+This replaced one mark per run. In a 480 s GTA V run, those marks took 4 - 8 ms each over
+250 - 275 runs: 0.8 - 2.1 s before every device-addressed dispatch, 132 of the 168 s spent on the
+device. Measured with `write_watch_cost_over_an_import`, over 256 one-page runs 4 MiB apart in a
+1 GiB reservation:
+
+| | each run marked alone | one mark of the whole reservation | the runs marked together |
+|---|---|---|---|
+| not imported | 64 - 76 ms (0.25 - 0.30 ms a run) | 0.9 - 1.2 ms | 0.74 - 0.87 ms |
+| imported | 234 - 256 ms (0.9 - 1.0 ms a run) | 150 ms | 0.84 - 0.95 ms |
+
+The cost of a mark is not the host's `GetWriteWatch` but its `VirtualQuery`. The harvest asked it
+for each run's region, and its cost grows with the regions of the whole allocation: 0.25 ms in a
+gigabyte reservation, 0.9 ms once the device mapped it, 4 - 8 ms in GTA V's. A mark of the whole
+reservation pays instead for reporting every page written in it. With one walk, the benchmark's
+short chain with copies runs as fast as without them (0.17 ms against 0.27 ms, whole wave; 0.12 ms
+both, per lane): the per-dispatch cost measured below is gone.
+
 **Imported pages cannot be guarded.** Measured on an RTX 5070 Ti
 (`an_import_s_read_only_pages_are_still_read`). The test makes pages read-only after their import,
 as a D824 guard does. The device still reads them. But the same program storing into them lost
