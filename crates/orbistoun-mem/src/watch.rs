@@ -78,6 +78,45 @@ pub fn guard_marked_ranges() {
     GUARDING.store(true, Ordering::Release);
 }
 
+/// The ranges no guard may stand over, by base, with their lengths: guest memory the device maps
+/// (D964). The device stores into its pages behind the host's protection, and a store into a page
+/// a guard made read-only lost the device (D974).
+fn unguardable() -> &'static Mutex<BTreeMap<u64, u64>> {
+    static UNGUARDABLE: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+    &UNGUARDABLE
+}
+
+/// Keeps every guard off `[base, base + len)` until [`allow_guards`] of it: a guard standing over
+/// it is released, its pages noted written, and [`mark`] guards none of it, answering from the
+/// host's write-watch alone. For memory the device maps (D974).
+pub fn forbid_guards(base: u64, len: u64) {
+    unguardable()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(base, len);
+    release_guards(base, len);
+}
+
+/// Ends a [`forbid_guards`] of `[base, base + len)`.
+pub fn allow_guards(base: u64, len: u64) {
+    let mut ranges = unguardable()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if ranges.get(&base) == Some(&len) {
+        ranges.remove(&base);
+    }
+}
+
+/// Whether any of `[first, end)` lies in a range [`forbid_guards`] keeps guards off.
+fn guards_forbidden((first, end): (u64, u64)) -> bool {
+    unguardable()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .range(..end)
+        .next_back()
+        .is_some_and(|(&base, &len)| first < base.saturating_add(len))
+}
+
 /// The whole pages `[base, base + len)` lies in, as `(first, end)`.
 fn pages_of(base: u64, len: u64) -> (u64, u64) {
     (
@@ -162,6 +201,7 @@ pub fn mark(base: u64, len: u64) -> Option<u64> {
             .guards
             .iter()
             .any(|guard| guard.first < end && first < guard.end)
+        && !guards_forbidden((first, end))
         && imp::guard(first, end);
     if record.harvest(base, len).is_none() {
         if guarded {
@@ -198,6 +238,19 @@ pub fn written_since(base: u64, len: u64, since: u64) -> Option<bool> {
     Some(record.written_after((first, base.saturating_add(len)), since))
 }
 
+/// Whether any page of `[base, base + len)` was recorded written after `since`, from what the record
+/// already holds and asking the host nothing: exact right after a [`mark`] or [`written_since`] of a
+/// range holding this one, whose harvest the record holds. Many small questions inside one large
+/// range cost one walk of the host's pages this way, not one each (D974).
+#[must_use]
+pub fn recorded_since(base: u64, len: u64, since: u64) -> bool {
+    let record = record()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let first = base & !(PAGE - 1);
+    record.written_after((first, base.saturating_add(len)), since)
+}
+
 /// A write faulted at `address`: when a guard holds it, its pages are made writable again and
 /// noted written, and the write can run again. The host's fault handler asks this for every
 /// faulting write, before anything else that guards pages.
@@ -229,6 +282,21 @@ pub fn write_faulted(address: u64) -> bool {
 pub fn release_overlapping(base: u64, len: u64) {
     crate::lazy::commit(base, len);
     release_guards(base, len);
+}
+
+/// Records `[base, base + len)` written now by something the host's write-watch does not see: the
+/// device, storing into guest memory it maps (D964). Its guards are released and every page of it
+/// noted written, so a [`written_since`] of any earlier mark answers that it was.
+pub fn note_written(base: u64, len: u64) {
+    release_guards(base, len);
+    let (first, end) = pages_of(base, len);
+    let mut record = record()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let epoch = record.epoch;
+    for page in (first..end).step_by(PAGE as usize) {
+        record.note(page, epoch);
+    }
 }
 
 /// [`release_overlapping`] without the commit: before a change of protection or mapping, which
@@ -534,6 +602,38 @@ mod tests {
         let small = mark(base, 0x1000).expect("watched");
         assert_eq!(protection_at(base), PAGE_READWRITE, "too small to guard");
         assert_eq!(written_since(base, 0x1000, small), Some(false));
+    }
+
+    /// A range guards are kept off is never made read-only, a guard already over it is released,
+    /// and its marks still answer, from the host's write-watch; allowed again, it is guarded again
+    /// (D974).
+    #[test]
+    fn a_range_guards_are_kept_off_is_never_read_only() {
+        use windows_sys::Win32::System::Memory::{PAGE_READONLY, PAGE_READWRITE};
+        let base = crate::unique_test_base();
+        let len = 2 * super::GUARDED_FROM;
+        let _held = reserve(base, len, Protection::READ_WRITE).expect("reserve");
+        super::guard_marked_ranges();
+        let _ = mark(base, len).expect("watched");
+        assert_eq!(protection_at(base), PAGE_READONLY, "guarded");
+        super::forbid_guards(base, len);
+        assert_eq!(protection_at(base), PAGE_READWRITE, "released");
+        let since = mark(base, len).expect("watched");
+        assert_eq!(protection_at(base), PAGE_READWRITE, "never guarded");
+        assert_eq!(written_since(base, len, since), Some(false));
+        let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base as usize + 0x3000);
+        // SAFETY: the reservation above is `len` read-write bytes, held for the test, and no
+        // guard stands over it.
+        unsafe { bytes.write(9) };
+        assert_eq!(
+            written_since(base, len, since),
+            Some(true),
+            "seen by the watch"
+        );
+        super::allow_guards(base, len);
+        let _ = mark(base, len).expect("watched");
+        assert_eq!(protection_at(base), PAGE_READONLY, "guarded again");
+        super::release_overlapping(base, len);
     }
 
     /// A write after a mark is seen, a write before it is not, and two askers do not disturb each

@@ -163,6 +163,23 @@ pub fn commit(base: u64, len: u64) {
     }
 }
 
+/// The parts of `[base, base + len)` whose host pages are committed, private, and readable and
+/// writable, as (base, length), in order: what a device may import and store through (D964). A
+/// page left to commit on touch, one a guard holds read-only, and one the guest may not write are
+/// not among them, since a driver pins and writes every page it imports.
+#[must_use]
+pub fn writable_runs(base: u64, len: u64) -> Vec<(u64, u64)> {
+    imp::writable_runs(base, base.saturating_add(len))
+}
+
+/// The parts of `[base, base + len)` whose host pages are committed, private and readable, a guard
+/// or the guest's own protection holding them read-only or not, as (base, length), in order: the
+/// pages a device's mapping left out that may have become its to map since (D968).
+#[must_use]
+pub fn committed_runs(base: u64, len: u64) -> Vec<(u64, u64)> {
+    imp::committed_runs(base, base.saturating_add(len))
+}
+
 /// Commits the chunk around `address` when it lies in a reservation committed on touch, is not
 /// committed, and the guest may access it: what the fault handler asks of a faulting access
 /// before anything else. Whether it did, so the access runs again.
@@ -199,6 +216,10 @@ fn commit_in(lazy: &Lazy, from: u64, to: u64) -> u64 {
     }
     lazy.committed.fetch_add(committed, Ordering::Relaxed);
     LAZY_COMMITTED.fetch_add(committed, Ordering::Relaxed);
+    if committed > 0 {
+        // A page committed now is one the device may map, though no readable run changed (D968).
+        crate::mappings::pages_changed();
+    }
     committed
 }
 
@@ -288,7 +309,8 @@ impl Protections {
 #[cfg(windows)]
 mod imp {
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RESERVE, MEMORY_BASIC_INFORMATION, VirtualAlloc, VirtualProtect,
+        MEM_COMMIT, MEM_PRIVATE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ,
+        PAGE_EXECUTE_READWRITE, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualProtect,
         VirtualQuery,
     };
 
@@ -297,6 +319,12 @@ mod imp {
     /// The host's state of the pages from `at`: where their run of alike pages ends, and its
     /// state. `None` when it says nothing.
     fn query(at: u64) -> Option<(u64, u32)> {
+        query_info(at).map(|(run_end, info)| (run_end, info.State))
+    }
+
+    /// The host's description of the pages from `at`: where their run of alike pages ends, and
+    /// the description. `None` when it says nothing.
+    fn query_info(at: u64) -> Option<(u64, MEMORY_BASIC_INFORMATION)> {
         let mut info = MEMORY_BASIC_INFORMATION {
             BaseAddress: std::ptr::null_mut(),
             AllocationBase: std::ptr::null_mut(),
@@ -317,7 +345,55 @@ mod imp {
             )
         };
         let run_end = (info.BaseAddress as u64).saturating_add(info.RegionSize as u64);
-        (answered != 0 && run_end > at).then_some((run_end, info.State))
+        (answered != 0 && run_end > at).then_some((run_end, info))
+    }
+
+    /// The runs of `[from, to)` that are committed private memory, readable and writable with no
+    /// modifier bits, joined where they touch.
+    pub(super) fn writable_runs(from: u64, to: u64) -> Vec<(u64, u64)> {
+        // The whole protection word, so a guard, no-cache or write-combine bit refuses it too.
+        runs_where(from, to, |info| {
+            info.State == MEM_COMMIT
+                && info.Type == MEM_PRIVATE
+                && (info.Protect == PAGE_READWRITE || info.Protect == PAGE_EXECUTE_READWRITE)
+        })
+    }
+
+    /// The runs of `[from, to)` that are committed private memory the guest may read, whatever
+    /// else holds them read-only, joined where they touch.
+    pub(super) fn committed_runs(from: u64, to: u64) -> Vec<(u64, u64)> {
+        runs_where(from, to, |info| {
+            info.State == MEM_COMMIT
+                && info.Type == MEM_PRIVATE
+                && matches!(
+                    info.Protect & 0xff,
+                    PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE
+                )
+        })
+    }
+
+    /// The runs of `[from, to)` whose host description `keep` admits, joined where they touch.
+    fn runs_where(
+        from: u64,
+        to: u64,
+        keep: impl Fn(&MEMORY_BASIC_INFORMATION) -> bool,
+    ) -> Vec<(u64, u64)> {
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        let mut at = from;
+        while at < to {
+            let Some((run_end, info)) = query_info(at) else {
+                break;
+            };
+            let piece_end = run_end.min(to);
+            if keep(&info) {
+                match runs.last_mut() {
+                    Some((base, len)) if *base + *len == at => *len += piece_end - at,
+                    _ => runs.push((at, piece_end - at)),
+                }
+            }
+            at = piece_end;
+        }
+        runs
     }
 
     /// Whether the page holding `address` is reserved and not committed.
@@ -405,6 +481,20 @@ mod imp {
     /// Off Windows nothing is reserved lazily here: the host commits on touch itself.
     pub(super) const fn uncommitted(_address: u64) -> bool {
         false
+    }
+
+    /// Off Windows the range is taken as it stands.
+    pub(super) fn writable_runs(from: u64, to: u64) -> Vec<(u64, u64)> {
+        if from < to {
+            vec![(from, to - from)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Off Windows the range is taken as it stands.
+    pub(super) fn committed_runs(from: u64, to: u64) -> Vec<(u64, u64)> {
+        writable_runs(from, to)
     }
 
     pub(super) const fn commit_uncommitted(_from: u64, _to: u64, _protection: Protection) -> u64 {
@@ -542,5 +632,71 @@ mod tests {
         assert_eq!(first, 0, "committed zeroed");
         drop(held);
         assert!(!super::unregister(base), "forgotten once released");
+    }
+
+    /// Only committed, readable and writable pages are a device's to import: run 335 of Grand
+    /// Theft Auto V crashed the driver importing a guest run whole.
+    #[cfg(windows)]
+    #[test]
+    fn a_device_imports_only_committed_writable_pages() {
+        use super::{TOUCH_CHUNK, commit_on_touch, writable_runs};
+        let base = crate::unique_test_base();
+        let len = 4 * TOUCH_CHUNK;
+        let _held =
+            crate::platform::reserve_lazily(base, len, Protection::READ_WRITE).expect("reserved");
+        assert_eq!(writable_runs(base, len), vec![], "nothing committed");
+        assert!(commit_on_touch(base + 8));
+        assert!(commit_on_touch(base + TOUCH_CHUNK + 8));
+        assert!(commit_on_touch(base + 3 * TOUCH_CHUNK + 8));
+        assert_eq!(
+            writable_runs(base, len),
+            vec![
+                (base, 2 * TOUCH_CHUNK),
+                (base + 3 * TOUCH_CHUNK, TOUCH_CHUNK)
+            ],
+            "the uncommitted chunk splits them"
+        );
+        crate::platform::protect(base + TOUCH_CHUNK, TOUCH_CHUNK, Protection::READ_ONLY)
+            .expect("protected");
+        assert_eq!(
+            writable_runs(base, len),
+            vec![(base, TOUCH_CHUNK), (base + 3 * TOUCH_CHUNK, TOUCH_CHUNK)],
+            "a read-only chunk is left out"
+        );
+        assert_eq!(
+            writable_runs(base + 8, 0x10),
+            vec![(base + 8, 0x10)],
+            "cut to the range asked"
+        );
+    }
+
+    /// A page committed on touch, or given another protection, after a device mapped its run moves
+    /// the host pages' generation, which no readable run's change would show; and a committed page
+    /// held read-only is among the committed runs a mapping looks at again (D968).
+    #[cfg(windows)]
+    #[test]
+    fn a_commit_or_protection_moves_the_host_pages_generation() {
+        use super::{TOUCH_CHUNK, commit_on_touch, committed_runs};
+        use crate::mappings::pages_generation;
+        let base = crate::unique_test_base();
+        let len = 4 * TOUCH_CHUNK;
+        let _held =
+            crate::platform::reserve_lazily(base, len, Protection::READ_WRITE).expect("reserved");
+        let before = pages_generation();
+        assert!(commit_on_touch(base + 2 * TOUCH_CHUNK + 8));
+        let committed = pages_generation();
+        assert!(committed > before, "a commit moves it");
+        assert_eq!(
+            committed_runs(base, len),
+            vec![(base + 2 * TOUCH_CHUNK, TOUCH_CHUNK)]
+        );
+        crate::platform::protect(base + 2 * TOUCH_CHUNK, TOUCH_CHUNK, Protection::READ_ONLY)
+            .expect("protected");
+        assert!(pages_generation() > committed, "a protection moves it");
+        assert_eq!(
+            committed_runs(base, len),
+            vec![(base + 2 * TOUCH_CHUNK, TOUCH_CHUNK)],
+            "a read-only page is still committed"
+        );
     }
 }

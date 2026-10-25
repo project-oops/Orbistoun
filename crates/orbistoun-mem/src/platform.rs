@@ -327,10 +327,16 @@ pub(crate) use imp::protection_flags;
 pub fn protect(base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
     // A write-watch guard on these pages would put its own protection back later (D824).
     crate::watch::release_guards(base, len);
-    match crate::lazy::protect(base, len, protection) {
+    let applied = match crate::lazy::protect(base, len, protection) {
         Some(applied) => applied.map_err(MemError::HostRefused),
         None => imp::protect(base, len, protection),
+    };
+    // What the device may map of a reservation follows what the guest may read of it (D964).
+    if applied.is_ok() {
+        crate::mappings::protected(base, len, protection.read);
+        crate::mappings::pages_changed();
     }
+    applied
 }
 
 impl Drop for Reservation {

@@ -75,6 +75,8 @@ pub mod crates {
     pub const KERNEL: u64 = 5;
     /// `orbistoun-service`.
     pub const SERVICE: u64 = 6;
+    /// `orbistoun-gpu-vulkan`.
+    pub const GPU_VULKAN: u64 = 7;
 
     /// Every range in use, so a test can prove they are distinct.
     pub const ALL: &[(&str, u64)] = &[
@@ -85,6 +87,7 @@ pub mod crates {
         ("worker", WORKER),
         ("kernel", KERNEL),
         ("service", SERVICE),
+        ("gpu-vulkan", GPU_VULKAN),
     ];
 }
 

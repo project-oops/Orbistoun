@@ -10,6 +10,7 @@
 pub mod blocks;
 pub mod guest;
 pub mod lazy;
+pub mod mappings;
 pub mod platform;
 pub mod stack;
 pub mod test_bases;
@@ -341,6 +342,7 @@ impl AddressSpace {
         };
         self.regions.insert(base, region);
         self.held.push(held);
+        mappings::reserved(base, len, protection.read);
         Ok(region)
     }
 
@@ -354,6 +356,8 @@ impl AddressSpace {
             return false;
         }
         self.regions.remove(&base);
+        // The device's mappings over it go before its memory does (D964).
+        mappings::releasing(base, len);
         // Dropping the reservation is what returns its host memory.
         if let Some(index) = self.held.iter().position(|held| held.base() == base) {
             self.held.swap_remove(index);
