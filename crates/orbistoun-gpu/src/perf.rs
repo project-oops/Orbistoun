@@ -37,6 +37,12 @@ macro_rules! span_labels {
             Span::SubmitCall => $as!("submit call"),
             Span::QueueFull => $as!("queue full"),
             Span::QueuedWrites => $as!("queued writes"),
+            Span::QueuedUnbounded => $as!("queued writes: unbounded"),
+            Span::ResidentTaken => $as!("kept images: taken"),
+            Span::ResidentRead => $as!("kept images: read"),
+            Span::ResidentMissing => $as!("kept images: not kept"),
+            Span::UnboundedStore => $as!("unbounded: image or flat store"),
+            Span::UnboundedGlobal => $as!("unbounded: untraced global store"),
             Span::SettleOver => $as!("settle over"),
             Span::SettledRead => $as!("settled read"),
             Span::PrepareAgain => $as!("prepare again"),
@@ -522,6 +528,20 @@ pub enum Span {
     QueueFull,
     /// Working out what a submission writes as it is queued, besides its drawn targets (D876).
     QueuedWrites,
+    /// A submission queued whose writes are not bounded before it runs: every preparation read
+    /// after it waits for it (D876). Counted, so the serialisation it costs is seen.
+    QueuedUnbounded,
+    /// A dispatch image taken from those the device keeps, unchanged since (D985): counted.
+    ResidentTaken,
+    /// A dispatch image with a place among those kept, read afresh: counted.
+    ResidentRead,
+    /// A dispatch prepared again because the device did not keep an image it was asked to take:
+    /// counted.
+    ResidentMissing,
+    /// Of those, a dispatch storing through an image or a flat address.
+    UnboundedStore,
+    /// Of those, a dispatch storing through a global address its buffers do not trace.
+    UnboundedGlobal,
     /// A preparation read waiting for the queue to drain because a queued submission writes over
     /// it (D874, D876).
     SettleOver,
@@ -842,10 +862,16 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 139] = [
+    pub const ALL: [Self; 145] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
+        Self::QueuedUnbounded,
+        Self::ResidentTaken,
+        Self::ResidentRead,
+        Self::ResidentMissing,
+        Self::UnboundedStore,
+        Self::UnboundedGlobal,
         Self::SettleOver,
         Self::SettledRead,
         Self::PrepareAgain,

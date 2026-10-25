@@ -1982,6 +1982,22 @@ impl SurfaceLayout {
             move_pieces(&mut unmoved, pipe_bank_xor);
             return self.detile_mapped(&unmoved, width, height, 0, map);
         }
+        if let Some(linear) = self.detile_by_table(tiled, (width, height), pipe_bank_xor, &map) {
+            return linear;
+        }
+        self.detile_by_texel(tiled, width, height, pipe_bank_xor, map)
+    }
+
+    /// [`Self::detile_mapped`] a texel at a time, each texel's offset from its coordinates' bits:
+    /// what a layout with no [`OffsetTable`] is read by, and what the tables are tested against.
+    fn detile_by_texel(
+        self,
+        tiled: &[u32],
+        width: u32,
+        height: u32,
+        pipe_bank_xor: u8,
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Vec<u32> {
         match self {
             Self::Rx64Kb => {
                 detile_surface_64kb_rx_bpp4_mapped(tiled, width, height, pipe_bank_xor, map)
@@ -2127,6 +2143,25 @@ impl SurfaceLayout {
             move_pieces(tiled, pipe_bank_xor);
             return tiled_here;
         }
+        if let Some(tiled_here) =
+            self.tile_by_table(linear, (width, height), pipe_bank_xor, tiled, &map)
+        {
+            return tiled_here;
+        }
+        self.tile_by_texel(linear, width, height, pipe_bank_xor, tiled, map)
+    }
+
+    /// [`Self::tile_mapped`] a texel at a time: what a layout with no [`OffsetTable`] is tiled by,
+    /// and what the tables are tested against.
+    fn tile_by_texel(
+        self,
+        linear: &[u32],
+        width: u32,
+        height: u32,
+        pipe_bank_xor: u8,
+        tiled: &mut [u32],
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Result<(), DetileError> {
         match self {
             Self::Rx64Kb => {
                 tile_surface_64kb_rx_bpp4_mapped(linear, width, height, pipe_bank_xor, tiled, map)
@@ -2247,6 +2282,288 @@ impl SurfaceLayout {
             }
         }
         Ok(())
+    }
+}
+
+/// A surface's texel offsets split into what a column and what a row add: every block-tiled layout
+/// places texel `(x, y)` at its block's start - the block's row, then its column, row-major - plus
+/// an in-block offset that is the XOR of a term of `x`'s bits, a term of `y`'s, and one for the
+/// whole surface (a pipe-bank XOR). Read from the layout's own offsets of the first row and the
+/// first column, so a texel's offset is two table reads, an add and an XOR, rather than a walk of
+/// its coordinates' bits: the walk detiled Grand Theft Auto V's eight-byte targets at a quarter of
+/// a gigabyte a second, a sixth of its in-world frames' time (D984).
+#[derive(Debug)]
+pub struct OffsetTable {
+    /// Each column's block start, and its in-block term with the first texel's taken out.
+    columns: Vec<(usize, usize)>,
+    /// Each row's block start, and its in-block term.
+    rows: Vec<(usize, usize)>,
+    /// The in-block bits.
+    mask: usize,
+}
+
+impl OffsetTable {
+    /// The table of a `width` x `height` surface whose blocks are `block_bytes`, a power of two,
+    /// from `offset`, its byte offset of a texel.
+    pub fn of(
+        (width, height): (u32, u32),
+        block_bytes: usize,
+        offset: impl Fn(u32, u32) -> usize,
+    ) -> Self {
+        let mask = block_bytes - 1;
+        let origin = offset(0, 0);
+        Self {
+            columns: (0..width)
+                .map(|x| {
+                    let at = offset(x, 0);
+                    ((at & !mask) - (origin & !mask), (at ^ origin) & mask)
+                })
+                .collect(),
+            rows: (0..height)
+                .map(|y| {
+                    let at = offset(0, y);
+                    (at & !mask, at & mask)
+                })
+                .collect(),
+            mask,
+        }
+    }
+
+    /// The byte offset of texel `(x, y)`.
+    #[inline]
+    #[must_use]
+    pub fn at(&self, x: usize, y: usize) -> usize {
+        let (row, row_term) = self.rows[y];
+        let (column, column_term) = self.columns[x];
+        row + column + ((row_term ^ column_term) & self.mask)
+    }
+}
+
+/// How many rows a detile hands each thread at least: below it, a thread costs more than it saves.
+const ROWS_A_THREAD_LEAST: usize = 64;
+
+impl SurfaceLayout {
+    /// The byte offset of texel `(x, y)` in this layout's surface `width` texels wide under
+    /// `pipe_bank_xor`, as [`Self::detile_mapped`] places each layout's texels; `None` for the
+    /// linear layouts and four-byte `64KB_R_X`, which are read by tables of their own.
+    fn texel_byte_offset(self, (x, y): (u32, u32), width: u32, pipe_bank_xor: u8) -> Option<usize> {
+        Some(match self {
+            Self::Dx4Kb | Self::S4Kb | Self::S64Kb | Self::S256B | Self::Zx64Kb => {
+                self.four_byte_offset(x, y, width)
+            }
+            Self::Rx64KbBpp2 | Self::Zx64KbBpp2 | Self::S4KbBpp2 => {
+                self.two_byte_offset(x, y, width)
+            }
+            Self::Rx64KbBpp1 => tiled_byte_offset_64kb_rx_bpp1_xor(x, y, width, pipe_bank_xor),
+            Self::S4KbBpp1 => tiled_byte_offset_4kb_s_bpp1(x, y, width),
+            Self::S4KbBpp8 | Self::S64KbBpp8 | Self::Rx64KbBpp8 | Self::S256BBpp8 => {
+                self.eight_byte_offset(x, y, width)
+            }
+            Self::Dx64KbBpp16
+            | Self::Dx4KbBpp16
+            | Self::S64KbBpp16
+            | Self::S4KbBpp16
+            | Self::S256BBpp16
+            | Self::Rx64KbBpp16 => self.sixteen_byte_offset(x, y, width, pipe_bank_xor),
+            Self::Rx64Kb | Self::Linear | Self::LinearBpp1 => return None,
+        })
+    }
+
+    /// The [`OffsetTable`] of a `width` x `height` surface of this layout; `None` where
+    /// [`Self::texel_byte_offset`] places none.
+    fn offset_table(self, (width, height): (u32, u32), pipe_bank_xor: u8) -> Option<OffsetTable> {
+        self.texel_byte_offset((0, 0), width, pipe_bank_xor)?;
+        Some(OffsetTable::of(
+            (width, height),
+            1 << self.block_log2(),
+            |x, y| {
+                self.texel_byte_offset((x, y), width, pipe_bank_xor)
+                    .unwrap_or_default()
+            },
+        ))
+    }
+
+    /// Words a texel of this layout takes once detiled: a texel of four bytes or fewer one, in its
+    /// low bits.
+    const fn words_a_texel(self) -> usize {
+        match self.texel_log2() {
+            0..=2 => 1,
+            3 => 2,
+            _ => 4,
+        }
+    }
+
+    /// [`Self::detile_mapped`] through an [`OffsetTable`], its rows shared among threads; `None` for
+    /// a layout that has none.
+    fn detile_by_table(
+        self,
+        tiled: &[u32],
+        (width, height): (u32, u32),
+        pipe_bank_xor: u8,
+        map: &(impl Fn(u32) -> u32 + Sync),
+    ) -> Option<Vec<u32>> {
+        let table = self.offset_table((width, height), pipe_bank_xor)?;
+        let per = self.words_a_texel();
+        let row_words = width as usize * per;
+        let mut linear = vec![0u32; row_words * height as usize];
+        if row_words == 0 {
+            return Some(linear);
+        }
+        let log2 = self.texel_log2();
+        let detile_rows = |first: usize, out: &mut [u32]| {
+            for (dy, line) in out.chunks_exact_mut(row_words).enumerate() {
+                let y = first + dy;
+                match log2 {
+                    0 | 1 => {
+                        let mask = if log2 == 0 { 0xFF } else { 0xFFFF };
+                        for (x, slot) in line.iter_mut().enumerate() {
+                            let at = table.at(x, y);
+                            *slot = map(tiled[at / 4] >> ((at % 4) * 8) & mask);
+                        }
+                    }
+                    _ => {
+                        for (x, texel) in line.chunks_exact_mut(per).enumerate() {
+                            let at = table.at(x, y) / 4;
+                            for (slot, &word) in texel.iter_mut().zip(&tiled[at..at + per]) {
+                                *slot = map(word);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(height as usize / ROWS_A_THREAD_LEAST)
+            .max(1);
+        if threads == 1 {
+            detile_rows(0, &mut linear);
+            return Some(linear);
+        }
+        let rows_each = (height as usize).div_ceil(threads);
+        std::thread::scope(|scope| {
+            for (part, out) in linear.chunks_mut(rows_each * row_words).enumerate() {
+                let detile_rows = &detile_rows;
+                scope.spawn(move || detile_rows(part * rows_each, out));
+            }
+        });
+        Some(linear)
+    }
+
+    /// [`Self::tile_mapped`] through an [`OffsetTable`]; `None` for a layout that has none. A texel
+    /// narrower than a word is written into its part of the word, the rest left as it was.
+    fn tile_by_table(
+        self,
+        linear: &[u32],
+        (width, height): (u32, u32),
+        pipe_bank_xor: u8,
+        tiled: &mut [u32],
+        map: &impl Fn(u32) -> u32,
+    ) -> Option<Result<(), DetileError>> {
+        let table = self.offset_table((width, height), pipe_bank_xor)?;
+        let per = self.words_a_texel();
+        let needed_words = self.words(width, height);
+        let words = width as usize * height as usize * per;
+        if tiled.len() < needed_words || linear.len() != words {
+            return Some(Err(DetileError::TiledDataTooShort {
+                needed_words: needed_words.max(words),
+                got_words: tiled.len().min(linear.len()),
+            }));
+        }
+        let row_words = width as usize * per;
+        if row_words == 0 {
+            return Some(Ok(()));
+        }
+        let log2 = self.texel_log2();
+        for (y, line) in linear.chunks_exact(row_words).enumerate() {
+            match log2 {
+                0 | 1 => {
+                    let mask = if log2 == 0 { 0xFF } else { 0xFFFF };
+                    for (x, &texel) in line.iter().enumerate() {
+                        let at = table.at(x, y);
+                        let shift = (at % 4) * 8;
+                        let word = &mut tiled[at / 4];
+                        *word = (*word & !(mask << shift)) | ((map(texel) & mask) << shift);
+                    }
+                }
+                _ => {
+                    for (x, texel) in line.chunks_exact(per).enumerate() {
+                        let at = table.at(x, y) / 4;
+                        for (slot, &word) in tiled[at..at + per].iter_mut().zip(texel) {
+                            *slot = map(word);
+                        }
+                    }
+                }
+            }
+        }
+        Some(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod offset_table_tests {
+    use super::SurfaceLayout;
+
+    /// Every layout read through an offset table detiles and tiles exactly as texel by texel does,
+    /// over surfaces of whole blocks, part blocks, one texel, and several block rows, with and
+    /// without a pipe-bank XOR.
+    #[test]
+    fn tables_detile_and_tile_as_texel_by_texel() {
+        let layouts = [
+            SurfaceLayout::Dx4Kb,
+            SurfaceLayout::S4Kb,
+            SurfaceLayout::S64Kb,
+            SurfaceLayout::S256B,
+            SurfaceLayout::Zx64Kb,
+            SurfaceLayout::Rx64KbBpp2,
+            SurfaceLayout::Zx64KbBpp2,
+            SurfaceLayout::S4KbBpp2,
+            SurfaceLayout::Rx64KbBpp1,
+            SurfaceLayout::S4KbBpp1,
+            SurfaceLayout::S4KbBpp8,
+            SurfaceLayout::S64KbBpp8,
+            SurfaceLayout::Rx64KbBpp8,
+            SurfaceLayout::S256BBpp8,
+            SurfaceLayout::Dx64KbBpp16,
+            SurfaceLayout::Dx4KbBpp16,
+            SurfaceLayout::S64KbBpp16,
+            SurfaceLayout::S4KbBpp16,
+            SurfaceLayout::S256BBpp16,
+            SurfaceLayout::Rx64KbBpp16,
+        ];
+        let sizes = [(1, 1), (37, 19), (256, 256), (300, 517), (1031, 70)];
+        let map = |word: u32| word.rotate_left(7) ^ 0x5a5a_0f0f;
+        for layout in layouts {
+            for (width, height) in sizes {
+                for xor in [0_u8, 5] {
+                    let words = layout.words(width, height);
+                    let tiled: Vec<u32> = (0..words as u32)
+                        .map(|i| i.wrapping_mul(0x9e37_79b9) ^ (i >> 3))
+                        .collect();
+                    let by_table = layout
+                        .detile_by_table(&tiled, (width, height), xor, &map)
+                        .expect("a table");
+                    let by_texel = layout.detile_by_texel(&tiled, width, height, xor, map);
+                    assert!(
+                        by_table == by_texel,
+                        "{layout:?} {width} x {height} xor {xor}: detiled differently"
+                    );
+                    let mut table_tiled = tiled.clone();
+                    let mut texel_tiled = tiled.clone();
+                    layout
+                        .tile_by_table(&by_texel, (width, height), xor, &mut table_tiled, &map)
+                        .expect("a table")
+                        .expect("tiled");
+                    layout
+                        .tile_by_texel(&by_texel, width, height, xor, &mut texel_tiled, map)
+                        .expect("tiled");
+                    assert!(
+                        table_tiled == texel_tiled,
+                        "{layout:?} {width} x {height} xor {xor}: tiled differently"
+                    );
+                }
+            }
+        }
     }
 }
 

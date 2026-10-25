@@ -86,11 +86,11 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(
     #[serde(untagged)]
     enum Stored {
         Many(Vec<TextureSource>),
-        One(Option<TextureSource>),
+        One(Option<Box<TextureSource>>),
     }
     Ok(match serde::Deserialize::deserialize(deserializer)? {
         Stored::Many(sources) => sources,
-        Stored::One(source) => source.into_iter().collect(),
+        Stored::One(source) => source.into_iter().map(|source| *source).collect(),
     })
 }
 

@@ -1114,7 +1114,7 @@ fn global_range_within(
     let waves_per_group = u64::from(inputs.waves(width));
     let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * waves_per_group;
     // A sample of a dispatch too large to run whole is device-addressed instead, where the backend
-    // offers it (D981).
+    // offers it (D982).
     if runs > MOST_DISPATCH_WAVES && !crate::device_addressed::host_runs_allowed() {
         return Err(format!(
             "its global loads' range: {}",

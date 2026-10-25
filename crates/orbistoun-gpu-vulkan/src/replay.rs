@@ -63,10 +63,12 @@ pub fn replay_dispatch(
 ) -> Result<Replay, DispatchError> {
     let capture = Capture::read_from(dir)?;
     let (fetched, more_fetched, stored) = capture.dispatch_images();
+    // A capture holds no images selected at run time (D983).
     let images = DispatchImages {
         fetched,
         more_fetched: &more_fetched,
         stored: &stored,
+        selected: None,
     };
     let buffers = capture.buffers_in();
     let hash = orbistoun_gpu::content_hash(&capture.module);
@@ -155,6 +157,54 @@ pub fn replay_dispatch(
         runs,
         lost,
     })
+}
+
+/// Runs `module` once over the inputs of the dispatch captured as `capture`, as a replay runs it: a
+/// device-addressed module over the capture's guest pages placed again where they lay (D971). What
+/// it left, with the capture's guest ranges as it left them, in order - none where `module` does not
+/// address guest memory directly. `module` may be another translation of the captured program, a
+/// fix under test, so long as it binds what the captured module binds.
+///
+/// # Errors
+///
+/// The guest pages cannot be placed, or the dispatch fails.
+pub fn run_once(
+    capture: &Capture<'_>,
+    module: &[u32],
+) -> Result<(GuestDispatch, Vec<Vec<u32>>), DispatchError> {
+    let (fetched, more_fetched, stored) = capture.dispatch_images();
+    // A capture holds no images selected at run time (D983).
+    let images = DispatchImages {
+        fetched,
+        more_fetched: &more_fetched,
+        stored: &stored,
+        selected: None,
+    };
+    let buffers = capture.buffers_in();
+    let hash = orbistoun_gpu::content_hash(module);
+    if !crate::direct::addresses_directly(module) {
+        let done = crate::compute::run_guest_dispatch(
+            (module, hash),
+            &capture.memory,
+            (&capture.push, capture.groups),
+            &images,
+            &buffers,
+        )?;
+        return Ok((done, Vec::new()));
+    }
+    crate::compute::session()?;
+    let placed = Placed::reserve(&capture.guest)?;
+    Placed::write(&capture.guest);
+    let done = crate::direct::replay(
+        (module, hash),
+        &capture.memory,
+        (&capture.push, capture.groups),
+        &images,
+        &buffers,
+    )?;
+    let guest_after = Placed::read(&capture.guest);
+    drop(placed);
+    Ok((done, guest_after))
 }
 
 /// A captured device-addressed dispatch's guest pages, reserved again at their guest addresses in

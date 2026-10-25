@@ -12,11 +12,14 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use orbistoun_gpu::translations::{Context, TranslationStore};
+use orbistoun_gpu_vulkan::capture::ImageRole;
 use orbistoun_gpu_vulkan::capture::{Capture, CapturedBuffer};
 use orbistoun_gpu_vulkan::compute_images::DispatchImages;
 use orbistoun_shader::{Decode, EncodingTable, OperandTable, decode_program};
 use orbistoun_translate::draw_buffers::{BufferSource, Computed};
-use orbistoun_translate::evaluate::{LaneProgram, TraceStop, WaveEntry, WaveTrace, wave_trace};
+use orbistoun_translate::evaluate::{
+    LaneProgram, TraceImages, TraceStop, WaveEntry, WaveTrace, wave_trace_with_images,
+};
 
 /// The registers a trace records: every vector register a wave32 program addresses below 128, and
 /// every scalar code below `vcc_lo`'s.
@@ -33,7 +36,9 @@ pub(crate) struct TraceRequest<'a> {
     pub program: Option<&'a Path>,
     pub kept: Option<&'a str>,
     pub user_words: Option<usize>,
-    pub group: u32,
+    /// The groups whose first wave runs on the host, each `[x, y]`; the first is the one `--points`
+    /// shows.
+    pub groups: Vec<[u32; 2]>,
     pub against: Option<&'a Path>,
     /// Where `--device` writes what the device left, named as `replay-dispatch --out` names it.
     pub out: Option<&'a Path>,
@@ -51,9 +56,9 @@ pub(crate) struct TraceRequest<'a> {
 }
 
 impl Shape {
-    /// The workgroup ids the hardware loads after the user data for group `group` along x: one for
-    /// each component the context enables, the first by default.
-    fn group_ids(&self, group: u32) -> Vec<u32> {
+    /// The workgroup ids the hardware loads after the user data for group `[x, y]`: one for each
+    /// component the context enables, the first by default.
+    fn group_ids(&self, group: [u32; 2]) -> Vec<u32> {
         let enabled = self
             .context
             .and_then(|context| context.user_data.compute)
@@ -62,7 +67,7 @@ impl Shape {
             .iter()
             .enumerate()
             .filter(|(_, on)| **on)
-            .map(|(axis, _)| if axis == 0 { group } else { 0 })
+            .map(|(axis, _)| group.get(axis).copied().unwrap_or(0))
             .collect()
     }
 }
@@ -97,35 +102,58 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
     let [x, y, z] = shape.threads;
     let threads = x * y * z;
     let width = shape.width.max(1);
-    // The group's waves, each its threads' ids.
-    let waves: Vec<WaveEntry> = (0..threads.div_ceil(width))
-        .map(|wave| WaveEntry {
-            group_ids: shape.group_ids(request.group),
-            threads: (wave * width..((wave + 1) * width).min(threads))
-                .map(|t| Some([t % x, t / x % y, t / (x * y)]))
-                .collect(),
-            components: if y * z == 1 { 1 } else { 3 },
-        })
-        .collect();
     let user_data = capture
         .push
         .get(..shape.user_words)
         .context("fewer push words than the user data")?;
     let regions = memory_regions(&capture);
     let mut read = |address: u64| read_word(&regions, address);
-    let program = LaneProgram::new(decode.clone(), &encodings, &[]);
-    let run = wave_trace(
-        &program,
-        &encodings,
-        user_data,
-        (width, &waves),
-        (TRACED_VECTORS, TRACED_SCALARS, request.lane),
-        &mut read,
+    let mut images = CaptureImages(&capture);
+    let program = LaneProgram::new(decode.clone(), &encodings, &[]).clamping(
+        shape
+            .context
+            .and_then(|context| context.user_data.dx10_clamp),
     );
-    print!("{}", summary(&run, threads, waves.len()));
-    if request.points {
-        print!("{}", points(&run, &listing(&decode, &encodings)));
+    // Each group's run, its stores gathered into the first's for the comparison: groups store
+    // apart, so a later group's store never meets an earlier one's.
+    let mut run: Option<WaveTrace> = None;
+    for &group in &request.groups {
+        // The group's waves, each its threads' ids.
+        let waves: Vec<WaveEntry> = (0..threads.div_ceil(width))
+            .map(|wave| WaveEntry {
+                group_ids: shape.group_ids(group),
+                threads: (wave * width..((wave + 1) * width).min(threads))
+                    .map(|t| Some([t % x, t / x % y, t / (x * y)]))
+                    .collect(),
+                components: if y * z == 1 { 1 } else { 3 },
+            })
+            .collect();
+        let traced = wave_trace_with_images(
+            &program,
+            &encodings,
+            user_data,
+            (width, &waves),
+            (TRACED_VECTORS, TRACED_SCALARS, request.lane),
+            (&mut read, &mut images),
+        );
+        print!(
+            "group {group:?}: {}",
+            summary(&traced, threads, waves.len())
+        );
+        match &mut run {
+            None => {
+                if request.points {
+                    print!("{}", points(&traced, &listing(&decode, &encodings)));
+                }
+                run = Some(traced);
+            }
+            Some(first) => {
+                first.written.extend(traced.written);
+                first.texels.extend(traced.texels);
+            }
+        }
     }
+    let run = run.context("name a group to trace")?;
     if request.device {
         let Some(context) = shape.context else {
             bail!("--device needs the translation context: name the title with --kept");
@@ -139,10 +167,9 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
                 std::fs::write(out.join(name), bytes)?;
             }
         }
-        print!(
-            "{}",
-            compare(&capture, &run, &|name| files.get(name).cloned())
-        );
+        let device = |name: &str| files.get(name).cloned();
+        print!("{}", compare(&capture, &run, &device));
+        print!("{}", compare_texels(&capture, &run, &device));
     } else if let Some(against) = request.against {
         let read_file = |name: &str| -> Option<Vec<u32>> {
             let bytes = std::fs::read(against.join(name)).ok()?;
@@ -154,6 +181,7 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
             )
         };
         print!("{}", compare(&capture, &run, &read_file));
+        print!("{}", compare_texels(&capture, &run, &read_file));
     }
     Ok(())
 }
@@ -185,7 +213,13 @@ fn shape(
             std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
             None,
         ),
-        (None, None) => bail!("name the program: --kept <title> or --program <file>"),
+        // A capture that noted its source holds the program and its context itself.
+        (None, None) => match &capture.source {
+            Some(source) => (source.program.clone(), Some(source.context)),
+            None => bail!(
+                "the capture notes no source: name the program, --kept <title> or --program <file>"
+            ),
+        },
     };
     let compute = context.and_then(|context| context.user_data.compute);
     let threads = match (request.threads, compute) {
@@ -275,31 +309,13 @@ fn branched(
     Ok(patched)
 }
 
-/// Translates `decode` under `context` and runs it on the device over the capture's inputs, its
-/// buffers bound as the capture binds them; what it leaves, named as `replay-dispatch --out` names
-/// it. Refused where the binding would not be the capture's: the `original` program translated
-/// again must be the captured module, and a patched `decode` must trace its buffers into the same
-/// slots.
-fn run_on_device(
-    capture: &Capture<'_>,
+/// Refused where the patched `decode` would bind its buffers otherwise than the `original`
+/// program the capture holds: other sources, or an access served from another slot.
+fn same_bindings(
     (original, decode): (&Decode, &Decode),
     encodings: &EncodingTable,
     context: &Context,
-) -> Result<BTreeMap<String, Vec<u32>>> {
-    let again = orbistoun_translate::translate_with_user_data(
-        original,
-        encodings,
-        context.strategy,
-        (context.stage, context.primitive),
-        context.window,
-        context.user_data,
-    )
-    .map_err(|e| anyhow::anyhow!("the program does not translate under its context: {e}"))?;
-    // A build that translates the program otherwise - a fix under test - still binds the buffers
-    // the tracing finds, which the capture's slots hold.
-    if again.module[..] != capture.module[..] {
-        println!("device: this build translates the program otherwise than the captured module");
-    }
+) -> Result<()> {
     // Each source as it binds: a computed one is found by running the program's words before its
     // access, which a patch that leaves the scalar registers alone resolves to the same buffer, so
     // those words are set aside.
@@ -347,6 +363,35 @@ fn run_on_device(
             moved.join(", ")
         );
     }
+    Ok(())
+}
+
+/// Translates `decode` under `context` and runs it on the device over the capture's inputs, its
+/// buffers bound as the capture binds them; what it leaves, named as `replay-dispatch --out` names
+/// it. Refused where the binding would not be the capture's: the `original` program translated
+/// again must be the captured module, and a patched `decode` must trace its buffers into the same
+/// slots.
+fn run_on_device(
+    capture: &Capture<'_>,
+    (original, decode): (&Decode, &Decode),
+    encodings: &EncodingTable,
+    context: &Context,
+) -> Result<BTreeMap<String, Vec<u32>>> {
+    let again = orbistoun_translate::translate_with_user_data(
+        original,
+        encodings,
+        context.strategy,
+        (context.stage, context.primitive),
+        context.window,
+        context.user_data,
+    )
+    .map_err(|e| anyhow::anyhow!("the program does not translate under its context: {e}"))?;
+    // A build that translates the program otherwise - a fix under test - still binds the buffers
+    // the tracing finds, which the capture's slots hold.
+    if again.module[..] != capture.module[..] {
+        println!("device: this build translates the program otherwise than the captured module");
+    }
+    same_bindings((original, decode), encodings, context)?;
     let translated = orbistoun_translate::translate_with_user_data(
         decode,
         encodings,
@@ -359,11 +404,36 @@ fn run_on_device(
     if !std::ptr::eq(original, decode) && translated.module[..] == capture.module[..] {
         println!("device: the patched program translates to the captured module, so runs as it");
     }
+    // A device-addressed module reaches guest memory where it lay: the capture's guest pages are
+    // placed there again, and what it left in them is compared as `guest-<n>.bin` (D980).
+    if orbistoun_gpu_vulkan::direct::addresses_directly(&translated.module) {
+        let (done, guest_after) =
+            orbistoun_gpu_vulkan::replay::run_once(capture, &translated.module)?;
+        if done.escaped || done.loop_cut.is_some() {
+            println!(
+                "device: escaped {}, loop cut {:?}",
+                done.escaped, done.loop_cut
+            );
+        }
+        let mut files: BTreeMap<String, Vec<u32>> =
+            orbistoun_gpu_vulkan::replay::outputs(capture, &done)
+                .into_iter()
+                .collect();
+        files.extend(
+            guest_after
+                .into_iter()
+                .enumerate()
+                .map(|(index, words)| (format!("guest-{index}.bin"), words)),
+        );
+        return Ok(files);
+    }
     let (fetched, more_fetched, stored) = capture.dispatch_images();
+    // A capture holds no images selected at run time (D983).
     let images = DispatchImages {
         fetched,
         more_fetched: &more_fetched,
         stored: &stored,
+        selected: None,
     };
     let done = orbistoun_gpu_vulkan::dispatch_guest_with_buffers(
         &translated.module,
@@ -426,10 +496,109 @@ fn local_size(module: &[u32]) -> Option<[u32; 3]> {
     None
 }
 
-/// The guest memory a capture holds, by start address: its window and each buffer with words of its
-/// own. A buffer the program only stores to holds nothing the run can read.
+/// A capture's images as a host trace reads them: the image a descriptor names, by its texels'
+/// first level.
+struct CaptureImages<'a>(&'a Capture<'a>);
+
+impl TraceImages for CaptureImages<'_> {
+    fn load(&mut self, descriptor: [u32; 8], texel: [u32; 3], level: u32) -> Option<[u32; 4]> {
+        (level == 0).then(|| self.0.texel_read(descriptor, texel))?
+    }
+    fn sample(
+        &mut self,
+        descriptor: [u32; 8],
+        sampler: [u32; 4],
+        coordinates: [f32; 3],
+        level: f32,
+    ) -> Option<[u32; 4]> {
+        self.0.texel_sample(descriptor, sampler, coordinates, level)
+    }
+}
+
+/// Every texel the host's image stores wrote, against what the device left in the stored image of
+/// the same place (`stored-<n>.bin`): how many agree, differ by one step of the format, differ
+/// more, or are not known on the host, with the first that differ more listed.
+fn compare_texels(
+    capture: &Capture<'_>,
+    run: &WaveTrace,
+    device: &dyn Fn(&str) -> Option<Vec<u32>>,
+) -> String {
+    let mut text = String::new();
+    let (mut agreed, mut near, mut unknown, mut unplaced, mut differ) = (0, 0, 0, 0, 0);
+    for ((descriptor, [x, y, layer], level), (components, at)) in &run.texels {
+        let Some(index) = capture.image_named(*descriptor) else {
+            unplaced += 1;
+            continue;
+        };
+        let image = &capture.images[index];
+        // The stored images, in order, are the device's `stored-<n>.bin`.
+        let stored = capture.images[..index]
+            .iter()
+            .filter(|image| image.role == ImageRole::Stored)
+            .count();
+        let Some(after) = (image.role == ImageRole::Stored && *level == 0)
+            .then(|| device(&format!("stored-{stored}.bin")))
+            .flatten()
+        else {
+            unplaced += 1;
+            continue;
+        };
+        let place = ((*layer as usize * image.height as usize + *y as usize)
+            * image.width as usize)
+            + *x as usize;
+        let (Some(&before), Some(&left)) = (image.texels.get(place), after.get(place)) else {
+            unplaced += 1;
+            continue;
+        };
+        let Some(host) = image.stored_word(components, before) else {
+            unknown += 1;
+            continue;
+        };
+        if host == left {
+            agreed += 1;
+            continue;
+        }
+        let step = host
+            .to_le_bytes()
+            .iter()
+            .zip(left.to_le_bytes())
+            .all(|(a, b)| a.abs_diff(b) <= 1);
+        if step {
+            near += 1;
+            continue;
+        }
+        differ += 1;
+        if differ <= 64 {
+            let _ = writeln!(
+                text,
+                "image {index} texel ({x}, {y}, {layer}): host {host:#010x} device {left:#010x}  host store at {at:#x}"
+            );
+        }
+    }
+    let _ = writeln!(
+        text,
+        concat!(
+            "texels the host stored: {agreed} alike, {near} a step apart, {differ} differ; ",
+            "{unknown} with a value the host does not know, {unplaced} in no stored image found"
+        ),
+        agreed = agreed,
+        near = near,
+        differ = differ,
+        unknown = unknown,
+        unplaced = unplaced,
+    );
+    text
+}
+
+/// The guest memory a capture holds, by start address: the guest ranges a device-addressed dispatch
+/// reached (D980), its window and each buffer with words of its own. A buffer the program only
+/// stores to holds nothing the run can read.
 fn memory_regions<'a>(capture: &'a Capture<'_>) -> Vec<(u64, &'a [u32])> {
-    let mut regions = Vec::new();
+    let mut regions: Vec<(u64, &[u32])> = capture
+        .guest
+        .iter()
+        .map(|range| (range.at, &range.words[..]))
+        .collect();
     if let Some((start, _)) = capture.ranges.window {
         regions.push((start, &capture.memory[..]));
     }
@@ -519,6 +688,77 @@ fn points(run: &WaveTrace, listing: &BTreeMap<u32, String>) -> String {
     text
 }
 
+/// Memory the device left that a comparison reads: a buffer, or a guest range a device-addressed
+/// dispatch reached.
+struct Place<'a> {
+    /// How the comparison names it.
+    name: String,
+    /// The guest address of its first word.
+    start: u64,
+    /// Its words as the device left them.
+    after: Vec<u32>,
+    /// Its words before, where the capture holds them.
+    before: Option<&'a [u32]>,
+    /// Whether the device stored the word at an index.
+    stored_at: Box<dyn Fn(usize) -> bool + 'a>,
+}
+
+/// Each buffer with words of its own the device answers, and each guest range: a buffer's stores are
+/// its write marks; a guest range keeps none, so a word the device stored there is one it changed.
+fn device_places<'a>(
+    capture: &'a Capture<'_>,
+    device: &dyn Fn(&str) -> Option<Vec<u32>>,
+) -> Vec<Place<'a>> {
+    let mut places = Vec::new();
+    for (slot, (buffer, (start, _))) in capture
+        .buffers
+        .iter()
+        .zip(&capture.ranges.buffers)
+        .enumerate()
+    {
+        if matches!(buffer, CapturedBuffer::Alias(..)) {
+            continue;
+        }
+        let Some(after) = device(&format!("buffer-{slot}.bin")) else {
+            continue;
+        };
+        let marks = device(&format!("buffer-{slot}.written.bin"));
+        places.push(Place {
+            name: format!("buffer {slot}"),
+            start: *start,
+            after,
+            before: match buffer {
+                CapturedBuffer::Words(words) => Some(&words[..]),
+                _ => None,
+            },
+            stored_at: Box::new(move |index| {
+                marks
+                    .as_ref()
+                    .is_some_and(|marks| marks.get(index) != Some(&0))
+            }),
+        });
+    }
+    for (index, range) in capture.guest.iter().enumerate() {
+        let Some(after) = device(&format!("guest-{index}.bin")) else {
+            continue;
+        };
+        let before = &range.words[..];
+        let changed: Vec<bool> = after
+            .iter()
+            .enumerate()
+            .map(|(at, word)| before.get(at) != Some(word))
+            .collect();
+        places.push(Place {
+            name: format!("guest {:#x}", range.at),
+            start: range.at,
+            after,
+            before: Some(before),
+            stored_at: Box::new(move |at| changed.get(at).copied().unwrap_or(false)),
+        });
+    }
+    places
+}
+
 /// Every word the host and the device stored differently, buffer by buffer, and how many of each
 /// difference each of the host's stores accounts for. `device` answers a file of the device's
 /// output by its `replay-dispatch --out` name.
@@ -534,28 +774,17 @@ fn compare(
     let mut agreed = 0;
     // Of the words only the device stored, how many it stored as they already were.
     let mut device_only_unchanged = 0;
-    for (slot, (buffer, (start, _))) in capture
-        .buffers
-        .iter()
-        .zip(&capture.ranges.buffers)
-        .enumerate()
-    {
-        if matches!(buffer, CapturedBuffer::Alias(..)) {
-            continue;
-        }
-        let Some(after) = device(&format!("buffer-{slot}.bin")) else {
-            continue;
-        };
-        let marks = device(&format!("buffer-{slot}.written.bin"));
-        let before = match buffer {
-            CapturedBuffer::Words(words) => Some(words),
-            _ => None,
-        };
+    for place in device_places(capture, device) {
+        let Place {
+            name,
+            start,
+            after,
+            before,
+            stored_at,
+        } = place;
         for (index, stored) in after.iter().enumerate() {
             let address = start + 4 * index as u64;
-            let device_stored = marks
-                .as_ref()
-                .is_some_and(|marks| marks.get(index) != Some(&0));
+            let device_stored = stored_at(index);
             let host = run.written.get(&address);
             let kind = match (host, device_stored) {
                 // Stored by neither, or with a value the host does not know: not a difference it
@@ -588,7 +817,7 @@ fn compare(
                 let by = writer.map_or(String::new(), |at| format!("  host store at {at:#x}"));
                 let _ = writeln!(
                     text,
-                    "buffer {slot} word {index:#x} ({address:#x}): host {host} device {device}{by}"
+                    "{name} word {index:#x} ({address:#x}): host {host} device {device}{by}"
                 );
             }
         }

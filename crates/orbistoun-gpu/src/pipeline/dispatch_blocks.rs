@@ -32,6 +32,7 @@ pub(super) fn fetched_blocks(
     source: &TextureSource,
     memory: &impl GuestMemory,
     detiled: &mut DetiledImages,
+    resident: Option<&mut Option<crate::resident::Use>>,
 ) -> Option<Result<Fetched, String>> {
     let words = dispatch_descriptor_words(state, source, memory).ok()?;
     let sampled = decoded_blocks(
@@ -42,7 +43,7 @@ pub(super) fn fetched_blocks(
         state,
         (source, words, sampled),
         memory,
-        detiled,
+        (detiled, resident),
     ))
 }
 
@@ -53,7 +54,10 @@ fn read_blocks(
     state: &crate::dispatch::DispatchState,
     (source, words, sampled): (&TextureSource, [u32; 8], Sampled),
     memory: &impl GuestMemory,
-    detiled: &mut DetiledImages,
+    (detiled, resident): (
+        &mut DetiledImages,
+        Option<&mut Option<crate::resident::Use>>,
+    ),
 ) -> Result<Fetched, String> {
     let descriptor = decode_image_descriptor(words);
     let refuse = |why: &str| {
@@ -67,8 +71,13 @@ fn read_blocks(
             "a block-compressed dispatch image that is not a 2D image read as one",
         ));
     }
-    let (texels, (width, height), span) =
-        base_level_texels(&descriptor, sampled, memory, detiled).map_err(refuse)?;
+    let (texels, (width, height), span) = base_level_texels(
+        &descriptor,
+        sampled,
+        memory,
+        (detiled, resident, source.layered),
+    )
+    .map_err(refuse)?;
     Ok((
         DispatchTexels {
             texels,
@@ -104,12 +113,18 @@ fn decoded_blocks(format: u32, selects: [u32; 4]) -> Option<Sampled> {
 
 /// The view's base level of a block-compressed image, decoded: its texels, its extent, and the
 /// bytes it was read from. Read as a draw's blocks are (`read_block_texture`): a standard swizzle,
-/// uncompressed, at a level whose blocks are its chain's halved elements.
+/// uncompressed, at a level whose blocks are its chain's halved elements. Where `resident` is given,
+/// its place among the images the device keeps goes there (D985), and one taken from the device is
+/// neither read nor decoded: its texels come back empty.
 fn base_level_texels(
     descriptor: &crate::registers::ImageDescriptor,
     sampled: Sampled,
     memory: &impl GuestMemory,
-    detiled: &mut DetiledImages,
+    (detiled, resident, layered): (
+        &mut DetiledImages,
+        Option<&mut Option<crate::resident::Use>>,
+        bool,
+    ),
 ) -> Result<DecodedLevel, &'static str> {
     if !matches!(
         descriptor.tiling,
@@ -147,6 +162,19 @@ fn base_level_texels(
         );
     }
     let span = surface.words() * 4;
+    if let Some(slot) = resident {
+        // Bound as an array of one where the program reads it as an array: another image.
+        let view = (format!("{surface:?}"), descriptor.format, "blocks", layered);
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        *slot = super::place_resident((surface.base, span as u64), &view, bytes, memory);
+        if slot.is_some_and(|used| !used.fresh) {
+            return Ok((
+                Vec::new().into(),
+                (width, height),
+                (surface.base, span as u64),
+            ));
+        }
+    }
     let spanned = memory
         .read(surface.base, span)
         .ok_or("a block-compressed dispatch image not in guest memory it can read")?;
@@ -350,6 +378,7 @@ mod tests {
             &source,
             &memory,
             &mut super::DetiledImages::default(),
+            None,
         )
         .expect("a block-compressed image")
         .expect("read");
@@ -385,7 +414,8 @@ mod tests {
                     &state(words),
                     &source,
                     &memory,
-                    &mut super::DetiledImages::default()
+                    &mut super::DetiledImages::default(),
+                    None,
                 )
                 .is_none()
             );
@@ -406,6 +436,7 @@ mod tests {
             &source,
             &memory,
             &mut super::DetiledImages::default(),
+            None,
         )
         .expect("a block-compressed image")
         .expect_err("refused");

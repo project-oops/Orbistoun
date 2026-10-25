@@ -1090,7 +1090,12 @@ impl Session {
         let wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
             .shader_float16(offered_float16.shader_float16 == vk::TRUE)
             // The 64-bit buffer atomics a dispatch's `buffer_atomic_swap_x2` and `_or_x2` are.
-            .shader_buffer_int64_atomics(offered_float16.shader_buffer_int64_atomics == vk::TRUE);
+            .shader_buffer_int64_atomics(offered_float16.shader_buffer_int64_atomics == vk::TRUE)
+            // An image a dispatch selects from a table at run time, read out of an array by an
+            // index each invocation computes (D983).
+            .shader_sampled_image_array_non_uniform_indexing(
+                offered_float16.shader_sampled_image_array_non_uniform_indexing == vk::TRUE,
+            );
 
         // `VK_EXT_mesh_shader` where the device has it: a guest's primitive shader is a mesh shader
         // (D688), and modules that do not use it are unaffected.
@@ -1168,6 +1173,7 @@ impl Session {
             crate::device_lost::keep_fault_reader(instance, &device);
         }
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        crate::compute_images::note_enabled(&wanted_float16);
         CUSTOM_BORDER_COLOUR.store(border_offered, std::sync::atomic::Ordering::Relaxed);
         Self::note_enabled_features(instance, physical, &wanted_features);
         Ok((device, wanted_features, wanted_mesh.mesh_shader))

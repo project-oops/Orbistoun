@@ -26,6 +26,8 @@ use crate::compute::DispatchError;
 use crate::compute_buffers::BufferIn;
 use crate::compute_images::{DispatchFormat, DispatchImage, DispatchImages};
 
+mod texels;
+
 /// The file in a capture directory that names the rest.
 pub const MANIFEST: &str = "dispatch.txt";
 

@@ -32,6 +32,7 @@ mod pixel_inputs;
 pub mod register_defaults;
 pub mod registers;
 mod render;
+pub mod resident;
 pub mod shader_census;
 pub mod streamout;
 pub mod swizzle;

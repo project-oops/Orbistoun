@@ -118,6 +118,7 @@ fn a_fetched_view_of_several_levels_binds_its_base_level() {
         &source,
         &memory,
         &mut super::DetiledImages::default(),
+        None,
     )
     .expect("bound");
     assert_eq!(
@@ -143,6 +144,7 @@ fn a_stored_view_of_several_levels_is_refused() {
         &source,
         &memory,
         &mut super::DetiledImages::default(),
+        None,
     )
     .expect_err("refused");
     assert!(refused.contains("more than one level"), "{refused}");

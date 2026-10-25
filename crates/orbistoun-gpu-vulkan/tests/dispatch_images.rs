@@ -187,6 +187,7 @@ fn a_dispatch_copies_one_image_into_another() {
                 &[0],
                 (&[0; 16], [1, 1, 1]),
                 &DispatchImages {
+                    selected: None,
                     more_fetched: &[],
                     fetched: Some(DispatchImage {
                         texels: &source,
@@ -286,6 +287,7 @@ fn a_dispatch_stores_to_two_images() {
         &[0],
         (&[0; 24], [1, 1, 1]),
         &DispatchImages {
+            selected: None,
             more_fetched: &[],
             fetched: Some(image(&source)),
             stored: &[image(&destination), image(&destination)],
@@ -369,6 +371,7 @@ fn a_one_layer_image_addressed_as_an_array_is_its_layer_zero() {
             &[0],
             (&push, [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(image(&source)),
                 stored: &[image(&destination)],
@@ -442,6 +445,7 @@ fn a_dispatch_fetches_the_layer_of_an_array_its_address_names() {
             &[0],
             (&push, [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &source,
@@ -545,6 +549,7 @@ fn a_dispatch_stores_to_the_layer_of_an_array_its_address_names() {
             &[0],
             (&push, [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(array(&source)),
                 stored: &[array(&destination)],
@@ -614,6 +619,7 @@ fn a_dispatch_samples_through_its_guest_sampler() {
             &[0],
             (&[0; 20], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &black_and_white,
@@ -711,6 +717,7 @@ fn a_gather_returns_one_channel_of_four_texels() {
         &[0],
         (&[0; 20], [1, 1, 1]),
         &DispatchImages {
+            selected: None,
             more_fetched: &[],
             fetched: Some(DispatchImage {
                 texels: &reds,
@@ -789,6 +796,7 @@ fn a_dispatch_stores_packed_eleven_eleven_ten_floats() {
         &[0],
         (&[0; 20], [1, 1, 1]),
         &DispatchImages {
+            selected: None,
             more_fetched: &[],
             fetched: None,
             stored: &[DispatchImage {
@@ -884,6 +892,7 @@ fn a_dispatch_samples_a_cube_s_faces() {
             &[0],
             (&[0; 20], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &faces,
@@ -1066,6 +1075,7 @@ fn registers_rewritten_between_two_fetches_read_two_images() {
             &[0],
             (&[0; 32], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&first)),
                 more_fetched: &[image(&second)],
                 stored: &[image(&destination), image(&destination)],
@@ -1154,6 +1164,7 @@ fn a_dispatch_stores_to_each_image_its_reloaded_registers_name() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&source)),
                 more_fetched: &[],
                 stored: &stored,
@@ -1323,6 +1334,7 @@ fn an_inactive_thread_stores_nothing() {
                 &[0],
                 (&push, [1, 1, 1]),
                 &DispatchImages {
+                    selected: None,
                     more_fetched: &[],
                     fetched: Some(DispatchImage {
                         texels: &source,
@@ -1418,6 +1430,7 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(image(&source)),
                 stored: &[image(&destination)],
@@ -1494,6 +1507,7 @@ fn a_dispatch_stores_to_a_volume() {
             &[0],
             (&[0; 8], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: None,
                 stored: &[DispatchImage {
@@ -1581,6 +1595,7 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
             &[0],
             (&[0; 8], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: None,
                 stored: &[DispatchImage {
@@ -1640,6 +1655,7 @@ fn a_dispatch_copies_a_single_channel_image() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(image(&source)),
                 stored: &[image(&destination)],
@@ -1679,6 +1695,7 @@ fn a_dispatch_copies_an_eight_bit_integer_image() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(image(&source)),
                 stored: &[image(&destination)],
@@ -1792,6 +1809,7 @@ fn a_dispatch_asks_an_image_s_size() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &source,
@@ -1915,6 +1933,7 @@ fn a_dispatch_fetches_from_two_images() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&first)),
                 more_fetched: &[image(&second)],
                 stored: &[image(&destination)],
@@ -1962,6 +1981,7 @@ fn a_dispatch_copies_a_sixteen_bit_normalised_image() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&source)),
                 more_fetched: &[],
                 stored: &[image(&destination)],
@@ -2021,6 +2041,7 @@ fn a_dispatch_copies_a_signed_normalised_image() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&source)),
                 more_fetched: &[],
                 stored: &[image(&destination)],
@@ -2065,6 +2086,7 @@ fn a_dispatch_copies_a_half_float_image() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                selected: None,
                 fetched: Some(image(&source)),
                 more_fetched: &[],
                 stored: &[image(&destination)],
@@ -2204,6 +2226,7 @@ fn compared_against_half(module: &[u32], function: u8) -> Option<u32> {
         &[0],
         (&[0; 20], [1, 1, 1]),
         &DispatchImages {
+            selected: None,
             more_fetched: &[],
             fetched: Some(image(&depth, Some(sampling))),
             stored: &[image(&destination, None)],

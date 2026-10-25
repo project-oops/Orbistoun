@@ -115,8 +115,8 @@ pub fn goes_device_addressed(address: u64, bytes: &[u8]) -> bool {
 /// Why a dispatch's preparation stopped before running its waves on the host to find a buffer:
 /// where the backend runs device-addressed dispatches, one whose buffers only a host run of a
 /// sample of its waves, or of its groups, would find is prepared device-addressed instead, which
-/// finds none of them (D981). It says the host cannot know, so [`host_cannot_know`] answers it.
-pub const HOST_RUN_PASSED: &str = "the host cannot know it without running the dispatch's waves on the host, which a device-addressed preparation does not need (D981)";
+/// finds none of them (D982). It says the host cannot know, so [`host_cannot_know`] answers it.
+pub const HOST_RUN_PASSED: &str = "the host cannot know it without running the dispatch's waves on the host, which a device-addressed preparation does not need (D982)";
 
 thread_local! {
     /// Whether this thread's preparation runs a dispatch's waves on the host where device
@@ -133,7 +133,7 @@ pub fn host_runs_allowed() -> bool {
 }
 
 /// Runs `prepare` with host runs allowed: for a program whose device-addressed preparation was
-/// refused, which the host run then still serves (D981).
+/// refused, which the host run then still serves (D982).
 pub fn allowing_host_runs<T>(prepare: impl FnOnce() -> T) -> T {
     let was = HOST_RUNS.replace(true);
     let prepared = prepare();
@@ -143,7 +143,7 @@ pub fn allowing_host_runs<T>(prepare: impl FnOnce() -> T) -> T {
 
 /// The programs whose preparation passed over a host run and whose device-addressed preparation was
 /// then refused, each by its address and a hash of its bytes: their later dispatches run the host
-/// run from the start (D981).
+/// run from the start (D982).
 fn host_run_programs() -> &'static Mutex<std::collections::BTreeSet<(u64, u64)>> {
     static PROGRAMS: Mutex<std::collections::BTreeSet<(u64, u64)>> =
         Mutex::new(std::collections::BTreeSet::new());
@@ -169,9 +169,173 @@ pub fn needs_host_runs(address: u64, bytes: &[u8]) -> bool {
         .contains(&(address, bytes_hash(bytes)))
 }
 
+/// How a dispatch is prepared, as [`prepare_routed`] asks for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Traced on the host, its waves run there to find a buffer only where `runs` (D914, D951).
+    Host {
+        /// Whether the host may run the dispatch's groups or waves ([`allowing_host_runs`]).
+        runs: bool,
+    },
+    /// Device-addressed (D964).
+    Device,
+}
+
+/// Prepares a dispatch of the program at `address`, holding `bytes` where they were read, by
+/// `prepare` along the route its refusals lead to (D964, D970, D982):
+///
+/// - a program remembered device-addressed is prepared so from the start, where `offered`;
+/// - one remembered for host runs is traced with them from the start;
+/// - otherwise it is traced without host runs where `offered`, and a refusal the host cannot know
+///   past is prepared device-addressed. A device-addressed preparation that is refused after a host
+///   run was passed over is traced again with host runs.
+///
+/// The program is remembered by the route that prepared it. A refusal names every route tried, in
+/// order. `device_addressed` says the dispatch was asked for device-addressed already, which no
+/// route changes.
+///
+/// # Errors
+///
+/// The refusals of every route tried.
+pub fn prepare_routed<T>(
+    (address, bytes): (u64, Option<&[u8]>),
+    (offered, device_addressed): (bool, bool),
+    prepare: &mut dyn FnMut(Route) -> Result<T, String>,
+) -> Result<T, String> {
+    let routed = offered && !device_addressed;
+    if routed && bytes.is_some_and(|bytes| goes_device_addressed(address, bytes)) {
+        return prepare(Route::Device);
+    }
+    if routed && bytes.is_some_and(|bytes| needs_host_runs(address, bytes)) {
+        return prepare(Route::Host { runs: true });
+    }
+    let why = match prepare(Route::Host { runs: !routed }) {
+        Err(why) if routed && host_cannot_know(&why) => why,
+        prepared => return prepared,
+    };
+    let again = match prepare(Route::Device) {
+        Ok(prepared) => {
+            if let Some(bytes) = bytes {
+                remember_device_addressed(address, bytes);
+            }
+            return Ok(prepared);
+        }
+        Err(again) => again,
+    };
+    if !why.contains(HOST_RUN_PASSED) {
+        return Err(format!("{why}; device-addressed (D964): {again}"));
+    }
+    match prepare(Route::Host { runs: true }) {
+        Ok(prepared) => {
+            if let Some(bytes) = bytes {
+                remember_host_runs(address, bytes);
+            }
+            Ok(prepared)
+        }
+        Err(hosted) => Err(format!(
+            "{why}; device-addressed (D964): {again}; with the host's runs (D982): {hosted}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The routes a preparation was asked for, in order.
+    type Asked = std::rc::Rc<std::cell::RefCell<Vec<Route>>>;
+
+    /// A preparation that answers each route as `answers` says, recording the routes asked.
+    fn preparing(
+        answers: impl Fn(Route) -> Result<&'static str, String>,
+    ) -> (impl FnMut(Route) -> Result<&'static str, String>, Asked) {
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&asked);
+        (
+            move |route| {
+                seen.borrow_mut().push(route);
+                answers(route)
+            },
+            asked,
+        )
+    }
+
+    /// A refusal the host cannot know past - D758's execution mask, as Grand Theft Auto V's
+    /// `0x74005b854a00` is refused - is prepared device-addressed, and the program is remembered,
+    /// so its next dispatch is prepared device-addressed from the start.
+    #[test]
+    fn a_cannot_know_refusal_is_prepared_device_addressed() {
+        let (mut prepare, asked) = preparing(|route| match route {
+            Route::Host { .. } => {
+                Err("a branch on an execution mask the host cannot know (D758)".into())
+            }
+            Route::Device => Ok("device"),
+        });
+        let program = (0x7400_5b85_4a00, Some(&b"mask-branching program"[..]));
+        assert_eq!(
+            prepare_routed(program, (true, false), &mut prepare),
+            Ok("device")
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [Route::Host { runs: false }, Route::Device]
+        );
+        asked.borrow_mut().clear();
+        assert_eq!(
+            prepare_routed(program, (true, false), &mut prepare),
+            Ok("device")
+        );
+        assert_eq!(*asked.borrow(), [Route::Device], "remembered (D970)");
+    }
+
+    /// Without device addressing, the host runs and its refusal stands alone; a refusal the host
+    /// can know past is not retried.
+    #[test]
+    fn without_device_addressing_the_host_runs() {
+        let (mut prepare, asked) = preparing(|route| match route {
+            Route::Host { runs: true } => Ok("host"),
+            _ => Err("the host cannot know it".into()),
+        });
+        let program = (0x1000, Some(&b"offline"[..]));
+        assert_eq!(
+            prepare_routed(program, (false, false), &mut prepare),
+            Ok("host")
+        );
+        assert_eq!(*asked.borrow(), [Route::Host { runs: true }]);
+        let (mut prepare, asked) = preparing(|_| Err("an unreadable program".into()));
+        assert!(prepare_routed((0x2000, None), (true, false), &mut prepare).is_err());
+        assert_eq!(*asked.borrow(), [Route::Host { runs: false }]);
+    }
+
+    /// A host run passed over for a device-addressed preparation that is refused is run after
+    /// all; refused too, the refusal names all three, and nothing is remembered.
+    #[test]
+    fn a_refused_device_preparation_falls_back_to_the_host_s_runs() {
+        let passed = || format!("a computed descriptor; {HOST_RUN_PASSED}");
+        let (mut prepare, asked) = preparing(move |route| match route {
+            Route::Host { runs: false } => Err(passed()),
+            Route::Device => Err("an instruction not modelled".into()),
+            Route::Host { runs: true } => Err("ran past the bound".into()),
+        });
+        let program = (0x3000, Some(&b"both refused"[..]));
+        let refused = prepare_routed(program, (true, false), &mut prepare).unwrap_err();
+        assert!(refused.contains("device-addressed (D964): an instruction not modelled"));
+        assert!(refused.contains("with the host's runs (D982): ran past the bound"));
+        assert_eq!(asked.borrow().len(), 3);
+        assert!(!needs_host_runs(0x3000, b"both refused"));
+        assert!(!goes_device_addressed(0x3000, b"both refused"));
+        let (mut prepare, _) = preparing(move |route| match route {
+            Route::Host { runs: false } => Err(passed()),
+            Route::Device => Err("an instruction not modelled".into()),
+            Route::Host { runs: true } => Ok("host"),
+        });
+        let program = (0x4000, Some(&b"host served"[..]));
+        assert_eq!(
+            prepare_routed(program, (true, false), &mut prepare),
+            Ok("host")
+        );
+        assert!(needs_host_runs(0x4000, b"host served"));
+    }
 
     /// A host run passed over is a refusal the host cannot know past, so a device-addressed
     /// preparation follows it; allowed, it is allowed only inside the call.

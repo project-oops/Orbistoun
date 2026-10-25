@@ -328,6 +328,7 @@ impl Mapped {
     ///
     /// A copy or a table the device refused.
     pub(super) fn copies_before(&mut self, program: u64) -> Result<bool, DispatchError> {
+        let started = std::time::Instant::now();
         let count = self.mirrors.dispatches.entry(program).or_insert(0);
         let recording = *count % RECORD_EVERY == 0;
         *count += 1;
@@ -336,16 +337,23 @@ impl Mapped {
         let mut stale = Vec::new();
         let mut unwatched = Vec::new();
         let mut marks = BTreeMap::new();
-        for (base, len) in self.mirrors.runs() {
+        let runs = self.mirrors.runs();
+        // Every run marked at once, first, so a write after the mark is the next dispatch's to
+        // find, and one before it is found below: one walk of each allocation they lie in, where
+        // a mark of each run walked its whole allocation again and cost GTA V 4 - 8 ms a run.
+        let marking = std::time::Instant::now();
+        let marked_all = orbistoun_mem::watch::mark_all(&runs);
+        let in_marks = marking.elapsed();
+        for (base, len) in runs {
             let before = self
                 .mirrors
                 .marks
                 .get(&base)
                 .filter(|&&(held, _)| held == len)
                 .map(|&(_, since)| since);
-            // Marked first, so a write after the mark is the next dispatch's to find, and one
-            // before it is found below.
-            let Some(now) = orbistoun_mem::watch::mark(base, len) else {
+            // Where some run is not watched, each is marked alone to find which: rare, and slow.
+            let now = marked_all.or_else(|| orbistoun_mem::watch::mark(base, len));
+            let Some(now) = now else {
                 unwatched.push((base, len));
                 continue;
             };
@@ -362,6 +370,7 @@ impl Mapped {
             }
         }
         self.mirrors.marks = marks;
+        let marked = started.elapsed();
         // A copy the host cannot watch cannot be kept coherent.
         for (base, len) in unwatched {
             for chunk in (base..base + len).step_by(chunk_bytes as usize) {
@@ -370,11 +379,13 @@ impl Mapped {
             }
         }
         self.transfer(&stale, true)?;
-        for chunk in stale {
-            if let Some(copy) = self.mirrors.copies.get_mut(&chunk) {
+        let transferred = started.elapsed();
+        for chunk in &stale {
+            if let Some(copy) = self.mirrors.copies.get_mut(chunk) {
                 copy.fresh = true;
             }
         }
+        let placed = self.mirrors.changed;
         if self.mirrors.changed
             && let Some(plain) = self.mirrors.plain.clone()
         {
@@ -383,6 +394,22 @@ impl Mapped {
             self.table = None;
             self.table = Some(TableMemory::place(table)?);
             self.mirrors.changed = false;
+        }
+        // Copies slow enough to hold a frame are named with where the time went, so the part of
+        // keeping them coherent that costs it is found.
+        let took = started.elapsed();
+        if took >= std::time::Duration::from_millis(200) {
+            tracing::info!(
+                "the copies before a device-addressed dispatch took {} ms: {} chunk(s) of {} KiB held in {} run(s), marked in {} ms ({} ms in the write-watch's marks); {} copied in, by {} ms; the table placed again: {placed}",
+                took.as_millis(),
+                self.mirrors.copies.len(),
+                chunk_bytes >> 10,
+                self.mirrors.marks.len(),
+                marked.as_millis(),
+                in_marks.as_millis(),
+                stale.len(),
+                transferred.as_millis(),
+            );
         }
         Ok(recording)
     }
@@ -407,11 +434,19 @@ impl Mapped {
             .filter(|chunk| self.mirrors.copies.contains_key(chunk))
             .collect();
         let mut shared = Vec::new();
+        // One walk of each allocation the runs lie in brings the record up to the dispatch's end;
+        // each run, then each chunk, is answered from it.
+        let runs: Vec<(u64, u64)> = self
+            .mirrors
+            .marks
+            .iter()
+            .map(|(&base, &(len, _))| (base, len))
+            .collect();
+        orbistoun_mem::watch::harvest_all(&runs);
         for (&base, &(len, since)) in &self.mirrors.marks {
-            if orbistoun_mem::watch::written_since(base, len, since) == Some(false) {
+            if !orbistoun_mem::watch::recorded_since(base, len, since) {
                 continue;
             }
-            // The question above harvested the whole run: each chunk is answered from the record.
             for chunk in (base..base + len).step_by(chunk_bytes as usize) {
                 if orbistoun_mem::watch::recorded_since(chunk, chunk_bytes, since) {
                     shared.push(chunk);
@@ -423,7 +458,15 @@ impl Mapped {
                 "the CPU and a device-addressed dispatch both wrote the guest chunk {chunk:#x} while it ran; the device's copy lands last (D974)"
             );
         }
+        let started = std::time::Instant::now();
         self.transfer(&back, false)?;
+        if started.elapsed() >= std::time::Duration::from_millis(200) {
+            tracing::info!(
+                "the copies back after a device-addressed dispatch took {} ms: {} chunk(s)",
+                started.elapsed().as_millis(),
+                back.len()
+            );
+        }
         // A chunk a dispatch stores into is copied back whole after it: measured, that cost a
         // scattered store more than the copy saved its loads, so it is given up, and copied again
         // only when a later recording finds it read alone.

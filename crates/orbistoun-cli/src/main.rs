@@ -862,9 +862,10 @@ enum Command {
         /// group id follows them.
         #[arg(long)]
         user_words: Option<usize>,
-        /// Which group's first wave to run.
-        #[arg(long, default_value_t = 0)]
-        group: u32,
+        /// Which group's first wave to run, `x` or `x,y`. Repeatable: each group runs on the host,
+        /// and every store they make is compared; `--points` shows the first.
+        #[arg(long = "group", value_parser = parse_group, default_value = "0")]
+        groups: Vec<[u32; 2]>,
         /// A `replay-dispatch --out` directory of the same capture, to compare stores with.
         #[arg(long)]
         against: Option<std::path::PathBuf>,
@@ -1173,6 +1174,16 @@ fn parse_jump(text: &str) -> Result<(u32, u32), String> {
     Ok((byte(from)?, byte(to)?))
 }
 
+/// A group of a dispatch, `x` or `x,y`, each as [`parse_address`] reads it.
+fn parse_group(text: &str) -> Result<[u32; 2], String> {
+    let (x, y) = text.split_once(',').unwrap_or((text, "0"));
+    let id = |text: &str| {
+        parse_address(text)
+            .and_then(|value| u32::try_from(value).map_err(|e| format!("{text:?}: {e}")))
+    };
+    Ok([id(x)?, id(y)?])
+}
+
 fn parse_address(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let parsed = t.strip_prefix("0x").map_or_else(
@@ -1354,7 +1365,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
             kept,
             program,
             user_words,
-            group,
+            groups,
             against,
             points,
             lane,
@@ -1369,7 +1380,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
             program: program.as_deref(),
             kept: kept.as_deref(),
             user_words,
-            group,
+            groups,
             against: against.as_deref(),
             out: out.as_deref(),
             points,

@@ -2640,67 +2640,40 @@ impl GuestCp<'_> {
             },
             ..state.clone()
         };
-        // A program the host trace could not follow before, and which was prepared device-addressed
-        // then, is prepared so from the start: its trace runs every group and wave of the dispatch
-        // only to end in the same refusal (D970).
         let program = self
             .memory
             .read(state.program, crate::device_addressed::PROGRAM_KEY_BYTES)
             .map(<[u8]>::to_vec);
-        let remembered = program.as_deref().is_some_and(|bytes| {
-            crate::device_addressed::goes_device_addressed(state.program, bytes)
-        });
-        if remembered && !state.inputs.device_addressed && crate::device_addressed::offered() {
-            return pipeline.prepare_dispatch(&device, &SettledReads(&self.memory));
-        }
-        // One whose device-addressed preparation was refused runs its host runs from the start
-        // (D981).
-        if program
-            .as_deref()
-            .is_some_and(|bytes| crate::device_addressed::needs_host_runs(state.program, bytes))
-        {
-            return crate::device_addressed::allowing_host_runs(|| {
-                pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
-            });
-        }
         // Read as a draw segment's tables are: a frame a draw left on the device, held or deferred
         // onto its target's pages (D719, D885), is carried out before its texels are read. Read
         // raw, a compute pass over a target drawn earlier in the frame reads what the target held
         // before - Grand Theft Auto V's chain from a 640x360 target into its ray-tracing tile
         // classifier read zeros at every step, so the ray-traced passes were handed no work.
-        let prepared = pipeline.prepare_dispatch(state, &SettledReads(&self.memory));
+        let reads = SettledReads(&self.memory);
         // A dispatch whose ranges the host cannot know before it runs reaches guest memory by
-        // device address instead, where the backend maps it (D964). Its module carries the control
-        // flow the host trace could not follow; the trace's refusal is named first, then the
-        // device-addressed preparation's own where that fails too.
-        match prepared {
-            Err(why)
-                if !state.inputs.device_addressed
-                    && crate::device_addressed::offered()
-                    && crate::device_addressed::host_cannot_know(&why) =>
-            {
-                let prepared = pipeline
-                    .prepare_dispatch(&device, &SettledReads(&self.memory))
-                    .map_err(|again| format!("{why}; device-addressed (D964): {again}"));
-                // A host run passed over for a device-addressed preparation that is refused is run
-                // after all, and from the start for the program's later dispatches (D981).
-                if prepared.is_err() && why.contains(crate::device_addressed::HOST_RUN_PASSED) {
-                    if let Some(bytes) = &program {
-                        crate::device_addressed::remember_host_runs(state.program, bytes);
-                    }
-                    return crate::device_addressed::allowing_host_runs(|| {
-                        pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
-                    });
+        // device address instead, where the backend maps it (D964), and one whose buffers only a
+        // host run would find is not run on the host for them (D982); a program prepared so once
+        // is prepared so from the start (D970).
+        crate::device_addressed::prepare_routed(
+            (state.program, program.as_deref()),
+            (
+                crate::device_addressed::offered(),
+                state.inputs.device_addressed,
+            ),
+            &mut |route| match route {
+                crate::device_addressed::Route::Device => {
+                    pipeline.prepare_dispatch(&device, &reads)
                 }
-                if prepared.is_ok()
-                    && let Some(bytes) = &program
-                {
-                    crate::device_addressed::remember_device_addressed(state.program, bytes);
+                crate::device_addressed::Route::Host { runs: true } => {
+                    crate::device_addressed::allowing_host_runs(|| {
+                        pipeline.prepare_dispatch(state, &reads)
+                    })
                 }
-                prepared
-            }
-            prepared => prepared,
-        }
+                crate::device_addressed::Route::Host { runs: false } => {
+                    pipeline.prepare_dispatch(state, &reads)
+                }
+            },
+        )
     }
 
     /// Carries out a segment's streamout draws (D861): each `DRAW_INDEX_AUTO` as its legacy vertex
@@ -2808,17 +2781,14 @@ impl GuestCp<'_> {
         Ok((window, buffers))
     }
 
-    /// Runs the dispatch `prepare` makes over guest memory as it holds it now, and writes back
-    /// exactly the words it changed. Nothing is written unless the whole dispatch ran exactly.
-    fn run_prepared(
+    /// `prepared` once what it reads of guest memory is settled: a frame still on the device over
+    /// an image it reads goes in first and it is prepared again (D714), and every frame and
+    /// deferred copy goes in before a device-addressed dispatch (D964).
+    fn settled_for(
         &mut self,
         prepare: &dyn Fn(&Self) -> Result<crate::pipeline::PreparedDispatch, String>,
-    ) -> Result<(), String> {
-        use crate::perf::{Span, span};
-        let execute = dispatch_executor()
-            .get()
-            .ok_or("no device is installed to run it")?;
-        let mut prepared = prepare(self)?;
+        mut prepared: crate::pipeline::PreparedDispatch,
+    ) -> Result<crate::pipeline::PreparedDispatch, String> {
         // An image the dispatch reads or stores that lies in a target whose frame is still on the
         // device is read from memory that does not hold the draws yet (D714): the frame goes in
         // first and the images are read again, as radeonsi's copy of its colour target into a
@@ -2839,6 +2809,21 @@ impl GuestCp<'_> {
         if prepared.device_addressed {
             self.settle_everything()?;
         }
+        Ok(prepared)
+    }
+
+    /// Runs the dispatch `prepare` makes over guest memory as it holds it now, and writes back
+    /// exactly the words it changed. Nothing is written unless the whole dispatch ran exactly.
+    fn run_prepared(
+        &mut self,
+        prepare: &dyn Fn(&Self) -> Result<crate::pipeline::PreparedDispatch, String>,
+    ) -> Result<(), String> {
+        use crate::perf::{Span, span};
+        let execute = dispatch_executor()
+            .get()
+            .ok_or("no device is installed to run it")?;
+        let mut prepared = prepare(self)?;
+        prepared = self.settled_for(prepare, prepared)?;
         let ((base, before), buffers_before) =
             span(Span::DispatchRead, || self.read_dispatch(&prepared))?;
         // For a backend's diagnostics, which see only the words.
@@ -2847,14 +2832,37 @@ impl GuestCp<'_> {
             base.map(|at| (at, before.len() as u64 * 4)),
             &prepared.buffers,
         );
-        let (after, exactness, stored, buffers_after) = span(Span::DispatchExecute, || {
-            execute(
-                (prepared.program, &prepared.module, prepared.module_hash),
-                &before,
-                (&prepared.push, prepared.groups),
-                (&prepared.images, &buffers_before),
-            )
-        })?;
+        let run = |prepared: &crate::pipeline::PreparedDispatch| {
+            let executed = span(Span::DispatchExecute, || {
+                execute(
+                    (prepared.program, &prepared.module, prepared.module_hash),
+                    &before,
+                    (&prepared.push, prepared.groups),
+                    (&prepared.images, &buffers_before),
+                )
+            });
+            // The images the device keeps learn whether the dispatch that bound them ran (D985).
+            crate::resident::with_registry(|registry| {
+                registry.ran(
+                    &crate::resident::HostWatch,
+                    &prepared.images.resident,
+                    executed.is_ok(),
+                );
+            });
+            executed
+        };
+        let executed = match run(&prepared) {
+            // The device no longer keeps an image it was asked to take: every image is let go and
+            // the dispatch prepared again, its images read afresh (D985).
+            Err(why) if why == crate::resident::NOT_RESIDENT => {
+                span(Span::ResidentMissing, || ());
+                crate::resident::with_registry(crate::resident::Registry::forget_all);
+                prepared = prepare(self)?;
+                run(&prepared)
+            }
+            executed => executed,
+        };
+        let (after, exactness, stored, buffers_after) = executed?;
         let _written_back = crate::perf::SpanGuard::start(Span::DispatchWriteBack);
         // What a device-addressed dispatch stored is in guest memory already: every cache of it
         // learns so before anything else is decided, whatever the dispatch is then found to be.
@@ -2897,6 +2905,10 @@ impl GuestCp<'_> {
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
+        // Guest memory now holds what the device keeps of each image the dispatch stored to (D985).
+        crate::resident::with_registry(|registry| {
+            registry.written_back(&crate::resident::HostWatch, &prepared.images.resident);
+        });
         note_dispatch_writes(
             (prepared.module_hash, prepared.program),
             (&writes, &scattered, &buffer_fills),
@@ -6488,6 +6500,9 @@ fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrit
                     Some(Vec::new())
                 }
             });
+            if writes.is_none() {
+                crate::perf::span(crate::perf::Span::QueuedUnbounded, || ());
+            }
             (submission, writes)
         },
     )

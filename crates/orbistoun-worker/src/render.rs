@@ -1181,10 +1181,28 @@ fn execute_dispatch_here(
     let (fetched, more_fetched, stored_before) = with_depths(images)?;
     let more: Vec<_> = more_fetched.iter().map(dispatch_image).collect();
     let stored: Vec<_> = stored_before.iter().map(dispatch_image).collect();
+    // The images its program selects from tables at run time, in their places (D983).
+    let selected: Vec<_> = images
+        .selected
+        .iter()
+        .flat_map(|selected| {
+            selected
+                .images
+                .iter()
+                .map(|(texels, _)| dispatch_image(texels))
+        })
+        .collect();
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
         fetched: fetched.as_ref().map(dispatch_image),
         more_fetched: &more,
         stored: &stored,
+        selected: images.selected.as_ref().map(|set| {
+            orbistoun_gpu_vulkan::compute_images::SelectedImageSet {
+                slots: set.slots,
+                images: &selected,
+                directory: &set.directory,
+            }
+        }),
     };
     // A buffer the program only stores to goes over unread, as its length alone (D809).
     let buffers: Vec<orbistoun_gpu_vulkan::BufferIn<'_>> = buffers
@@ -1202,15 +1220,31 @@ fn execute_dispatch_here(
         })
         .collect();
     let started = std::time::Instant::now();
+    // Each image's place among those the device keeps, and those it lets go first (D985).
+    let hints = orbistoun_gpu_vulkan::compute_images::Hints {
+        uses: images.resident.clone(),
+        dropped: orbistoun_gpu::resident::with_registry(
+            orbistoun_gpu::resident::Registry::take_dropped,
+        ),
+    };
     let done = perf::span(perf::Span::DispatchOnDevice, || {
-        orbistoun_gpu_vulkan::dispatch_guest_hashed(
-            module,
-            memory,
-            (push, groups),
-            &bound,
-            &buffers,
-        )
+        orbistoun_gpu_vulkan::compute_images::with_hints(hints, || {
+            orbistoun_gpu_vulkan::dispatch_guest_hashed(
+                module,
+                memory,
+                (push, groups),
+                &bound,
+                &buffers,
+            )
+        })
     });
+    // An image it was asked to take that the device does not keep: the command processor lets
+    // every image go and prepares the dispatch again (D985).
+    if let Err(orbistoun_gpu_vulkan::DispatchError::Unsupported(why)) = &done
+        && why == orbistoun_gpu::resident::NOT_RESIDENT
+    {
+        return Err(orbistoun_gpu::resident::NOT_RESIDENT.to_owned());
+    }
     // A dispatch slow enough on the device to hold a frame by itself is named, by the module the
     // run's dispatch census names its program beside, so its device time and its preparation's
     // are read together.

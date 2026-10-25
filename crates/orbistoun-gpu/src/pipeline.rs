@@ -19,6 +19,8 @@ mod dispatch_blocks;
 mod dispatch_image_tests;
 mod dispatch_modules;
 mod per_segment;
+mod selected_images;
+pub use selected_images::SelectedImages;
 mod table_textures;
 mod texel_cache;
 
@@ -860,7 +862,7 @@ fn dispatch_buffer_range(
         .map(|range| (range, false))
         .or_else(|why| {
             // Found only by running the dispatch's groups or waves on the host: device-addressed
-            // instead, where the backend offers it (D981).
+            // instead, where the backend offers it (D982).
             if !crate::device_addressed::host_runs_allowed()
                 && matches!(
                     source,
@@ -2923,6 +2925,7 @@ impl Pipeline {
             // (D961).
             let global = name.starts_with("global_store_");
             if !name.starts_with("buffer_") && !global {
+                crate::perf::span(crate::perf::Span::UnboundedStore, || ());
                 return None;
             }
             stores.push((instruction.offset, global));
@@ -2944,7 +2947,10 @@ impl Pipeline {
                         .map(|&page| (page, crate::global_pages::PAGE)),
                 ),
                 (Some(&slot), _) => spans.extend(buffers.get(slot as usize).copied()),
-                (None, _) if global => return None,
+                (None, _) if global => {
+                    crate::perf::span(crate::perf::Span::UnboundedGlobal, || ());
+                    return None;
+                }
                 (None, _) => through_window = true,
             }
         }
@@ -3647,6 +3653,12 @@ pub struct DispatchImages {
     /// The texture slots whose image is the stencil plane of a depth target the host holds, each
     /// with that target's id: their texels are the host's stencil values, read as its depths are.
     pub fetched_stencil: Vec<(u32, ResourceId)>,
+    /// The images its program selects from tables at run time, every one the tables name, and the
+    /// directory its module finds them in (D983); `None` where it selects none.
+    pub selected: Option<SelectedImages>,
+    /// Each fetched and stored image's place among the images the device keeps, where it has one
+    /// (D985): one taken from the device has no texels here.
+    pub resident: crate::resident::Uses,
 }
 
 /// One image a dispatch stores to: as it was before the dispatch, and where it lies.
@@ -3681,6 +3693,11 @@ impl DispatchImages {
             .into_iter()
             .chain(self.more_fetched.iter().map(|(_, span)| *span))
             .chain(self.stored.iter().filter_map(StoredImage::span))
+            .chain(
+                self.selected
+                    .iter()
+                    .flat_map(|selected| selected.images.iter().map(|(_, span)| *span)),
+            )
     }
 }
 
@@ -3921,7 +3938,12 @@ impl DispatchSurface {
     #[must_use]
     pub fn detile(&self, spanned: &[u8]) -> Vec<u32> {
         match self {
-            Self::Tiled(target) => target.detile_mapped(&words_of_bytes(spanned), |w| w),
+            // The guest's words read where they lie when aligned, as a surface base is; a copy
+            // only otherwise.
+            Self::Tiled(target) => match <[u32] as zerocopy::FromBytes>::ref_from_bytes(spanned) {
+                Ok(words) => target.detile_mapped(words, |w| w),
+                Err(_) => target.detile_mapped(&words_of_bytes(spanned), |w| w),
+            },
             Self::Volume { slice, .. } => spanned
                 .chunks_exact(slice.words() * 4)
                 .zip(0_u32..)
@@ -4224,11 +4246,34 @@ fn dispatch_images(
         ));
     }
     let mut images = DispatchImages::default();
+    // Each image takes one place among those the device keeps (D985).
+    if crate::resident::enabled() {
+        crate::resident::with_registry(crate::resident::Registry::begin);
+    }
     // Each texture slot's image, bound at its slot's binding as a draw's are (D690).
     for (slot, source) in textures.iter().enumerate() {
+        // A slot reading images selected at run time binds its sampler alone; the images are the
+        // arrays' (D983).
+        if source
+            .computed
+            .is_some_and(|computed| computed.selected.is_some())
+        {
+            let sampling = dispatch_sampling(state, source, memory)
+                .map_err(|e| format!("fetched image {slot}: {e}"))?;
+            let texels = selected_images::sampler_slot(sampling);
+            if slot == 0 {
+                images.fetched = Some(texels);
+                images.fetched_span = Some((0, 0));
+            } else {
+                images.more_fetched.push((texels, (0, 0)));
+                images.resident.more_fetched.push(None);
+            }
+            continue;
+        }
         let words = dispatch_descriptor_words(state, source, memory)
             .map_err(|e| format!("fetched image {slot}: {e}"))?;
         let at = u32::try_from(slot).unwrap_or(u32::MAX);
+        let mut used = None;
         let (texels, span) = match (
             dispatch_depth_target(words, source),
             dispatch_stencil_target(words, source),
@@ -4248,21 +4293,29 @@ fn dispatch_images(
                     (decode_image_descriptor(words).base, 0),
                 )
             }
-            (None, None) => fetched_image(state, source, memory, detiled)?,
+            (None, None) => fetched_image(state, source, memory, detiled, Some(&mut used))?,
         };
         dump_fetched(span.0, &texels);
         if slot == 0 {
             images.fetched = Some(texels);
             images.fetched_span = Some(span);
+            images.resident.fetched = used;
         } else {
             images.more_fetched.push((texels, span));
+            images.resident.more_fetched.push(used);
         }
+    }
+    images.selected = selected_images::selected_images(state, textures, memory, detiled)?;
+    if let Some(selected) = &images.selected {
+        images.resident.selected.clone_from(&selected.resident);
     }
     pair_stored_stencil(state, storage, memory);
     for (n, source) in storage.iter().enumerate() {
-        let stored = stored_image(state, source, memory, detiled)
+        let mut used = None;
+        let stored = stored_image(state, source, memory, detiled, Some(&mut used))
             .map_err(|e| format!("stored image {n}: {e}"))?;
         images.stored.push(stored);
+        images.resident.stored.push(used);
     }
     Ok(images)
 }
@@ -4361,12 +4414,15 @@ fn host_stored_image(
     )))
 }
 
-/// One image a dispatch stores to, as it was before the dispatch and where it lies.
+/// One image a dispatch stores to, as it was before the dispatch and where it lies. Where
+/// `resident` is given, its place among the images the device keeps goes there (D985): one the
+/// device keeps comes with no texels before.
 fn stored_image(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
     memory: &impl GuestMemory,
     detiled: &mut DetiledImages,
+    resident: Option<&mut Option<crate::resident::Use>>,
 ) -> Result<StoredImage, String> {
     let words = dispatch_descriptor_words(state, source, memory)?;
     if let Some(held) = host_stored_image(words, source) {
@@ -4383,10 +4439,31 @@ fn stored_image(
     }
     let (surface, descriptor, format, order) =
         dispatch_image_surface(state, (source, false), memory)?;
-    let spanned = read_spanned(&surface, memory)?;
+    let layers = if source.layered {
+        surface_layers(&surface)
+    } else {
+        None
+    };
+    // An image the device keeps, unwritten since, is stored to where it is kept (D985): its bytes
+    // are still read, what it stored being found against them, but not detiled.
+    let mut taken = false;
+    if let Some(slot) = resident
+        && descriptor.compression.is_none()
+    {
+        *slot = place_resident(
+            (surface.base(), surface.bytes() as u64),
+            &resident_view(&surface, (format, order), (layers, 0), false),
+            texel_bytes(&surface, format, layers),
+            memory,
+        );
+        taken = slot.is_some_and(|used| !used.fresh);
+    }
+    // Kept whole: what the dispatch stored is found against it.
+    let spanned = read_spanned(&surface, memory)?.to_vec();
     let (width, height) = surface.extent();
     let mut keys_to_expand = None;
     let texels = match surface_keys(&descriptor, format, memory)? {
+        crate::dcc::Keys::Uncompressed if taken => Vec::new().into(),
         crate::dcc::Keys::Uncompressed => {
             let texels = detiled.detile(&surface, &spanned);
             match order {
@@ -4429,11 +4506,7 @@ fn stored_image(
         width,
         height,
         depth: volume_depth(&surface),
-        layers: if source.layered {
-            surface_layers(&surface)
-        } else {
-            None
-        },
+        layers,
         sampling: None,
         cube: false,
     };
@@ -4483,6 +4556,11 @@ fn dispatch_sampling(
     source: &TextureSource,
     memory: &impl GuestMemory,
 ) -> Result<Option<crate::registers::TextureSampling>, String> {
+    // A slot reading images selected at run time samples through the sampler its program formed
+    // (D983).
+    if let Some(selected) = source.computed.and_then(|computed| computed.selected) {
+        return selected_images::selected_sampling(state, selected, memory);
+    }
     let words: Vec<u32> = state
         .user_data
         .iter()
@@ -4631,15 +4709,46 @@ fn dispatch_compared(
     Ok(compared)
 }
 
-/// One fetched image's texels, read through `source`'s descriptor, and where they were read.
+/// Why a fetched image's compression keys are refused: they need per-block addressing, which is
+/// not modelled. Names the image's layout and what its keys hold.
+fn unmodelled_keys(
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    (words, source): (&[u32; 8], &TextureSource),
+    memory: &impl GuestMemory,
+) -> String {
+    format!(
+        "the fetched image's compression keys need per-block addressing, which is not modelled ({:?} at {} bytes a texel, format {}, levels {}-{}, {}x{}, {} level(s), type {}, word 4 {:#x}, layered {}, volume {}; {})",
+        descriptor.tiling,
+        format.bytes(),
+        descriptor.format,
+        descriptor.base_level,
+        descriptor.last_level,
+        descriptor.width,
+        descriptor.height,
+        descriptor.levels,
+        words[3] >> 28,
+        words[4],
+        source.layered,
+        source.volume,
+        key_census(descriptor, format, memory)
+    )
+}
+
+/// One fetched image's texels, read through `source`'s descriptor, and where they were read. Where
+/// `resident` is given, the image's place among those the device keeps goes there (D985): one
+/// taken from the device comes with no texels.
 fn fetched_image(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
     memory: &impl GuestMemory,
     detiled: &mut DetiledImages,
+    mut resident: Option<&mut Option<crate::resident::Use>>,
 ) -> Result<(DispatchTexels, (u64, u64)), String> {
     // A block-compressed image, decoded to texels.
-    if let Some(read) = dispatch_blocks::fetched_blocks(state, source, memory, detiled) {
+    if let Some(read) =
+        dispatch_blocks::fetched_blocks(state, source, memory, detiled, resident.as_deref_mut())
+    {
         return read.map_err(|e| format!("fetched image {}: {e}", source.slot));
     }
     let (surface, descriptor, format, order) =
@@ -4647,9 +4756,49 @@ fn fetched_image(
             .map_err(|e| format!("fetched image {}: {e}", source.slot))?;
     let words = dispatch_descriptor_words(state, source, memory)?;
     let (width, height) = surface.extent();
+    // A view of several layers from a later one of an array the program addresses as one, read
+    // from the first (D910); a view of one later layer was read as that layer alone.
+    let first = if source.layered && one_later_layer(source, words).is_none() {
+        (words[4] & BASE_ARRAY_FIELD) >> 16
+    } else {
+        0
+    };
+    let layers = if source.layered || source.cube {
+        surface_layers(&surface).map(|layers| layers - first)
+    } else {
+        None
+    };
+    let span = (surface.base(), surface.bytes() as u64);
+    // An image the device keeps, unwritten since, is taken from it rather than read (D985).
+    if let Some(slot) = resident
+        && descriptor.compression.is_none()
+    {
+        *slot = place_resident(
+            span,
+            &resident_view(&surface, (format, order), (layers, first), source.cube),
+            texel_bytes(&surface, format, layers),
+            memory,
+        );
+        if slot.is_some_and(|used| !used.fresh) {
+            return Ok((
+                DispatchTexels {
+                    texels: Vec::new().into(),
+                    format,
+                    width,
+                    height,
+                    depth: volume_depth(&surface),
+                    layers,
+                    sampling: dispatch_sampling(state, source, memory)
+                        .map_err(|e| format!("fetched image {}: {e}", source.slot))?,
+                    cube: source.cube,
+                },
+                span,
+            ));
+        }
+    }
     let texels = match surface_keys(&descriptor, format, memory)? {
         crate::dcc::Keys::Uncompressed => {
-            let texels = detiled.detile(&surface, &read_spanned(&surface, memory)?);
+            let texels = detiled.detile(&surface, read_spanned(&surface, memory)?);
             match order {
                 Some(order) => texels
                     .iter()
@@ -4662,7 +4811,7 @@ fn fetched_image(
         // Every block its first texel: its 256-byte blocks expanded as memory holds them, before
         // they are detiled - the swizzle moves whole blocks.
         crate::dcc::Keys::ClearSingle => {
-            let mut spanned = read_spanned(&surface, memory)?;
+            let mut spanned = read_spanned(&surface, memory)?.to_vec();
             crate::dcc::expand_cleared_to_single(&mut spanned, format.bytes() as usize);
             let texels = detiled.detile(&surface, &spanned);
             match order {
@@ -4674,30 +4823,13 @@ fn fetched_image(
             }
         }
         crate::dcc::Keys::Other => {
-            return Err(format!(
-                "the fetched image's compression keys need per-block addressing, which is not modelled ({:?} at {} bytes a texel, format {}, levels {}-{}, {}x{}, {} level(s), type {}, word 4 {:#x}, layered {}, volume {}; {})",
-                descriptor.tiling,
-                format.bytes(),
-                descriptor.format,
-                descriptor.base_level,
-                descriptor.last_level,
-                descriptor.width,
-                descriptor.height,
-                descriptor.levels,
-                words[3] >> 28,
-                words[4],
-                source.layered,
-                source.volume,
-                key_census(&descriptor, format, memory)
+            return Err(unmodelled_keys(
+                &descriptor,
+                format,
+                (&words, source),
+                memory,
             ));
         }
-    };
-    // A view of several layers from a later one of an array the program addresses as one, read
-    // from the first (D910); a view of one later layer was read as that layer alone.
-    let first = if source.layered && one_later_layer(source, words).is_none() {
-        (words[4] & BASE_ARRAY_FIELD) >> 16
-    } else {
-        0
     };
     let texels = from_layer(
         texels,
@@ -4711,17 +4843,72 @@ fn fetched_image(
             width,
             height,
             depth: volume_depth(&surface),
-            layers: if source.layered || source.cube {
-                surface_layers(&surface).map(|layers| layers - first)
-            } else {
-                None
-            },
+            layers,
             sampling: dispatch_sampling(state, source, memory)
                 .map_err(|e| format!("fetched image {}: {e}", source.slot))?,
             cube: source.cube,
         },
-        (surface.base(), surface.bytes() as u64),
+        span,
     ))
+}
+
+/// What names a kept image beside where it lies (D985): how its bytes are laid out and read - the
+/// surface, the texel format and channel order, the layers from the first read - and whether it
+/// is seen as a cube. Not the descriptor's other words: an image one dispatch stores to through a
+/// storage descriptor is the image the next fetches through a sampled one.
+fn resident_view(
+    surface: &DispatchSurface,
+    (format, order): (TexelFormat, Option<[u8; 4]>),
+    (layers, first): (Option<u32>, u32),
+    cube: bool,
+) -> (String, u32, Option<[u8; 4]>, Option<u32>, u32, bool) {
+    (
+        format!("{surface:?}"),
+        format as u32,
+        order,
+        layers,
+        first,
+        cube,
+    )
+}
+
+/// Bytes of texels an image of `surface`, of `format` with `layers`, takes on the device.
+fn texel_bytes(surface: &DispatchSurface, format: TexelFormat, layers: Option<u32>) -> u64 {
+    let (width, height) = surface.extent();
+    u64::from(width)
+        * u64::from(height)
+        * u64::from(layers.unwrap_or(1))
+        * u64::from(volume_depth(surface).unwrap_or(1))
+        * u64::from(format.bytes())
+}
+
+/// The place in the dispatch being prepared of the image over `span` viewed as `view`, `bytes` of
+/// texels on the device (D985): its bytes settled first - a frame pending over them written back,
+/// a deferred copy carried out - so the write-watch sees every write before it is asked. `None`
+/// where images are not kept or its bytes cannot be read.
+fn place_resident(
+    span: (u64, u64),
+    view: &impl std::hash::Hash,
+    bytes: u64,
+    memory: &impl GuestMemory,
+) -> Option<crate::resident::Use> {
+    if !crate::resident::enabled() {
+        return None;
+    }
+    memory.read(span.0, usize::try_from(span.1).ok()?)?;
+    let key = crate::resident::key(span, view);
+    let used = crate::resident::with_registry(|registry| {
+        registry.place(&crate::resident::HostWatch, (key, span, bytes))
+    });
+    if let Some(used) = used {
+        let counted = if used.fresh {
+            crate::perf::Span::ResidentRead
+        } else {
+            crate::perf::Span::ResidentTaken
+        };
+        crate::perf::span(counted, || ());
+    }
+    used
 }
 
 /// The layer a view of one later layer of an array names, `BASE_ARRAY` and `DEPTH` both, where the
@@ -4917,6 +5104,12 @@ fn dispatch_descriptor_words(
             .ok_or_else(|| "an image descriptor's user data was never written".to_owned())
     };
     if let Some(computed) = source.computed {
+        if computed.selected.is_some() {
+            return Err(
+                "an image selected from a table at run time has no one descriptor (D983)"
+                    .to_owned(),
+            );
+        }
         return computed_image_words(state, computed, memory);
     }
     let mut words = [0u32; 8];
@@ -5725,11 +5918,15 @@ fn linear_surface(
     })
 }
 
-/// The bytes a dispatch image spans.
-fn read_spanned(surface: &DispatchSurface, memory: &impl GuestMemory) -> Result<Vec<u8>, String> {
+/// The bytes a dispatch image spans, where they lie: a frame-sized image copied before it was
+/// detiled cost Grand Theft Auto V's command processor a copy and a fresh allocation a read
+/// (D984).
+fn read_spanned<'m>(
+    surface: &DispatchSurface,
+    memory: &'m impl GuestMemory,
+) -> Result<&'m [u8], String> {
     memory
         .read(surface.base(), surface.bytes())
-        .map(<[u8]>::to_vec)
         .ok_or_else(|| format!("a dispatch image at {:#x} is not readable", surface.base()))
 }
 
@@ -15615,6 +15812,7 @@ mod tests {
                     at,
                     register: 0,
                     first_register: 0,
+                    selected: None,
                 }),
                 ..TextureSource::default()
             };

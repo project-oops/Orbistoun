@@ -491,6 +491,76 @@ fn least_dispatch_time(module: &[u32], address: u64, runs: u32) -> std::time::Du
     (0..runs).map(|_| once()).min().expect("a run")
 }
 
+/// What asking the write-watch costs over guest memory the device maps (D974): many small runs
+/// marked one by one, the same runs covered by one mark of the range holding them, both before the
+/// range is imported and after. Run with `ORBISTOUN_DEVICE_BENCH` set; it prints the figures.
+#[test]
+fn write_watch_cost_over_an_import() {
+    if std::env::var_os("ORBISTOUN_DEVICE_BENCH").is_none() {
+        return;
+    }
+    let Some(_) = direct_or_skip("write_watch_cost_over_an_import") else {
+        return;
+    };
+    // A reservation as large as a title's heaps: a gigabyte, in consecutive test bases.
+    let base = BASES.take();
+    let len: u64 = 1 << 30;
+    let mut taken = 0x100_0000;
+    while taken < len {
+        if BASES.take() != base + taken {
+            println!("the test bases are not consecutive: run it alone");
+            return;
+        }
+        taken += 0x100_0000;
+    }
+    let mut space = orbistoun_mem::AddressSpace::new();
+    space.reserve(base, len, read_write()).expect("reserve");
+    // 256 runs of one page, 4 MiB apart: as the copies' runs lie, across the reservation.
+    let runs: Vec<(u64, u64)> = (0..256).map(|i| (base + i * 0x40_0000, 0x1000)).collect();
+    let time = |what: &str| {
+        for &(at, _) in &runs {
+            write(at, 1);
+        }
+        let started = std::time::Instant::now();
+        for &(at, run) in &runs {
+            let _ = orbistoun_mem::watch::mark(at, run);
+        }
+        let each = started.elapsed();
+        for &(at, _) in &runs {
+            write(at, 2);
+        }
+        let started = std::time::Instant::now();
+        let _ = orbistoun_mem::watch::mark(base, len);
+        let whole = started.elapsed();
+        for &(at, _) in &runs {
+            write(at, 3);
+        }
+        let started = std::time::Instant::now();
+        let since = orbistoun_mem::watch::mark_all(&runs).expect("watched");
+        let together = started.elapsed();
+        write(runs[7].0, 4);
+        assert!(orbistoun_mem::watch::harvest_all(&runs));
+        assert!(orbistoun_mem::watch::recorded_since(
+            runs[7].0, 0x1000, since
+        ));
+        assert!(!orbistoun_mem::watch::recorded_since(
+            runs[8].0, 0x1000, since
+        ));
+        println!(
+            "D974 write-watch, {what}: {} runs marked one by one {each:?}, {:?} each; the range holding them marked once {whole:?}; the runs marked together {together:?}",
+            runs.len(),
+            each / u32::try_from(runs.len()).unwrap_or(1)
+        );
+    };
+    time("not imported");
+    orbistoun_mem::lazy::commit(base, len);
+    // SAFETY: the reservation is committed whole just above and outlives the import, dropped first.
+    let import = unsafe { Imported::import(base, len) }.expect("import");
+    time("imported");
+    drop(import);
+    assert!(space.release(base, len), "released");
+}
+
 /// What one device-addressed access costs on this device (D964): the difference between dispatches
 /// of a long and a short dependent chain of accesses, over the accesses between them. Two figures
 /// each: the chain's step, the time a lane waits on one access, which a hierarchy walk pays per

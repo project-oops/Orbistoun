@@ -10,6 +10,9 @@ use ash::vk;
 
 use crate::compute::DispatchError;
 
+mod resident;
+pub use resident::{Hints, with_hints};
+
 /// A dispatch image's texel format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchFormat {
@@ -155,7 +158,43 @@ pub struct DispatchImages<'a> {
     /// The images it stores to, in order, each at its storage-image binding
     /// ([`orbistoun_spirv::STORAGE_IMAGE_BINDINGS`]) and read back after the dispatch (D893, D963).
     pub stored: &'a [DispatchImage<'a>],
+    /// The images its program selects from tables at run time, and the directory its module finds
+    /// them in (D983); `None` where it selects none.
+    pub selected: Option<SelectedImageSet<'a>>,
 }
+
+/// The images a dispatch's program selects from tables at run time (D983): every one the tables
+/// name, each at its place in the arrays at [`orbistoun_spirv::SELECTED_IMAGES_BINDING`] and
+/// [`orbistoun_spirv::SELECTED_CUBES_BINDING`], and the directory at
+/// [`orbistoun_spirv::SELECTED_DIRECTORY_BINDING`].
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedImageSet<'a> {
+    /// The texture slots, one bit each, whose own binding holds their sampler alone: the image
+    /// [`DispatchImages::fetched`] or [`DispatchImages::more_fetched`] gives the slot is not bound.
+    pub slots: u32,
+    /// Each image, at its place: a cube where its `cube` says so, bound in the array of cubes, and
+    /// any other in the array of flat images.
+    pub images: &'a [DispatchImage<'a>],
+    /// The directory's words.
+    pub directory: &'a [u32],
+}
+
+/// Whether the device indexes an array of sampled images by a value each invocation computes,
+/// which a dispatch reading images selected at run time needs (D983): set when the session's
+/// device is made.
+static SELECTED_IMAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records whether the session's device was made with `features` indexing an array of sampled
+/// images by a value each invocation computes (D983).
+pub(crate) fn note_enabled(features: &vk::PhysicalDeviceVulkan12Features<'_>) {
+    SELECTED_IMAGES.store(
+        features.shader_sampled_image_array_non_uniform_indexing == vk::TRUE,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The binding an image read only as one of a dispatch's selected images carries: none of its own.
+const ARRAYED: u32 = u32::MAX;
 
 /// One image, created, with the host buffer its texels travel through.
 struct Bound {
@@ -173,17 +212,41 @@ struct Bound {
     layers: Option<u32>,
     /// The sampler a fetched image is bound with; `None` for a stored one.
     sampler: Option<vk::Sampler>,
+    /// Whether its binding holds its sampler alone: a slot reading images selected at run time,
+    /// whose image the arrays hold (D983).
+    sampler_only: bool,
+    /// Where it is kept after the dispatch, where it has a place among the images kept (D985).
+    place: Option<resident::Place>,
+    /// The layout its contents were kept in, where they are taken as they are and nothing is
+    /// uploaded (D985).
+    kept_layout: Option<vk::ImageLayout>,
+}
+
+/// A dispatch's selected images on the device (D983): where each lies among the images, whether it
+/// is a cube, the images filling the arrays' other places, and the directory.
+struct SelectedBound {
+    /// Each selected image's index among [`BoundImages::images`], and whether it is a cube.
+    placed: Vec<(usize, bool)>,
+    /// The flat image and the cube every other place of each array holds.
+    fillers: (usize, usize),
+    /// The directory's buffer and memory.
+    directory: (vk::Buffer, vk::DeviceMemory),
 }
 
 /// A dispatch's images on the device, each fetched one with the sampler it is bound with.
 pub(crate) struct BoundImages {
     images: Vec<Bound>,
+    /// Its selected images, where it reads any (D983).
+    selected: Option<SelectedBound>,
 }
 
 impl BoundImages {
     /// No images: a dispatch that reads and writes only its window.
     pub(crate) const fn none() -> Self {
-        Self { images: Vec::new() }
+        Self {
+            images: Vec::new(),
+            selected: None,
+        }
     }
 
     /// Creates each image and fills its host buffer with its texels.
@@ -213,22 +276,16 @@ impl BoundImages {
                 images.stored.len()
             )));
         }
-        let mut wanted = vec![(images.fetched, orbistoun_spirv::TEXTURE_BINDING, false)];
-        wanted.extend(
-            images
-                .stored
-                .iter()
-                .zip(orbistoun_spirv::STORAGE_IMAGE_BINDINGS)
-                .map(|(image, binding)| (Some(*image), binding, true)),
-        );
-        wanted.extend(
-            images
-                .more_fetched
-                .iter()
-                .zip(&orbistoun_spirv::TEXTURE_BINDINGS[1..])
-                .map(|(image, binding)| (Some(*image), *binding, false)),
-        );
-        for (image, binding, stored) in wanted {
+        if let Some(set) = images.selected {
+            selected_room((instance, physical), set)?;
+        }
+        let fillers = selected_fillers();
+        // Each image's place among those the device keeps, where it has one (D985).
+        let (places, dropped) = resident::wanted(images);
+        resident::let_go(device, &dropped);
+        let wanted = wanted_images(images, &fillers);
+        let places = places.into_iter().chain(std::iter::repeat(None));
+        for ((image, binding, stored, sampler_only), used) in wanted.into_iter().zip(places) {
             let Some(image) = image else { continue };
             let key = SpareKey {
                 device: vk::Handle::as_raw(device.handle()),
@@ -239,15 +296,22 @@ impl BoundImages {
                 layers: image.layers,
                 stored,
             };
-            let created = match take_spare(device, key, image) {
+            let (mut place, mut kept_layout) = (None, None);
+            let taken = resident::take((instance, physical, device), used, image).map(|taken| {
+                taken.map(|(created, layout, at)| {
+                    (place, kept_layout) = (Some(at), layout);
+                    created
+                })
+            });
+            let created = match taken.or_else(|| take_spare(device, key, image)) {
                 Some(reused) => reused,
                 None => {
                     orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DispatchNewImage, || {
-                        create_image((instance, physical, device), image, stored)
+                        create_image((instance, physical, device), image, stored, None)
                     })
                 }
             };
-            let sampler = if stored {
+            let sampler = if stored || binding == ARRAYED {
                 Ok(None)
             } else {
                 image_sampler(device, image.sampling).map(Some)
@@ -269,6 +333,9 @@ impl BoundImages {
                         depth: image.depth,
                         layers: image.layers,
                         sampler,
+                        sampler_only,
+                        place,
+                        kept_layout,
                     });
                 }
                 Err(e) => {
@@ -277,63 +344,160 @@ impl BoundImages {
                 }
             }
         }
+        if let Some(set) = images.selected
+            && let Err(e) = bound.place_selected((instance, physical, device), set)
+        {
+            bound.destroy(device);
+            return Err(e);
+        }
         Ok(bound)
+    }
+
+    /// Notes where each of `set`'s images, created after every image bound singly, lies among the
+    /// images, and makes its directory (D983).
+    fn place_selected(
+        &mut self,
+        context: (&ash::Instance, vk::PhysicalDevice, &ash::Device),
+        set: SelectedImageSet<'_>,
+    ) -> Result<(), DispatchError> {
+        let arrayed: Vec<usize> = (0..self.images.len())
+            .filter(|&at| self.images[at].binding == ARRAYED)
+            .collect();
+        let (placed, filling) = arrayed.split_at(set.images.len());
+        let directory = directory_buffer(context, set.directory)?;
+        self.selected = Some(SelectedBound {
+            placed: placed
+                .iter()
+                .zip(set.images)
+                .map(|(&at, image)| (at, image.cube))
+                .collect(),
+            fillers: (filling[0], filling[1]),
+            directory,
+        });
+        Ok(())
     }
 
     /// The set layout bindings the images take.
     pub(crate) fn layout_bindings(&self) -> Vec<vk::DescriptorSetLayoutBinding<'static>> {
-        self.images
-            .iter()
+        let mut bindings: Vec<vk::DescriptorSetLayoutBinding<'static>> = self
+            .bound_singly()
             .map(|image| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(image.binding)
-                    .descriptor_type(descriptor_type(image.stored))
+                    .descriptor_type(image.descriptor_type())
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
             })
-            .collect()
+            .collect();
+        if self.selected.is_some() {
+            bindings.extend(selected_layout_bindings());
+        }
+        bindings
+    }
+
+    /// The images bound each at a binding of its own: all but the selected images (D983).
+    fn bound_singly(&self) -> impl Iterator<Item = &Bound> {
+        self.images.iter().filter(|image| image.binding != ARRAYED)
     }
 
     /// The pool room the images take.
     pub(crate) fn pool_sizes(&self) -> Vec<vk::DescriptorPoolSize> {
-        self.images
-            .iter()
+        let mut sizes: Vec<vk::DescriptorPoolSize> = self
+            .bound_singly()
             .map(|image| {
                 vk::DescriptorPoolSize::default()
-                    .ty(descriptor_type(image.stored))
+                    .ty(image.descriptor_type())
                     .descriptor_count(1)
             })
-            .collect()
+            .collect();
+        if self.selected.is_some() {
+            sizes.extend(selected_layout_bindings().iter().map(|binding| {
+                vk::DescriptorPoolSize::default()
+                    .ty(binding.descriptor_type)
+                    .descriptor_count(binding.descriptor_count)
+            }));
+        }
+        sizes
     }
 
     /// Points `set`'s image bindings at the images.
     pub(crate) fn write(&self, device: &ash::Device, set: vk::DescriptorSet) {
-        let infos: Vec<[vk::DescriptorImageInfo; 1]> = self
-            .images
+        let singly: Vec<&Bound> = self.bound_singly().collect();
+        let infos: Vec<[vk::DescriptorImageInfo; 1]> = singly
             .iter()
             .map(|image| {
                 let info = vk::DescriptorImageInfo::default()
                     .image_view(image.view)
                     .image_layout(layout(image.stored));
                 [match (image.stored, image.sampler) {
+                    // A sampler alone names no image (D983).
+                    (false, Some(sampler)) if image.sampler_only => {
+                        vk::DescriptorImageInfo::default().sampler(sampler)
+                    }
                     (false, Some(sampler)) => info.sampler(sampler),
                     _ => info,
                 }]
             })
             .collect();
-        let writes: Vec<vk::WriteDescriptorSet<'_>> = self
-            .images
+        let mut writes: Vec<vk::WriteDescriptorSet<'_>> = singly
             .iter()
             .zip(&infos)
             .map(|(image, info)| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
                     .dst_binding(image.binding)
-                    .descriptor_type(descriptor_type(image.stored))
+                    .descriptor_type(image.descriptor_type())
                     .image_info(info)
             })
             .collect();
-        // SAFETY: the set, views and sampler are live, and the infos outlive the call.
+        // Every place of both arrays: each selected image in its own shape's array, the fillers in
+        // every other place (D983).
+        let arrays = self.selected.as_ref().map(|selected| {
+            let view = |at: usize| {
+                vk::DescriptorImageInfo::default()
+                    .image_view(self.images[at].view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            };
+            let most = orbistoun_spirv::MOST_SELECTED_IMAGES as usize;
+            let (mut flat, mut cube) = (
+                vec![view(selected.fillers.0); most],
+                vec![view(selected.fillers.1); most],
+            );
+            for (place, &(at, is_cube)) in selected.placed.iter().enumerate().take(most) {
+                if is_cube {
+                    cube[place] = view(at);
+                } else {
+                    flat[place] = view(at);
+                }
+            }
+            let directory = [vk::DescriptorBufferInfo::default()
+                .buffer(selected.directory.0)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)];
+            (flat, cube, directory)
+        });
+        if let Some((flat, cube, directory)) = &arrays {
+            for (binding, infos) in [
+                (orbistoun_spirv::SELECTED_IMAGES_BINDING, flat),
+                (orbistoun_spirv::SELECTED_CUBES_BINDING, cube),
+            ] {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(infos),
+                );
+            }
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(orbistoun_spirv::SELECTED_DIRECTORY_BINDING)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(directory),
+            );
+        }
+        // SAFETY: the set, views, samplers and directory are live, and the infos outlive the call.
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
@@ -341,6 +505,30 @@ impl BoundImages {
     /// uses it in, into an open recording.
     pub(crate) fn record_upload(&self, device: &ash::Device, command: vk::CommandBuffer) {
         for image in &self.images {
+            let access = if image.stored {
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE
+            } else {
+                vk::AccessFlags::SHADER_READ
+            };
+            // An image kept as it was left is moved to the layout the dispatch uses it in, its
+            // contents kept, after whatever last wrote it (D985).
+            if let Some(kept) = image.kept_layout {
+                barrier(
+                    device,
+                    command,
+                    image.image,
+                    (kept, layout(image.stored)),
+                    (
+                        vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE,
+                        access,
+                    ),
+                    (
+                        vk::PipelineStageFlags::ALL_COMMANDS,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                    ),
+                );
+                continue;
+            }
             barrier(
                 device,
                 command,
@@ -371,11 +559,6 @@ impl BoundImages {
                     &region,
                 );
             }
-            let access = if image.stored {
-                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE
-            } else {
-                vk::AccessFlags::SHADER_READ
-            };
             barrier(
                 device,
                 command,
@@ -440,7 +623,23 @@ impl BoundImages {
     /// the spares while they hold few enough bytes, else destroyed. The sampler is kept.
     pub(crate) fn destroy(self, device: &ash::Device) {
         let raw = vk::Handle::as_raw(device.handle());
+        if let Some(selected) = &self.selected {
+            release_buffer(device, selected.directory.0, selected.directory.1);
+        }
         for image in self.images {
+            // An image with a place among those kept is kept, in the layout the dispatch left it
+            // in (D985).
+            if let Some(place) = image.place {
+                let created = (
+                    image.image,
+                    image.memory,
+                    image.view,
+                    image.staging,
+                    image.staging_memory,
+                );
+                resident::keep(device, place, (created, layout(image.stored)));
+                continue;
+            }
             let key = SpareKey {
                 device: raw,
                 format: image.format,
@@ -540,6 +739,183 @@ const fn descriptor_type(stored: bool) -> vk::DescriptorType {
     }
 }
 
+/// Each image a dispatch binds, in the order they are made: its binding, whether it is stored to,
+/// and whether its binding holds its sampler alone - a slot reading images selected at run time
+/// (D983). The selected images follow at no binding of their own, then the `fillers` the arrays'
+/// other places hold.
+fn wanted_images<'a>(
+    images: &DispatchImages<'a>,
+    fillers: &'a [DispatchImage<'a>; 2],
+) -> Vec<(Option<DispatchImage<'a>>, u32, bool, bool)> {
+    let sampler_only = |slot: usize| {
+        images
+            .selected
+            .is_some_and(|set| slot < 32 && set.slots >> slot & 1 != 0)
+    };
+    let mut wanted = vec![(
+        images.fetched,
+        orbistoun_spirv::TEXTURE_BINDING,
+        false,
+        sampler_only(0),
+    )];
+    wanted.extend(
+        images
+            .stored
+            .iter()
+            .zip(orbistoun_spirv::STORAGE_IMAGE_BINDINGS)
+            .map(|(image, binding)| (Some(*image), binding, true, false)),
+    );
+    wanted.extend(
+        images
+            .more_fetched
+            .iter()
+            .zip(&orbistoun_spirv::TEXTURE_BINDINGS[1..])
+            .enumerate()
+            .map(|(n, (image, binding))| (Some(*image), *binding, false, sampler_only(n + 1))),
+    );
+    if let Some(set) = images.selected {
+        wanted.extend(
+            set.images
+                .iter()
+                .chain(fillers)
+                .map(|image| (Some(*image), ARRAYED, false, false)),
+        );
+    }
+    wanted
+}
+
+impl Bound {
+    /// What its binding holds: a storage image, a sampler alone for a slot reading images selected
+    /// at run time (D983), or an image with its sampler.
+    const fn descriptor_type(&self) -> vk::DescriptorType {
+        if self.sampler_only {
+            vk::DescriptorType::SAMPLER
+        } else {
+            descriptor_type(self.stored)
+        }
+    }
+}
+
+/// The bindings a dispatch reading images selected at run time adds (D983): the arrays of flat
+/// images and of cubes, each [`orbistoun_spirv::MOST_SELECTED_IMAGES`] long, and the directory.
+fn selected_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; 3] {
+    let binding = |binding: u32, kind: vk::DescriptorType, count: u32| {
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(binding)
+            .descriptor_type(kind)
+            .descriptor_count(count)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+    };
+    let most = orbistoun_spirv::MOST_SELECTED_IMAGES;
+    [
+        binding(
+            orbistoun_spirv::SELECTED_IMAGES_BINDING,
+            vk::DescriptorType::SAMPLED_IMAGE,
+            most,
+        ),
+        binding(
+            orbistoun_spirv::SELECTED_CUBES_BINDING,
+            vk::DescriptorType::SAMPLED_IMAGE,
+            most,
+        ),
+        binding(
+            orbistoun_spirv::SELECTED_DIRECTORY_BINDING,
+            vk::DescriptorType::STORAGE_BUFFER,
+            1,
+        ),
+    ]
+}
+
+/// The flat image and the cube the arrays' places no selected image of their shape takes hold: one
+/// texel of zero, and a cube of six. A lookup never reaches them; the directory names no place
+/// in the other shape's array (D983).
+fn selected_fillers() -> [DispatchImage<'static>; 2] {
+    static FLAT: [u32; 1] = [0];
+    static CUBE: [u32; 6] = [0; 6];
+    let filler = |texels: &'static [u32], cube: bool| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba8,
+        width: 1,
+        height: 1,
+        depth: None,
+        layers: cube.then_some(6),
+        sampling: None,
+        cube,
+    };
+    [filler(&FLAT, false), filler(&CUBE, true)]
+}
+
+/// Refuses a dispatch reading images selected at run time that this device cannot bind: one that
+/// does not index an array of sampled images by a value each invocation computes, or lets one
+/// stage reach fewer sampled images than the two arrays and the texture slots hold (D983).
+fn selected_room(
+    (instance, physical): (&ash::Instance, vk::PhysicalDevice),
+    set: SelectedImageSet<'_>,
+) -> Result<(), DispatchError> {
+    if !SELECTED_IMAGES.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(DispatchError::Unsupported(
+            "the device does not index an array of sampled images by a value each invocation computes, which an image selected at run time is read through (D983)".to_owned(),
+        ));
+    }
+    if set.images.len() > orbistoun_spirv::MOST_SELECTED_IMAGES as usize {
+        return Err(DispatchError::Unsupported(format!(
+            "{} images selected at run time, more than the arrays hold (D983)",
+            set.images.len()
+        )));
+    }
+    // SAFETY: the physical device came from this instance.
+    let limits = unsafe { instance.get_physical_device_properties(physical) }.limits;
+    let wanted = 2 * orbistoun_spirv::MOST_SELECTED_IMAGES + orbistoun_spirv::MAX_TEXTURES as u32;
+    let reach = limits
+        .max_per_stage_descriptor_sampled_images
+        .min(limits.max_descriptor_set_sampled_images);
+    if reach < wanted {
+        return Err(DispatchError::Unsupported(format!(
+            "the device lets a stage reach {reach} sampled images, fewer than the {wanted} the arrays of images selected at run time and the texture slots take (D983)"
+        )));
+    }
+    Ok(())
+}
+
+/// A host-visible storage buffer holding the directory's `words` (D983).
+fn directory_buffer(
+    (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
+    words: &[u32],
+) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
+    let bytes = zerocopy::IntoBytes::as_bytes(words);
+    let info = vk::BufferCreateInfo::default()
+        .size(bytes.len().max(4) as vk::DeviceSize)
+        .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: the device is live and the create info outlives the call.
+    let buffer = unsafe { device.create_buffer(&info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_buffer(selected directory)", e))?;
+    // SAFETY: the buffer was created on this device.
+    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    let memory = match allocate(
+        (instance, physical, device),
+        requirements,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ) {
+        Ok(memory) => memory,
+        Err(e) => {
+            // SAFETY: created above and never used.
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(e);
+        }
+    };
+    // SAFETY: buffer and memory come from this device and the allocation is large enough.
+    let filled = unsafe { device.bind_buffer_memory(buffer, memory, 0) }
+        .and_then(|()| fill_staging(device, memory, bytes));
+    match filled {
+        Ok(()) => Ok((buffer, memory)),
+        Err(e) => {
+            release_buffer(device, buffer, memory);
+            Err(DispatchError::Vulkan("fill(selected directory)", e))
+        }
+    }
+}
+
 /// The layout each is used in: `GENERAL` for a storage image, read-only for a fetched one.
 const fn layout(stored: bool) -> vk::ImageLayout {
     if stored {
@@ -615,11 +991,14 @@ type Created = (
     vk::DeviceMemory,
 );
 
-/// Creates one image and the host buffer holding its texels.
+/// Creates one image and the host buffer holding its texels, for the roles `usage` names where it
+/// is given - an image kept between dispatches is made for every role it may be bound in (D985) -
+/// else for the one `stored` says.
 fn create_image(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
     texels: DispatchImage<'_>,
     stored: bool,
+    usage: Option<vk::ImageUsageFlags>,
 ) -> Result<Created, DispatchError> {
     let words = texels.count() * texels.format.words().0;
     if texels.texels.len() != words || words == 0 {
@@ -631,13 +1010,13 @@ fn create_image(
             texels.format
         )));
     }
-    let usage = if stored {
+    let usage = usage.unwrap_or(if stored {
         vk::ImageUsageFlags::STORAGE
             | vk::ImageUsageFlags::TRANSFER_DST
             | vk::ImageUsageFlags::TRANSFER_SRC
     } else {
         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
-    };
+    });
     // A volume is a three-dimensional image of its slices, seen through a view of the same type,
     // which is what a module's three-dimensional storage image binds (D823); an array the program
     // addresses as one is seen through an array view of its layers (D897), and a cube through a
@@ -1002,6 +1381,7 @@ mod tests {
     /// A dispatch that fetches `texels` as one image of that extent.
     fn images(texels: &[u32]) -> DispatchImages<'_> {
         DispatchImages {
+            selected: None,
             more_fetched: &[],
             fetched: Some(DispatchImage {
                 texels,

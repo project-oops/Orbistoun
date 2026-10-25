@@ -592,6 +592,13 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::install_draw_executor(render::execute_draws);
     // Compute dispatches, carried out at submit over guest memory the same way.
     orbistoun_gpu::agc_driver::install_dispatch_executor(render::execute_dispatch);
+    // Its images kept on the device between dispatches (D985), but where a diagnostic copies each
+    // dispatch's texels, which an image taken from the device does not carry.
+    orbistoun_gpu::resident::set_enabled(
+        orbistoun_env::CAPTURE_DISPATCH.get().is_none()
+            && orbistoun_env::CAPTURE_RECENT.get().is_none()
+            && orbistoun_env::DUMP_IMAGE.get().is_none(),
+    );
     // A lost device ends the run, once the submissions it was running are logged.
     orbistoun_gpu_vulkan::on_device_lost(report::end_on_device_loss);
     // A run that stops flipping and stops completing packets says where everything stands.

@@ -459,14 +459,35 @@ impl Equation {
     ) -> Option<Vec<u8>> {
         let size = self.bytes as usize;
         let mut out = vec![0; width as usize * height as usize * size];
-        for y in 0..height {
-            for x in 0..width {
-                let from = self.offset((x, y), pitch, pipe_bank_xor)?;
-                let to = (y as usize * width as usize + x as usize) * size;
+        let table = self.offset_table((width, height), pitch, pipe_bank_xor)?;
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let from = table.at(x, y);
+                let to = (y * width as usize + x) * size;
                 out[to..to + size].copy_from_slice(tiled.get(from..from + size)?);
             }
         }
         Some(out)
+    }
+
+    /// Its offsets over a `width` x `height`-element surface of `pitch` elements as an
+    /// [`crate::tiling::OffsetTable`]: [`Self::offset`] is a block's start plus an XOR of terms of
+    /// `x`, of `y`, and of the XOR. `None` where the XOR is refused.
+    fn offset_table(
+        &self,
+        (width, height): (u32, u32),
+        pitch: u32,
+        pipe_bank_xor: u32,
+    ) -> Option<crate::tiling::OffsetTable> {
+        self.offset((0, 0), pitch, pipe_bank_xor)?;
+        Some(crate::tiling::OffsetTable::of(
+            (width, height),
+            self.block_bytes as usize,
+            |x, y| {
+                self.offset((x, y), pitch, pipe_bank_xor)
+                    .unwrap_or_default()
+            },
+        ))
     }
 
     /// Row-major `linear` elements written into `tiled` at their places: [`Self::detile`]
@@ -479,10 +500,11 @@ impl Equation {
         (pitch, pipe_bank_xor): (u32, u32),
     ) -> Option<()> {
         let size = self.bytes as usize;
-        for y in 0..height {
-            for x in 0..width {
-                let to = self.offset((x, y), pitch, pipe_bank_xor)?;
-                let from = (y as usize * width as usize + x as usize) * size;
+        let table = self.offset_table((width, height), pitch, pipe_bank_xor)?;
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let to = table.at(x, y);
+                let from = (y * width as usize + x) * size;
                 tiled
                     .get_mut(to..to + size)?
                     .copy_from_slice(linear.get(from..from + size)?);
@@ -626,6 +648,34 @@ mod tests {
 
     /// A surface tiled then detiled is the elements it began as, under a pipe-bank XOR; a mode
     /// without one refuses one.
+    /// Every equation's offset table places each element where its offset does, over surfaces of
+    /// part blocks and several block rows and columns, under a pipe-bank XOR where the mode takes
+    /// one.
+    #[test]
+    fn every_equation_s_table_places_elements_as_its_offsets() {
+        for found in &EQUATIONS {
+            let (block_width, block_height) = found.block;
+            let (width, height) = (2 * block_width + 3, 3 * block_height + 1);
+            for xor in [0, 0x1d] {
+                let Some(table) = found.offset_table((width, height), width + 5, xor) else {
+                    assert!(found.offset((0, 0), width + 5, xor).is_none());
+                    continue;
+                };
+                for y in 0..height {
+                    for x in 0..width {
+                        assert_eq!(
+                            Some(table.at(x as usize, y as usize)),
+                            found.offset((x, y), width + 5, xor),
+                            "{:?} {} bytes, ({x}, {y}) xor {xor:#x}",
+                            found.mode,
+                            found.bytes
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn detiling_undoes_tiling() {
         let found = equation(SwizzleMode::Tiled64KbRX, 8).expect("64KB_R_X at 8 bytes");

@@ -179,6 +179,7 @@ fn release(
         vk::MemoryPropertyFlags,
     ),
 ) {
+    let size = size_class(size);
     if let Ok(mut spares) = spares().lock() {
         let held: vk::DeviceSize = spares.iter().map(|spare| spare.size).sum();
         if held + size <= SPARE_BYTES_MOST {
@@ -199,14 +200,32 @@ fn release(
     unsafe { device.free_memory(memory, None) };
 }
 
-/// A buffer of `size` bytes for `usage`, in the first memory of `preferred` the device offers: a
-/// spare of exactly that where one is kept (D805), else a new one.
+/// The bytes a buffer asked for `size` bytes is made with: `size` rounded up to a quarter of the
+/// power of two below it, at least 256 - so a spare serves every later ask of its size class rather
+/// than of its exact size (D805). A dispatch's buffers differ in size from call to call: Grand
+/// Theft Auto V's in-world frames made 4400 buffers a frame, kept or not, each a driver allocation
+/// and a release, while the dispatch waited (D984).
+///
+/// Nothing past the size asked for is read: a buffer is bound, copied into and read back over the
+/// size asked for alone, and a fill over the whole of it writes only zeros.
+fn size_class(size: vk::DeviceSize) -> vk::DeviceSize {
+    const LEAST: vk::DeviceSize = 256;
+    if size <= LEAST {
+        return LEAST;
+    }
+    let step = (1 << size.ilog2()) / 4;
+    size.div_ceil(step) * step
+}
+
+/// A buffer of at least `size` bytes for `usage`, in the first memory of `preferred` the device
+/// offers: a spare of its size class where one is kept (D805), else a new one of that class.
 fn buffer_in(
     context: (&ash::Instance, vk::PhysicalDevice, &ash::Device),
     size: vk::DeviceSize,
     usage: vk::BufferUsageFlags,
     preferred: &[vk::MemoryPropertyFlags],
 ) -> Result<(vk::Buffer, vk::DeviceMemory, vk::MemoryPropertyFlags), DispatchError> {
+    let size = size_class(size);
     if let Ok(mut spares) = spares().lock()
         && let Some(at) = spares.iter().position(|spare| {
             spare.size == size
@@ -1225,6 +1244,32 @@ fn memory_barrier(
 
 #[cfg(test)]
 mod tests {
+    /// A size class holds the size asked, wastes under a quarter of it past the least class, and
+    /// is shared by every size between the class below and it.
+    #[test]
+    fn size_classes_hold_their_sizes_and_waste_little() {
+        use super::size_class;
+        assert_eq!(size_class(0), 256);
+        assert_eq!(size_class(4), 256);
+        assert_eq!(size_class(256), 256);
+        assert_eq!(size_class(257), 320);
+        assert_eq!(size_class(4096), 4096);
+        assert_eq!(size_class(4097), 5120);
+        assert_eq!(size_class(5000), 5120);
+        for size in (1..1 << 20)
+            .step_by(97)
+            .chain([u64::from(u32::MAX), 3 << 40])
+        {
+            let class = size_class(size);
+            assert!(class >= size, "{size}: {class}");
+            assert!(
+                size <= 256 || class - size < size / 4 + 1,
+                "{size}: {class}"
+            );
+            assert_eq!(size_class(class), class, "{size}: a class is its own");
+        }
+    }
+
     /// An alias binds the buffer it names from its offset, whether that buffer is handed over
     /// before or after it (D953); one into an alias, past the holder's end, or at an offset the
     /// device cannot bind is refused.
