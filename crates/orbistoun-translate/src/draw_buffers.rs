@@ -195,6 +195,22 @@ pub struct SelectedTable {
     pub element: u32,
 }
 
+/// An image access whose eight descriptor registers hold a record a dispatch selected from a table
+/// at run time (D983): an `s_buffer_load_dwordx8` through the table's traced descriptor at an offset
+/// register the program computes. The host binds every image the table's records name, and the
+/// module finds the one the registers hold as it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SelectedImage {
+    /// The table, and where a record's image descriptor starts in its record.
+    pub table: SelectedTable,
+    /// The sampler descriptor's four words, where the program formed them from user data,
+    /// constants and loads at fixed places; `None` for a fetch, and for a sampler it computes.
+    pub sampler: Option<[DescriptorWord; 4]>,
+    /// Whether the access reads through a sampler: a sample or a gather, not a fetch or a size
+    /// query. One whose sampler is not traced reads through a sampler the host cannot know.
+    pub sampled: bool,
+}
+
 /// A module's buffers and the accesses that read through each.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrawBuffers {
@@ -219,6 +235,9 @@ pub struct DrawBuffers {
     /// may differ between them (D966): a run up to the first does not find the others', so the
     /// table is always bound whole.
     pub several: std::collections::BTreeSet<u32>,
+    /// A dispatch's image accesses, by byte offset, whose descriptor is a record selected from a
+    /// table at run time (D983).
+    pub image_tables: BTreeMap<u32, SelectedImage>,
 }
 
 /// Traces the buffers a program reads through, for a stage whose `count` user-data words land in
@@ -378,6 +397,79 @@ pub fn trace_skipping(
         .map(|(_, &slot)| slot)
         .collect();
     buffers
+}
+
+/// Each image access of a dispatch, by byte offset, whose descriptor registers hold a record
+/// selected from a table at run time (D983), for a stage whose `count` user-data words land in the
+/// scalar registers from `first_register`.
+#[must_use]
+pub fn selected_images(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+) -> BTreeMap<u32, SelectedImage> {
+    let named = named_instructions(decode, encodings);
+    let Ok(blocks) = crate::blocks::split(decode, |instruction| {
+        let family = encodings
+            .encodings()
+            .get(usize::from(instruction.encoding?))?;
+        Some(family.name.clone())
+    }) else {
+        return BTreeMap::new();
+    };
+    let reached = block_entries(decode, &named, &blocks, entry_state(first_register, count));
+    let selections = selection_entries(decode, &named, (&blocks, &reached), true);
+    let mut images = BTreeMap::new();
+    for ((block, state), selected) in blocks.iter().zip(reached).zip(selections) {
+        let (Some(mut held), Some(mut selected)) = (state, selected) else {
+            continue;
+        };
+        for (instruction, named) in decode.instructions[block.first..block.end]
+            .iter()
+            .zip(&named[block.first..block.end])
+        {
+            if let Some(&(_, name)) = named.as_ref()
+                && let Some(image) = selected_image(instruction, name, (&held, &selected))
+            {
+                images.insert(instruction.offset, image);
+            }
+            step_selections(&mut selected, &held, instruction, *named);
+            step(&mut held, instruction, *named);
+        }
+    }
+    images
+}
+
+/// The table an image access's descriptor was selected from at run time, where it was (D983): a
+/// sample, gather, fetch or size query whose eight descriptor registers hold, in order, the words
+/// of one selecting load's record. A store is not one: nothing is written back to the images a
+/// table names. The sampler is traced as a buffer descriptor's words are.
+fn selected_image(
+    instruction: &Instruction,
+    name: &str,
+    (held, selected): (&Held, &Selections),
+) -> Option<SelectedImage> {
+    if !name.starts_with("image_")
+        || name.starts_with("image_store")
+        || name.starts_with("image_atomic")
+        || crate::model::bvh::is_intersect_ray(name)
+    {
+        return None;
+    }
+    let Some(Operand::Scalar(first)) = instruction.operands.get(2) else {
+        return None;
+    };
+    let table = selected_record(selected, *first, crate::model::IMAGE_DESCRIPTOR_REGISTERS)?;
+    let through_sampler = name.starts_with("image_sample") || name.starts_with("image_gather");
+    let sampler = match instruction.operands.get(3) {
+        Some(Operand::Scalar(first)) if through_sampler => descriptor(held, *first),
+        _ => None,
+    };
+    Some(SelectedImage {
+        table,
+        sampler,
+        sampled: through_sampler,
+    })
 }
 
 /// The offset and name of the first write that keeps a program from being traced: any that is
@@ -1131,7 +1223,8 @@ fn selecting_load(
     name: &str,
     held: &Held,
 ) -> Option<(u16, SelectedTable)> {
-    if name != "s_buffer_load_dwordx4" {
+    // Four words of a buffer descriptor, or eight of an image descriptor (D983).
+    if !matches!(name, "s_buffer_load_dwordx4" | "s_buffer_load_dwordx8") {
         return None;
     }
     let [
@@ -1153,8 +1246,14 @@ fn selecting_load(
 
 /// The table the four registers from `first` hold a selected descriptor of, in order (D966).
 fn selected_table(selected: &Selections, first: u16) -> Option<SelectedTable> {
+    selected_record(selected, first, 4)
+}
+
+/// The table the `count` registers from `first` hold a selected record's first words of, in order:
+/// four of a buffer descriptor (D966), eight of an image descriptor (D983).
+fn selected_record(selected: &Selections, first: u16, count: u32) -> Option<SelectedTable> {
     let mut table = None;
-    for word in 0..4_u8 {
+    for word in 0..u8::try_from(count).ok()? {
         let (held, at) = selected
             .get(usize::from(first) + usize::from(word))
             .copied()
@@ -1275,7 +1374,8 @@ fn step_selections(
         }
         (Some(name), _) => {
             if let Some((destination, table)) = selecting_load(instruction, name, held) {
-                for word in 0..4_u8 {
+                let words = u8::try_from(scalar_words(name)).unwrap_or(4);
+                for word in 0..words {
                     set.push((destination + u16::from(word), Some((table, word))));
                 }
             }
@@ -1555,6 +1655,67 @@ fn destination_words(name: &str) -> u32 {
     }
 }
 
+/// Carries `held` over a 64-bit move of a register pair: each word what its source holds.
+fn moved_pair(held: &mut Held, destination: u16, source: u16) {
+    let pair = [0, 1].map(|step| held.get(usize::from(source + step)).copied().flatten());
+    for (step, value) in (0..).zip(pair) {
+        if let Some(slot) = held.get_mut(usize::from(destination + step)) {
+            *slot = value;
+        }
+    }
+}
+
+/// Carries `held` over a scalar ALU instruction every register source of which holds a constant
+/// (D983): run through the translator's own semantics ([`crate::evaluate::fold_scalar`]), its
+/// destination holds the constant the run leaves there - how a program builds a sampler descriptor
+/// in place, with `s_bfm_b32`, `s_brev_b32`, `s_bitreplicate_b64_b32` and 64-bit moves of literals.
+/// A source the trace does not hold as a constant, a special register among them, leaves the
+/// destination as the caller forgot it.
+fn fold_constants(held: &mut Held, instruction: &Instruction, (family, name): (&str, &str)) {
+    static ENCODINGS: std::sync::OnceLock<Option<EncodingTable>> = std::sync::OnceLock::new();
+    let [Operand::Scalar(destination), sources @ ..] = instruction.operands.as_slice() else {
+        return;
+    };
+    if !matches!(family, "SOP1" | "SOP2" | "SOPK") {
+        return;
+    }
+    let constant = |register: u16| match held.get(usize::from(register)).copied().flatten() {
+        Some(DescriptorWord::Constant(value)) => Some((register, value)),
+        _ => None,
+    };
+    let mut known = Vec::new();
+    for source in sources {
+        match source {
+            Operand::Scalar(register) => {
+                known.push(constant(*register).ok_or(()));
+                // The second word of a pair source, where it is one.
+                known.extend(constant(register + 1).map(Ok));
+            }
+            Operand::Integer(_) | Operand::Literal(_) | Operand::Immediate(_) => {}
+            Operand::Named(float) if float.parse::<f32>().is_ok() => {}
+            _ => return,
+        }
+    }
+    let Ok(known) = known.into_iter().collect::<Result<Vec<_>, ()>>() else {
+        return;
+    };
+    let Some(encodings) = ENCODINGS
+        .get_or_init(|| EncodingTable::builtin().ok())
+        .as_ref()
+    else {
+        return;
+    };
+    let Some(scalars) = crate::evaluate::fold_scalar(encodings, instruction, &known) else {
+        return;
+    };
+    for step in 0..destination_words(name) as usize {
+        let at = usize::from(*destination) + step;
+        if let (Some(slot), Some(value)) = (held.get_mut(at), scalars.get(at).copied().flatten()) {
+            *slot = Some(DescriptorWord::Constant(value));
+        }
+    }
+}
+
 /// Carries `held` over one instruction.
 ///
 /// A move from a constant or a traced register, and a scalar load from a traced base, are followed.
@@ -1600,15 +1761,7 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
             }
         }
         ("s_mov_b64", [Operand::Scalar(destination), Operand::Scalar(source)]) => {
-            let pair = [
-                held.get(usize::from(*source)).copied().flatten(),
-                held.get(usize::from(source + 1)).copied().flatten(),
-            ];
-            for (step, value) in (0..).zip(pair) {
-                if let Some(slot) = held.get_mut(usize::from(destination + step)) {
-                    *slot = value;
-                }
-            }
+            moved_pair(held, *destination, *source);
         }
         (
             _,
@@ -1670,6 +1823,7 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
                     forget(held, *register, words);
                 }
             }
+            fold_constants(held, instruction, (family, name));
         }
     }
 }

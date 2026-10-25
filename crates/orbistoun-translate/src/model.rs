@@ -648,6 +648,50 @@ pub struct Texture {
     /// [`coordinate`](Self::coordinate) is the type of (D811); a three-dimensional image, sampled at
     /// three coordinates (D823); or a depth texture sampled against a reference (D816).
     pub shape: ImageShape,
+    /// The image and sampler this access reads, already paired, where the module chose the image
+    /// as it runs: one a dispatch selected from a table, out of the array every image the table
+    /// names is bound in (D983). `None` for a slot's own binding, loaded where it is read.
+    pub loaded: Option<Id>,
+    /// Whether the array holds no image for the descriptor this access selected, where it chose
+    /// one as it runs (D983): an escape, for each lane that runs the access.
+    pub missing: Option<Id>,
+}
+
+/// The image and sampler `texture` reads, paired: the one its access chose as it ran (D983), or
+/// its slot's binding, loaded here.
+fn bound_texture(builder: &mut Builder, texture: &Texture) -> Id {
+    if let Some(loaded) = texture.loaded {
+        return loaded;
+    }
+    let bound = builder.id();
+    builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+    bound
+}
+
+/// The image `bound`, `texture`'s image and sampler, holds: decorated non-uniform where the access
+/// chose it as it ran, as every value an image reached by such an index is read through must be
+/// (D983).
+fn image_of(builder: &mut Builder, texture: &Texture, bound: Id) -> Id {
+    let image = builder.id();
+    builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    if texture.loaded.is_some() {
+        builder.annotate(
+            op::DECORATE,
+            &[image.0, orbistoun_spirv::decoration::NON_UNIFORM],
+        );
+    }
+    image
+}
+
+/// Notes the access `texture` serves as an escape for each running lane, where it selected an image
+/// the array does not hold (D983).
+fn note_unselected<M: Model + ?Sized>(model: &mut M, texture: &Texture) {
+    let Some(missing) = texture.missing else {
+        return;
+    };
+    for lane in running_lanes(model) {
+        model.note_escape(missing, Some(lane));
+    }
 }
 
 /// What a translated texture store needs from the model.
@@ -14378,6 +14422,7 @@ fn image_sample<M: Model + ?Sized>(
     let texture = model
         .sampled_image(descriptor, sampler, (instruction.offset, shape))
         .map_err(refuse)?;
+    note_unselected(model, &texture);
     if (cube || shape.volume()) && (texture.saturate != [false; 2] || texture.mirror != [false; 2])
     {
         return Err(refuse(
@@ -14428,8 +14473,7 @@ fn image_sample<M: Model + ?Sized>(
         let builder = model.builder();
         // Loaded per lane rather than hoisted, so the translation does not reorder the guest's
         // program on an unchecked aliasing assumption.
-        let bound = builder.id();
-        builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+        let bound = bound_texture(builder, &texture);
         let texel = lane_texel(
             model,
             instruction,
@@ -14538,8 +14582,7 @@ fn layer_in_bounds<M: Model + ?Sized>(
     let u32_type = model.u32_type();
     let builder = model.builder();
     builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
-    let image = builder.id();
-    builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let image = image_of(builder, texture, bound);
     let size = builder.id();
     builder.function(
         op::IMAGE_QUERY_SIZE_LOD,
@@ -14648,16 +14691,15 @@ fn image_size<M: Model + ?Sized>(
             (instruction.offset, ImageShape::default()),
         )
         .map_err(refuse)?;
+    note_unselected(model, &texture);
     let level_register = Operand::Vector(*level);
     for lane in running_lanes(model) {
         let level = model.read_source(instruction, &level_register, lane)?;
         let u32_type = model.u32_type();
         let builder = model.builder();
         builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
-        let bound = builder.id();
-        builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
-        let image = builder.id();
-        builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+        let bound = bound_texture(builder, &texture);
+        let image = image_of(builder, &texture, bound);
         let size = builder.id();
         builder.function(
             op::IMAGE_QUERY_SIZE_LOD,
@@ -14711,8 +14753,7 @@ fn compare_sample<M: Model + ?Sized>(
     let f32_type = model.f32_type();
     let u32_type = model.u32_type();
     let builder = model.builder();
-    let bound = builder.id();
-    builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+    let bound = bound_texture(builder, texture);
     let compared = builder.id();
     if implicit {
         builder.function(
@@ -14773,8 +14814,7 @@ fn shader_compare<M: Model + ?Sized>(
     };
     let zero_level = model.constant(0);
     let builder = model.builder();
-    let bound = builder.id();
-    builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+    let bound = bound_texture(builder, texture);
     // The texels, as bits, and how to blend their answers.
     let channel = |model: &mut M, vector: Id, at: u32| -> Id {
         let b = model.builder();
@@ -14825,8 +14865,7 @@ fn shader_compare<M: Model + ?Sized>(
             zero_level.0,
         ],
     );
-    let image = b.id();
-    b.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let image = image_of(b, texture, bound);
     let size = b.id();
     b.function(
         op::IMAGE_QUERY_SIZE_LOD,
@@ -15020,8 +15059,7 @@ fn sample_or_fetch<M: Model + ?Sized>(
         // for a non-multisampled image: zero for `image_load`, and the guest's own for
         // `image_load_mip`, counted from the bound image's first level as the descriptor
         // counts from its base level.
-        let image = builder.id();
-        builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+        let image = image_of(builder, texture, bound);
         builder.function(
             op::IMAGE_FETCH,
             &[
@@ -15077,8 +15115,7 @@ fn offset_coordinate<M: Model + ?Sized>(
     let f32_type = model.f32_type();
     let builder = model.builder();
     builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
-    let image = builder.id();
-    builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let image = image_of(builder, texture, bound);
     let size = builder.id();
     builder.function(
         op::IMAGE_QUERY_SIZE_LOD,

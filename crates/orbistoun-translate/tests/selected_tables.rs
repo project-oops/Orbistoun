@@ -162,7 +162,33 @@ fn translated_as_dispatched(
             ..*user_data
         },
     )
-    .map(|translated| (translated.module.len(), translated.fidelity))
+    .map(|translated| {
+        // Where each texture slot's descriptor comes from: a table selected at run time (D983),
+        // found by running the program (D960), or a fixed place.
+        for source in &translated.textures {
+            match source.computed {
+                Some(computed) => match computed.selected {
+                    Some(selected) => println!(
+                        "  texture {}: selected from the table {:?} at +{:#x}, first at {:#x}, sampler {:?}",
+                        source.slot,
+                        selected.table.words,
+                        selected.table.element,
+                        computed.at,
+                        selected.sampler
+                    ),
+                    None => println!(
+                        "  texture {}: computed at {:#x} in s{}",
+                        source.slot, computed.at, computed.register
+                    ),
+                },
+                None => println!(
+                    "  texture {}: table offset {:?}, user data {:?}",
+                    source.slot, source.table_offset, source.user_data
+                ),
+            }
+        }
+        (translated.module.len(), translated.fidelity)
+    })
 }
 
 /// An entry's fields, `path|user words|ids|components|scratch`, and its wave width: an optional

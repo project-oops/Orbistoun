@@ -425,12 +425,11 @@ fn triangle_test<A: Arithmetic>(
     ]
 }
 
-/// Host arithmetic, which the unit tests run the node tests in.
-#[cfg(test)]
+/// Host arithmetic, which the unit tests and the host evaluator ([`host_intersect_ray`]) run the
+/// node tests in.
 #[derive(Debug, Default)]
 struct Host;
 
-#[cfg(test)]
 impl Arithmetic for Host {
     type Float = f32;
     type Word = u32;
@@ -492,7 +491,6 @@ impl Arithmetic for Host {
 }
 
 /// An IEEE half widened to a single: exponent 31 is infinity or NaN, exponent 0 a subnormal.
-#[cfg(test)]
 fn half_to_float(bits: u16) -> f32 {
     let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
     let exponent = i32::from((bits >> 10) & 0x1f);
@@ -507,7 +505,6 @@ fn half_to_float(bits: u16) -> f32 {
 }
 
 /// The node test's type and descriptor bits on the host, for a pointer's low word and a descriptor.
-#[cfg(test)]
 fn host_selectors(pointer: u32, descriptor: [u32; 4]) -> (Kind<bool>, Options<bool>) {
     let kind = pointer & NODE_TYPE_MASK;
     (
@@ -527,7 +524,6 @@ fn host_selectors(pointer: u32, descriptor: [u32; 4]) -> (Kind<bool>, Options<bo
 /// the pointer with its type bits cleared, in 8-byte units (RDNA 2 instruction set, table 49;
 /// `build_node_to_addr`, `radv_nir_rt_common.c:394-402`). [`node_address_words`] is its emitted
 /// form.
-#[cfg(test)]
 fn node_address(descriptor: [u32; 4], pointer: u64) -> u64 {
     let base = (u64::from(descriptor[1] & BASE_HIGH_MASK) << 32 | u64::from(descriptor[0])) << 8;
     base.wrapping_add((pointer & !u64::from(NODE_TYPE_MASK)) << 3)
@@ -827,19 +823,61 @@ pub(super) fn intersect_ray<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The instruction's four result words on the host, for the host evaluator's lane runs: the node
+/// read through `read` at the guest address the descriptor and the lane's pointer name, and tested
+/// in host arithmetic, the same test the translator emits. `vector` answers the lane's vector
+/// registers by number. `None` where the instruction is not one the translator takes, or a
+/// register, a descriptor word or a node word the test reads is unknown.
+pub(crate) fn host_intersect_ray(
+    instruction: &Instruction,
+    name: &str,
+    descriptor: [Option<u32>; 4],
+    vector: &mut dyn FnMut(u32) -> Option<u32>,
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Option<[u32; 4]> {
+    let operands = checked_operands(instruction, name).ok()?;
+    let descriptor = [
+        descriptor[0]?,
+        descriptor[1]?,
+        descriptor[2]?,
+        descriptor[3]?,
+    ];
+    let values = operands
+        .addresses
+        .iter()
+        .map(|&register| vector(register))
+        .collect::<Option<Vec<u32>>>()?;
+    let pointer = if operands.wide_pointer {
+        u64::from(values[1]) << 32 | u64::from(values[0])
+    } else {
+        u64::from(values[0])
+    };
+    let rest = &values[if operands.wide_pointer { 2 } else { 1 }..];
+    let (kind, options) = host_selectors(values[0], descriptor);
+    let address = node_address(descriptor, pointer);
+    // The words the test reads: a box of floats' 28, any other node's first 16.
+    let last = if kind.box32 {
+        LONG_LAST_BYTE
+    } else {
+        SHORT_LAST_BYTE
+    };
+    let mut node = [0; NODE_WORDS];
+    for (byte, word) in (0..=last).step_by(4).zip(node.iter_mut()) {
+        *word = read(address.wrapping_add(u64::from(byte)))?;
+    }
+    let ray = ray_from(&mut Host, rest, operands.a16);
+    Some(intersect(&mut Host, &node, &ray, (kind, options)))
+}
+
 /// The ray from the address registers after the node pointer: extent and origin as floats, then
 /// the directions as floats or, under `A16`, as halves two to a register in the order direction x,
 /// y, z, inverse x, y, z (RDNA 2 instruction set, table 48).
-fn ray_from<M: Model + ?Sized>(
-    arithmetic: &mut Emit<'_, M>,
-    registers: &[Id],
-    a16: bool,
-) -> Ray<Id> {
-    let floats: Vec<Id> = registers
+fn ray_from<A: Arithmetic>(arithmetic: &mut A, registers: &[A::Word], a16: bool) -> Ray<A::Float> {
+    let floats: Vec<A::Float> = registers
         .iter()
         .map(|&word| arithmetic.float_of(word))
         .collect();
-    let directions: Vec<Id> = if a16 {
+    let directions: Vec<A::Float> = if a16 {
         registers[4..7]
             .iter()
             .flat_map(|&word| [(word, false), (word, true)])

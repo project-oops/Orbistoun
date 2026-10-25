@@ -198,6 +198,11 @@ pub mod op {
     pub const TYPE_IMAGE: u16 = 25;
     /// An image paired with the sampler that reads it.
     pub const TYPE_SAMPLED_IMAGE: u16 = 27;
+    /// A sampler on its own, bound apart from the images it reads (D983).
+    pub const TYPE_SAMPLER: u16 = 26;
+    /// Pairs an image with a sampler at run time: an image chosen from an array, read through its
+    /// slot's sampler (D983).
+    pub const SAMPLED_IMAGE: u16 = 86;
     /// Samples a texture, with the implementation choosing the level of detail from the
     /// coordinate's derivatives, which only a fragment stage has.
     pub const IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87;
@@ -484,6 +489,9 @@ pub mod decoration {
     pub const NO_CONTRACTION: u32 = 42;
     /// Marks a mesh shader output as one value per primitive rather than per vertex.
     pub const PER_PRIMITIVE_EXT: u32 = 5271;
+    /// A value that may differ between invocations a resource is reached through: an image chosen
+    /// from an array by an index each invocation computes (D983).
+    pub const NON_UNIFORM: u32 = 5300;
 }
 
 /// Capability values.
@@ -523,6 +531,11 @@ pub mod capability {
     pub const SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4466;
     /// Querying an image's size, for a translated sample whose texel offsets are scaled by it.
     pub const IMAGE_QUERY: u32 = 50;
+    /// Values decorated [`super::decoration::NON_UNIFORM`] (`SPV_EXT_descriptor_indexing`).
+    pub const SHADER_NON_UNIFORM: u32 = 5301;
+    /// Indexing an array of sampled images by a value that differs between invocations: what an
+    /// image selected from a table at run time is read through (D983).
+    pub const SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING: u32 = 5307;
     /// Invocations may ask about their subgroup at all.
     pub const GROUP_NON_UNIFORM: u32 = 61;
     /// Invocations may take a ballot across their subgroup.
@@ -845,6 +858,7 @@ const fn is_unique_type(opcode: u16) -> bool {
             | op::TYPE_VECTOR
             | op::TYPE_IMAGE
             | op::TYPE_SAMPLED_IMAGE
+            | op::TYPE_SAMPLER
             | op::TYPE_FUNCTION
     )
 }
@@ -2275,6 +2289,30 @@ pub const STORAGE_IMAGE_BINDINGS: [u32; MAX_STORED_IMAGES] = {
 /// pixel shader stores to one.
 pub const MAX_STORED_IMAGES: usize = 16;
 
+/// Which binding a dispatch's images selected from a table at run time are bound at (D983): one
+/// array of sampled images, after the last of [`STORAGE_IMAGE_BINDINGS`], holding every image the
+/// tables its program selects from name. Each selecting texture slot's own binding in
+/// [`TEXTURE_BINDINGS`] holds that slot's sampler alone.
+pub const SELECTED_IMAGES_BINDING: u32 = STORAGE_IMAGE_BINDINGS[MAX_STORED_IMAGES - 1] + 1;
+
+/// Which binding the directory of a dispatch's selected images is bound at (D983): a storage buffer
+/// the module looks a descriptor's eight words up in, to find its image in the array at
+/// [`SELECTED_IMAGES_BINDING`].
+pub const SELECTED_DIRECTORY_BINDING: u32 = SELECTED_IMAGES_BINDING + 1;
+
+/// Which binding a dispatch's cubes selected from a table at run time are bound at (D983): an array
+/// as long as the one at [`SELECTED_IMAGES_BINDING`], each image at the same place in both, the one
+/// of its own shape bound and the other holding the first.
+pub const SELECTED_CUBES_BINDING: u32 = SELECTED_DIRECTORY_BINDING + 1;
+
+/// How many images the array at [`SELECTED_IMAGES_BINDING`] holds, every module alike (D983): a
+/// dispatch whose tables name more distinct images is refused by name. Entries no image fills hold
+/// the first.
+pub const MOST_SELECTED_IMAGES: u32 = 4096;
+
+/// The extension that names [`decoration::NON_UNIFORM`] in a module below SPIR-V 1.5.
+pub const DESCRIPTOR_INDEXING: &str = "SPV_EXT_descriptor_indexing";
+
 /// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
 /// The open-toolchain GL context's second texture unit samples one.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
@@ -3111,6 +3149,16 @@ static SHAPES: &[ShapeEntry] = &[
         op::TYPE_SAMPLED_IMAGE,
         Some(0),
         &[1],
+        None,
+        RestStride::Every,
+    ),
+    // A sampler type: its result id alone.
+    (op::TYPE_SAMPLER, Some(0), &[], None, RestStride::Every),
+    // Result type, result, the image and the sampler paired.
+    (
+        op::SAMPLED_IMAGE,
+        Some(1),
+        &[0, 2, 3],
         None,
         RestStride::Every,
     ),

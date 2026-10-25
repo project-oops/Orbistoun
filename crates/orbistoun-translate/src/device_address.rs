@@ -454,6 +454,9 @@ pub fn resolved_only(buffers: DrawBuffers) -> DrawBuffers {
         // are gone, and what they reached is reached by device address.
         tables: BTreeMap::new(),
         several: BTreeSet::new(),
+        // An image selected from a table binds every image the table names, read on the host
+        // whatever reaches the records' words (D983).
+        image_tables: buffers.image_tables,
     }
 }
 

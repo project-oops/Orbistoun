@@ -164,6 +164,26 @@ pub fn scalar_prefix_explained(
     Ok(merged)
 }
 
+/// The scalar registers one scalar ALU instruction (`SOP1`, `SOP2`, `SOPK`) leaves, run through the
+/// translator's own semantics over the registers `known` gives and no others (D753, D983): what a
+/// static trace folds when a program builds a descriptor from constants, as `s_brev_b32` and
+/// `s_bitreplicate_b64_b32` build a sampler's words. `None` where the semantics refuse it.
+pub(crate) fn fold_scalar(
+    encodings: &EncodingTable,
+    instruction: &Instruction,
+    known: &[(u16, u32)],
+) -> Option<Scalars> {
+    let mut model = Concrete::new(encodings, 1);
+    for &(register, word) in known {
+        if let Some(slot) = model.scalars.get_mut(usize::from(register)) {
+            *slot = Some(word);
+        }
+    }
+    model::instruction(&mut model, instruction).ok()?;
+    model.catch_up();
+    Some(model.scalars)
+}
+
 /// How many paths [`scalar_prefix`] follows to one access before it gives up: eleven branches on the
 /// execution mask or an unknown condition mask before it, each both ways, and one more. Each path is
 /// a scalar run of the prefix alone, so following them costs far less than the run of every wave a
@@ -810,6 +830,7 @@ fn wave_model<'a>(
     (width, wave): (u32, &WaveEntry),
 ) -> (Concrete<'a>, u32) {
     let mut model = Concrete::new(encodings, program.decode.instructions.len());
+    model.dx10_clamp = program.dx10_clamp;
     for (register, word) in user_data.iter().chain(&wave.group_ids).enumerate() {
         if register < model::SCALAR_REGISTERS as usize {
             model.scalars[register] = Some(*word);
@@ -1018,9 +1039,24 @@ fn lane_step(
             model.vector_buffer_load(instruction, written_vectors(name), read);
             LaneStep::On
         }
+        // A one-channel format load through a descriptor of 32-bit elements reads a word as a
+        // dword load does; any other format converts, which is not modelled here.
+        _ if model.lanes && name == "buffer_load_format_x" => {
+            if model.buffer_format_is_word(instruction) {
+                model.vector_buffer_load(instruction, 1, read);
+            } else {
+                model.forget_vector(instruction.operands.first(), 1);
+            }
+            LaneStep::On
+        }
         // So does a global load at the address each lane forms.
         _ if model.lanes && name.starts_with("global_load_dword") => {
             model.vector_global_load(instruction, written_vectors(name), read);
+            LaneStep::On
+        }
+        // A ray against a hierarchy node reads the node from guest memory and tests it on the host.
+        _ if model.lanes && model::bvh::is_intersect_ray(name) => {
+            model.vector_intersect_ray(instruction, name, read);
             LaneStep::On
         }
         // Any other access's destination is what memory held, unknown here.
@@ -1636,6 +1672,9 @@ pub struct LaneProgram {
     /// What a probed run needs to stop rather than refuse where it cannot follow the program
     /// (D962); [`None`] for a run with no probes, or where a probe's byte starts no instruction.
     invariance: Option<Invariance>,
+    /// The shader's `DX10_CLAMP` mode, which an output clamp reads ([`LaneProgram::clamping`]);
+    /// [`None`] where not known, and a clamped instruction's result is then unknown.
+    dx10_clamp: Option<bool>,
 }
 
 impl LaneProgram {
@@ -1655,7 +1694,17 @@ impl LaneProgram {
             probes: Vec::new(),
             step_factor: 4,
             invariance: None,
+            dx10_clamp: None,
         }
+    }
+
+    /// The same program, its output clamps turning a NaN into zero or passing it through as the
+    /// shader's `DX10_CLAMP` mode says (`SPI_SHADER_PGM_RSRC1` bit 21), where known: what a clamped
+    /// instruction needs before a run computes it.
+    #[must_use]
+    pub fn clamping(mut self, dx10_clamp: Option<bool>) -> Self {
+        self.dx10_clamp = dx10_clamp;
+        self
     }
 
     /// `decode` prepared for runs that record the scalar registers each of `probes` names each time
@@ -1701,6 +1750,7 @@ impl LaneProgram {
             probes: probes.to_vec(),
             step_factor: PROBE_STEP_FACTOR,
             invariance,
+            dx10_clamp: None,
         }
     }
 
@@ -1842,8 +1892,108 @@ pub struct WaveTrace {
     /// What the run's stores wrote, by byte address, each word with the byte of the store that last
     /// wrote it: [`None`] where it was written with a value the run does not know.
     pub written: std::collections::BTreeMap<u64, (Option<u32>, u32)>,
+    /// What the run's image stores wrote ([`wave_trace_with_images`]), by the image's descriptor and
+    /// texel: each component stored, by its place in the texel, with the byte of the store that
+    /// last wrote the texel. A component is [`None`] where it was stored with a value the run does
+    /// not know.
+    pub texels: TexelStores,
     /// Every modelled lane's vector registers `v0..` at the end, by lane.
     pub lanes: Vec<Vec<Option<u32>>>,
+}
+
+/// A texel an image store wrote: its image's descriptor, and `(x, y, layer)` with the level.
+pub type TexelPlace = ([u32; 8], [u32; 3], u32);
+
+/// The image stores a concrete trace records, by texel ([`WaveTrace::texels`]).
+pub type TexelStores = std::collections::BTreeMap<TexelPlace, (Vec<(u32, Option<u32>)>, u32)>;
+
+/// The image reads a concrete trace models through [`TraceImages`].
+const IMAGE_READS: [&str; 4] = [
+    "image_load",
+    "image_load_mip",
+    "image_sample_lz",
+    "image_sample_l",
+];
+
+/// The image stores a concrete trace records into [`WaveTrace::texels`].
+const IMAGE_STORES: [&str; 2] = ["image_store", "image_store_mip"];
+
+/// An image access's registers, for the forms a concrete trace models: one of 32-bit addresses
+/// and data, an eight-register descriptor, no status word, and an image of one or two dimensions
+/// or a two-dimensional array.
+struct ImageAccess {
+    /// The first data register.
+    data: u32,
+    /// The address registers, coordinates first, then the level where `levelled`.
+    addresses: Vec<u32>,
+    /// How many coordinates: two, or three with an array's layer, or one.
+    coordinates: usize,
+    levelled: bool,
+    /// The descriptor's first scalar register.
+    descriptor: usize,
+    /// The data mask: which of a texel's four components the data registers hold.
+    mask: u32,
+}
+
+impl ImageAccess {
+    /// The access `instruction` makes, its address registers ending in a level where `levelled`,
+    /// listed apart for an `NSA` encoding (the second and later a byte each in the dwords after
+    /// its fixed eight bytes). `None` for a form not modelled.
+    fn of(instruction: &Instruction, levelled: bool) -> Option<Self> {
+        // `DMASK` 11:8, `DIM` 5:3, `NSA` 2:1, `R128` 15, `TFE` 16 and `LWE` 17 of the first word;
+        // `A16` 30 and `D16` 31 of the second.
+        let word = instruction.word;
+        if word & (1 << 15 | 1 << 16 | 1 << 17) != 0
+            || instruction.second_word.unwrap_or(0) & (1 << 30 | 1 << 31) != 0
+        {
+            return None;
+        }
+        let coordinates = match word >> 3 & 7 {
+            0 => 1,
+            1 => 2,
+            5 => 3,
+            _ => return None,
+        };
+        let (
+            Some(Operand::Vector(data)),
+            Some(Operand::Vector(first)),
+            Some(Operand::Scalar(descriptor)),
+        ) = (
+            instruction.operands.first(),
+            instruction.operands.get(1),
+            instruction.operands.get(2),
+        )
+        else {
+            return None;
+        };
+        let used = coordinates + usize::from(levelled);
+        let nsa_dwords = (word >> 1 & 3) as usize;
+        let mut addresses = vec![u32::from(*first)];
+        for at in 0..used - 1 {
+            let register = if nsa_dwords == 0 {
+                u32::from(*first) + 1 + at as u32
+            } else {
+                if at / 4 >= nsa_dwords {
+                    return None;
+                }
+                instruction.words.get(2 + at / 4)? >> (8 * (at % 4)) & 0xff
+            };
+            addresses.push(register);
+        }
+        Some(Self {
+            data: u32::from(*data),
+            addresses,
+            coordinates,
+            levelled,
+            descriptor: usize::from(*descriptor),
+            mask: word >> 8 & 0xf,
+        })
+    }
+
+    /// The data registers it reads or writes: one a component its mask names.
+    fn components(&self) -> u32 {
+        self.mask.count_ones()
+    }
 }
 
 /// Why a concrete wave trace stopped ([`wave_trace`]).
@@ -1876,6 +2026,7 @@ struct WaveRun<'a> {
 struct GroupShared {
     local: std::collections::BTreeMap<u32, Option<u32>>,
     written: std::collections::BTreeMap<u64, (Option<u32>, u32)>,
+    texels: TexelStores,
     steps: usize,
     unmodelled: bool,
 }
@@ -1897,7 +2048,7 @@ fn run_to_barrier(
     (decode, encodings): (&Decode, &EncodingTable),
     shared: &mut GroupShared,
     (points, record): (&mut Vec<TracePoint>, Option<(u32, u32, u32)>),
-    read: &mut dyn FnMut(u64) -> Option<u32>,
+    (read, images): (&mut dyn FnMut(u64) -> Option<u32>, &mut dyn TraceImages),
 ) -> WaveHalt {
     let mut causes = Causes::new();
     loop {
@@ -1928,6 +2079,16 @@ fn run_to_barrier(
                 model.vector_buffer_store(instruction, words, &mut shared.written)
             });
             if !stored {
+                shared.unmodelled = true;
+            }
+            LaneStep::On
+        } else if model.lanes && IMAGE_READS.contains(&name) {
+            if !model.vector_image_read(instruction, name, images) {
+                shared.unmodelled = true;
+            }
+            LaneStep::On
+        } else if model.lanes && IMAGE_STORES.contains(&name) {
+            if !model.vector_image_store(instruction, name, &mut shared.texels) {
                 shared.unmodelled = true;
             }
             LaneStep::On
@@ -2002,19 +2163,102 @@ pub fn wave_trace(
     (vectors, scalars, lane): (u32, u32, u32),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> WaveTrace {
+    trace_group(
+        program,
+        encodings,
+        user_data,
+        (width, waves),
+        (vectors, scalars, lane),
+        (read, &mut NoImages, false),
+    )
+}
+
+/// The images a concrete trace reads ([`wave_trace_with_images`]): a texel of the image a
+/// descriptor names, as a shader receives it - normalised and float channels as float bits,
+/// integer channels as integers, the four after the descriptor's destination selects. `None` where
+/// the image or the texel is not known.
+pub trait TraceImages {
+    /// Texel `(x, y, layer)` of level `level` of the image `descriptor` names: what `image_load`
+    /// and `image_load_mip` read.
+    fn load(&mut self, descriptor: [u32; 8], texel: [u32; 3], level: u32) -> Option<[u32; 4]>;
+    /// A sample at normalised `coordinates` (`x`, `y`, and a layer) of level `level` through
+    /// `sampler`: what `image_sample_lz` and `image_sample_l` read.
+    fn sample(
+        &mut self,
+        descriptor: [u32; 8],
+        sampler: [u32; 4],
+        coordinates: [f32; 3],
+        level: f32,
+    ) -> Option<[u32; 4]>;
+}
+
+/// No image is known: every access reads unknown, as a trace without images has it.
+struct NoImages;
+
+impl TraceImages for NoImages {
+    fn load(&mut self, _: [u32; 8], _: [u32; 3], _: u32) -> Option<[u32; 4]> {
+        None
+    }
+    fn sample(&mut self, _: [u32; 8], _: [u32; 4], _: [f32; 3], _: f32) -> Option<[u32; 4]> {
+        None
+    }
+}
+
+/// [`wave_trace`] with the images its accesses read from `images`: `image_load`,
+/// `image_load_mip`, `image_sample_lz` and `image_sample_l` of 32-bit addresses and data read
+/// what it answers, and `image_store` and `image_store_mip` stores go to [`WaveTrace::texels`].
+/// Any other image access is unmodelled. The extended float operations, the transcendentals among
+/// them, are computed on the host, so a value the device approximates may differ in its last
+/// places.
+pub fn wave_trace_with_images(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    user_data: &[u32],
+    (width, waves): (u32, &[WaveEntry]),
+    (vectors, scalars, lane): (u32, u32, u32),
+    (read, images): (&mut dyn FnMut(u64) -> Option<u32>, &mut dyn TraceImages),
+) -> WaveTrace {
+    trace_group(
+        program,
+        encodings,
+        user_data,
+        (width, waves),
+        (vectors, scalars, lane),
+        (read, images, true),
+    )
+}
+
+/// [`wave_trace_with_images`], computing the extended float operations where `approximate`.
+fn trace_group(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    user_data: &[u32],
+    (width, waves): (u32, &[WaveEntry]),
+    (vectors, scalars, lane): (u32, u32, u32),
+    (read, images, approximate): (
+        &mut dyn FnMut(u64) -> Option<u32>,
+        &mut dyn TraceImages,
+        bool,
+    ),
+) -> WaveTrace {
     let decode = &program.decode;
     let mut runs: Vec<WaveRun<'_>> = waves
         .iter()
-        .map(|wave| WaveRun {
-            model: wave_model(program, encodings, user_data, (width, wave)).0,
-            at: 0,
-            joins: Vec::new(),
-            done: false,
+        .map(|wave| {
+            let mut model = wave_model(program, encodings, user_data, (width, wave)).0;
+            model.approximate = approximate;
+            WaveRun {
+                model,
+                at: 0,
+                joins: Vec::new(),
+                done: false,
+            }
         })
         .collect();
     let mut shared = GroupShared {
         local: std::collections::BTreeMap::new(),
         written: std::collections::BTreeMap::new(),
+        texels: std::collections::BTreeMap::new(),
         steps: 0,
         unmodelled: false,
     };
@@ -2031,7 +2275,7 @@ pub fn wave_trace(
                 (decode, encodings),
                 &mut shared,
                 (&mut trace, record),
-                read,
+                (&mut *read, &mut *images),
             ) {
                 WaveHalt::Barrier => {}
                 WaveHalt::Ended => run.done = true,
@@ -2046,11 +2290,11 @@ pub fn wave_trace(
                 .map(|lane| (0..vectors).map(|r| run.model.vector(r, lane)).collect())
         })
         .collect();
-    let written = shared.written;
     WaveTrace {
         points: trace,
         stop,
-        written,
+        written: shared.written,
+        texels: shared.texels,
         lanes,
     }
 }
@@ -2569,6 +2813,50 @@ struct Concrete<'a> {
     /// by register (D753): each written from a scalar or constant by a move, the execution mask
     /// since only narrowed, so the lowest running lane is one the move wrote.
     uniform: std::collections::BTreeMap<u32, u32>,
+    /// Whether the extended float operations ([`glsl_float`]) are computed on the host - among them
+    /// the transcendentals, which a device approximates within its own ulps: a trace that compares
+    /// results does ([`wave_trace_with_images`]); a run that forms addresses leaves them unknown.
+    approximate: bool,
+    /// The shader's `DX10_CLAMP` mode, where its program says ([`LaneProgram::clamping`]).
+    dx10_clamp: Option<bool>,
+}
+
+/// A `GLSL.std.450` float operation (by instruction number) on the host, over its operands where
+/// known: rounding, magnitude, sign, the minimum and maximum (the non-NaN operand where one is a
+/// NaN, as the hardware answers), a clamp, a fused multiply-add, and the transcendentals, which a
+/// device approximates within its own ulps ([`Concrete::approximate`]). `None` for any other, or an
+/// unknown operand.
+fn glsl_float(instruction: u32, (a, b, c): (Option<f32>, Option<f32>, Option<f32>)) -> Option<f32> {
+    Some(match instruction {
+        1 => a?.round(),
+        2 => a?.round_ties_even(),
+        3 => a?.trunc(),
+        4 => a?.abs(),
+        6 => {
+            let a = a?;
+            if a > 0.0 {
+                1.0
+            } else if a < 0.0 {
+                -1.0
+            } else {
+                a
+            }
+        }
+        8 => a?.floor(),
+        9 => a?.ceil(),
+        10 => a? - a?.floor(),
+        37 | 79 => a?.min(b?),
+        40 | 80 => a?.max(b?),
+        43 | 81 => a?.max(b?).min(c?),
+        50 => a?.mul_add(b?, c?),
+        13 => a?.sin(),
+        14 => a?.cos(),
+        29 => a?.exp2(),
+        30 => a?.log2(),
+        31 => a?.sqrt(),
+        32 => 1.0 / a?.sqrt(),
+        _ => return None,
+    })
 }
 
 /// Indices into [`Concrete::types`].
@@ -2611,6 +2899,8 @@ impl<'a> Concrete<'a> {
             last: 0,
             within: [None; SCALAR_CODES],
             uniform: std::collections::BTreeMap::new(),
+            approximate: false,
+            dx10_clamp: None,
         }
     }
 
@@ -2805,6 +3095,11 @@ impl<'a> Concrete<'a> {
                 Some(Value::Word(
                     single_to_half(*low) | single_to_half(*high) << 16,
                 ))
+            }
+            op::EXT_INST if self.approximate => {
+                let float = |at: usize| word(at).map(f32::from_bits);
+                glsl_float(*arguments.get(1)?, (float(2), float(3), float(4)))
+                    .map(|value| Value::Word(value.to_bits()))
             }
             _ => None,
         }
@@ -3044,6 +3339,21 @@ impl<'a> Concrete<'a> {
         }
     }
 
+    /// Whether a MUBUF access's descriptor, where known, holds 32-bit elements: its format
+    /// (`dword 3` bits 18:12, the GFX10 buffer format) `32_UINT`, `32_SINT` or `32_FLOAT`, which a
+    /// format load returns unconverted.
+    fn buffer_format_is_word(&self, instruction: &Instruction) -> bool {
+        const WORD_FORMATS: [u32; 3] = [20, 21, 22];
+        let Some(Operand::Scalar(resource)) = instruction.operands.get(2) else {
+            return false;
+        };
+        self.scalars
+            .get(usize::from(*resource) + 3)
+            .copied()
+            .flatten()
+            .is_some_and(|word| WORD_FORMATS.contains(&(word >> 12 & 0x7f)))
+    }
+
     /// Where a MUBUF access of `words` words places `lane`: its descriptor's base, the scalar
     /// offset, the instruction's offset and the lane's own - its vector offset where `offen` (bit
     /// 12) is set, its index times the stride where `idxen` (bit 13) is - and whether that lies
@@ -3267,6 +3577,206 @@ impl<'a> Concrete<'a> {
                     runs == Some(true) || self.vector(data + step, lane) == Some(value)
                 });
                 self.vectors.insert((data + step, lane), value);
+            }
+        }
+    }
+
+    /// An image read ([`IMAGE_READS`]) in each running lane, through `images`: its address
+    /// registers as a texel and level, or as normalised coordinates and a level, and the components
+    /// its data mask names written in order from its data register. Whether the instruction is one
+    /// modelled: `A16`, `D16`, `TFE` and `LWE` forms are not, nor a form with more address
+    /// registers ahead of its coordinates; their destinations are then unknown, as are a lane's
+    /// whose registers, descriptor or texel are.
+    fn vector_image_read(
+        &mut self,
+        instruction: &Instruction,
+        name: &str,
+        images: &mut dyn TraceImages,
+    ) -> bool {
+        let levelled = name.contains("_mip") || name == "image_sample_l";
+        let Some(access) = ImageAccess::of(instruction, levelled) else {
+            self.forget_vector(instruction.operands.first(), 4);
+            return false;
+        };
+        let descriptor: [Option<u32>; 8] = std::array::from_fn(|word| {
+            self.scalars
+                .get(access.descriptor + word)
+                .copied()
+                .flatten()
+        });
+        let is_sample = name.starts_with("image_sample");
+        let sampler: Option<[Option<u32>; 4]> = match instruction.operands.get(3) {
+            Some(Operand::Scalar(first)) if is_sample => Some(std::array::from_fn(|word| {
+                self.scalars
+                    .get(usize::from(*first) + word)
+                    .copied()
+                    .flatten()
+            })),
+            _ => None,
+        };
+        if is_sample && sampler.is_none() {
+            self.forget_vector(instruction.operands.first(), access.components());
+            return false;
+        }
+        let known = |words: &[Option<u32>]| words.iter().copied().collect::<Option<Vec<u32>>>();
+        let descriptor: Option<[u32; 8]> =
+            known(&descriptor[..]).map(|words| std::array::from_fn(|at| words[at]));
+        let sampler: Option<[u32; 4]> = sampler
+            .as_ref()
+            .and_then(|words| known(&words[..]))
+            .map(|words| std::array::from_fn(|at| words[at]));
+        for lane in 0..self.modelled {
+            let runs = self.lane_runs(lane);
+            if runs == Some(false) {
+                continue;
+            }
+            let address: Option<Vec<u32>> = access
+                .addresses
+                .iter()
+                .map(|&register| self.vector(register, lane))
+                .collect();
+            let texel = descriptor.zip(address).and_then(|(descriptor, address)| {
+                let element = |at: usize| address.get(at).copied().unwrap_or(0);
+                let layer = if access.coordinates > 2 {
+                    element(2)
+                } else {
+                    0
+                };
+                let level = if access.levelled {
+                    element(access.coordinates)
+                } else {
+                    0
+                };
+                if is_sample {
+                    let float = |bits: u32| f32::from_bits(bits);
+                    images.sample(
+                        descriptor,
+                        sampler?,
+                        [float(element(0)), float(element(1)), float(layer)],
+                        float(level),
+                    )
+                } else {
+                    images.load(descriptor, [element(0), element(1), layer], level)
+                }
+            });
+            for (register, component) in
+                (access.data..).zip((0..4).filter(|component| access.mask & 1 << component != 0))
+            {
+                let value = texel.map(|texel| texel[component]);
+                // A lane that may not run keeps what it held, which the read may replace.
+                let value = value.filter(|&value| {
+                    runs == Some(true) || self.vector(register, lane) == Some(value)
+                });
+                self.vectors.insert((register, lane), value);
+            }
+        }
+        true
+    }
+
+    /// An image store ([`IMAGE_STORES`]) in each running lane, into `texels`: the components its
+    /// data mask names, from its data register, at the lane's texel of the image its descriptor
+    /// names. Whether every lane's store landed where the run knows: a lane that may or may not
+    /// run, or whose descriptor or texel is unknown, stores somewhere the run cannot name.
+    fn vector_image_store(
+        &mut self,
+        instruction: &Instruction,
+        name: &str,
+        texels: &mut TexelStores,
+    ) -> bool {
+        let Some(access) = ImageAccess::of(instruction, name.ends_with("_mip")) else {
+            return false;
+        };
+        let descriptor: Option<Vec<u32>> = (0..8)
+            .map(|word| {
+                self.scalars
+                    .get(access.descriptor + word)
+                    .copied()
+                    .flatten()
+            })
+            .collect();
+        let Some(descriptor) = descriptor.map(|words| std::array::from_fn(|at| words[at])) else {
+            return false;
+        };
+        let mut placed = true;
+        for lane in 0..self.modelled {
+            match self.lane_runs(lane) {
+                Some(false) => continue,
+                None => {
+                    placed = false;
+                    continue;
+                }
+                Some(true) => {}
+            }
+            let address: Option<Vec<u32>> = access
+                .addresses
+                .iter()
+                .map(|&register| self.vector(register, lane))
+                .collect();
+            let Some(address) = address else {
+                placed = false;
+                continue;
+            };
+            let element = |at: usize| address.get(at).copied().unwrap_or(0);
+            let layer = if access.coordinates > 2 {
+                element(2)
+            } else {
+                0
+            };
+            let level = if access.levelled {
+                element(access.coordinates)
+            } else {
+                0
+            };
+            let components = (0..4)
+                .filter(|component| access.mask & 1 << component != 0)
+                .zip(access.data..)
+                .map(|(component, register)| (component, self.vector(register, lane)))
+                .collect();
+            texels.insert(
+                (descriptor, [element(0), element(1), layer], level),
+                (components, instruction.offset),
+            );
+        }
+        placed
+    }
+
+    /// `image_bvh_intersect_ray` or `image_bvh64_intersect_ray` in each running lane: the four
+    /// words the node test answers for the lane's ray, the node read through `read`
+    /// ([`model::bvh::host_intersect_ray`]). Unknown where the descriptor, the lane's registers or
+    /// the node is.
+    fn vector_intersect_ray(
+        &mut self,
+        instruction: &Instruction,
+        name: &str,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) {
+        let (Some(Operand::Vector(destination)), Some(Operand::Scalar(descriptor))) =
+            (instruction.operands.first(), instruction.operands.get(2))
+        else {
+            self.forget_vector(instruction.operands.first(), 4);
+            return;
+        };
+        let (destination, first) = (u32::from(*destination), usize::from(*descriptor));
+        let descriptor: [Option<u32>; 4] =
+            std::array::from_fn(|word| self.scalars.get(first + word).copied().flatten());
+        for lane in 0..self.modelled {
+            let runs = self.lane_runs(lane);
+            if runs == Some(false) {
+                continue;
+            }
+            let answer = model::bvh::host_intersect_ray(
+                instruction,
+                name,
+                descriptor,
+                &mut |register| self.vector(register, lane),
+                read,
+            );
+            for (step, value) in (0..4).zip(answer.map_or([None; 4], |words| words.map(Some))) {
+                // A lane that may not run keeps what it held, which the test may replace.
+                let value = value.filter(|&value| {
+                    runs == Some(true) || self.vector(destination + step, lane) == Some(value)
+                });
+                self.vectors.insert((destination + step, lane), value);
             }
         }
     }
@@ -3958,6 +4468,10 @@ impl Model for Concrete<'_> {
         self.encodings
     }
 
+    fn dx10_clamp(&self) -> Option<bool> {
+        self.dx10_clamp
+    }
+
     fn lane_known_idle(&self, lane: u32) -> bool {
         self.lanes && self.lane_runs(lane) == Some(false)
     }
@@ -4005,8 +4519,12 @@ impl Model for Concrete<'_> {
                     self.hold(self.scalars[code + 1])
                 } else if name == model::M0 {
                     self.hold(self.scalars[M0])
+                } else if name == model::SRC_SCC {
+                    // The condition code read as a word, zero or one.
+                    self.hold(self.condition)
                 } else {
-                    self.hold(name.parse::<f32>().ok().map(f32::to_bits))
+                    // An inline float, `inv_2pi` among them, as the module reads it.
+                    self.hold(model::inline_float_bits(name))
                 }
             }
             _ => self.hold(None),

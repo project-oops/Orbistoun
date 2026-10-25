@@ -25,6 +25,7 @@ use crate::{TranslateError, Width};
 mod compute_inputs;
 mod input_controls;
 mod pixel_inputs;
+mod selected;
 pub use compute_inputs::{
     ComputeInputs, FIRST_THREAD_PUSH_WORD, GLOBAL_BASE_PUSH_WORD, GLOBAL_PAGE_BYTES,
     GLOBAL_PAGE_HASH, GLOBAL_PAGE_PROBES, MOST_SAMPLED_BUFFERS, PARTIAL_PUSH_WORD, PartialGroups,
@@ -32,7 +33,12 @@ pub use compute_inputs::{
 };
 pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
+pub use orbistoun_spirv::MOST_SELECTED_IMAGES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
+pub use selected::{
+    SELECTED_CUBE_TAG, SELECTED_DIRECTORY_PROBES, SELECTED_DIRECTORY_SLOT_WORDS,
+    selected_directory, selected_image_hash,
+};
 
 /// Lanes in a wavefront.
 pub const WAVE: u32 = Width::Wave64.lanes();
@@ -2417,6 +2423,11 @@ pub struct Wavefront<'a> {
     /// The offsets of the instructions that rewrite only an image descriptor's type
     /// ([`type_rewrites`]), which translate to nothing.
     type_rewrites: std::collections::BTreeSet<u32>,
+    /// A dispatch's image accesses whose descriptor is a record selected from a table at run time,
+    /// by byte offset (D983).
+    selected_images: BTreeMap<u32, crate::draw_buffers::SelectedImage>,
+    /// The array selected images are read through and its directory, once declared (D983).
+    selected_set: Option<selected::SelectedSet>,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -2793,6 +2804,7 @@ impl Wavefront<'_> {
                     at,
                     register: descriptor,
                     first_register: self.images.user_data_registers.0,
+                    selected: None,
                 }),
                 ..TextureSource::default()
             });
@@ -3017,6 +3029,7 @@ impl Wavefront<'_> {
                 at,
                 register: descriptor,
                 first_register: self.images.user_data_registers.0,
+                selected: None,
             }),
             ..TextureSource::default()
         })
@@ -3663,6 +3676,8 @@ impl<'a> Wavefront<'a> {
             descriptor_loads: Default::default(),
             name_only: crate::name_only::NameOnly::default(),
             type_rewrites: std::collections::BTreeSet::new(),
+            selected_images: BTreeMap::new(),
+            selected_set: None,
             images: ImageTrace::seeded(user_data.first_register, user_data.count),
             bool_type,
             lane_ptr: files.lane_ptr,
@@ -6592,6 +6607,11 @@ impl Model for Wavefront<'_> {
         sampler: Option<u32>,
         (at, shape): (u32, model::ImageShape),
     ) -> Result<model::Texture, &'static str> {
+        // A record the program selected from a table at run time: one of every image the table
+        // names, found as the module runs (D983).
+        if let Some(&selected) = self.selected_images.get(&at) {
+            return self.selected_texture(descriptor, sampler, (at, shape, selected));
+        }
         // A primitive shader's images take slots of its own. It and a compute module sample only
         // at a named level - neither has derivatives to choose one from - which the model checks
         // (D904).
@@ -6688,18 +6708,12 @@ impl Model for Wavefront<'_> {
             texel,
             result,
             integer,
-            saturate: self
-                .saturated
-                .get(source.slot as usize)
-                .copied()
-                .unwrap_or_default(),
-            mirror: self
-                .mirrored
-                .get(source.slot as usize)
-                .copied()
-                .unwrap_or_default(),
+            saturate: self.slot_modes(source.slot).0,
+            mirror: self.slot_modes(source.slot).1,
             shader_compare,
             shape,
+            loaded: None,
+            missing: None,
         };
         self.textures.push(BoundTexture {
             texture,
@@ -7612,6 +7626,11 @@ pub struct ComputedImage {
     pub register: u32,
     /// The scalar register the stage's first user-data word lands in.
     pub first_register: u32,
+    /// The table the descriptor is a record of, where the program selected it from one at run
+    /// time (D983): the host binds every image the table names, and the module finds the one the
+    /// registers hold. `None` for a descriptor found by running the program up to the access.
+    #[serde(default)]
+    pub selected: Option<crate::draw_buffers::SelectedImage>,
 }
 
 /// Whether `source` names its descriptor: loaded from a table, held in the user data, or computed
@@ -7651,7 +7670,12 @@ fn existing_texture(
 ) -> Option<&mut BoundTexture> {
     let other_sampler =
         |b: &BoundTexture| matches!((b.sampler, sampler), (Some(was), Some(now)) if was != now);
+    // A slot reading images selected at run time serves only the accesses that select them (D983).
+    let selecting = |b: &BoundTexture| b.source.computed.is_some_and(|c| c.selected.is_some());
     let same = |b: &BoundTexture| {
+        if selecting(b) {
+            return false;
+        }
         let same = if reaching.is_some() {
             loaded_by(b, reaching)
         } else if let Some(word) = seeded_word {
@@ -7822,7 +7846,9 @@ fn descriptor_table_loads(
                 forget(&mut held, *destination, scalar_load_width(name) as usize);
             }
             // An image descriptor read out of a buffer whose descriptor a table load put in the
-            // registers it names: a light's shadow map named in its constant buffer (D934).
+            // registers it names: a light's shadow map named in its constant buffer (D934). Only at
+            // its immediate alone: an offset register adds what the program computes, a record
+            // selected at run time (D983), which no fixed place names.
             (
                 "s_buffer_load_dwordx8",
                 [
@@ -7830,7 +7856,7 @@ fn descriptor_table_loads(
                     Operand::Scalar(buffer),
                     Operand::Immediate(within),
                 ],
-            ) => {
+            ) if (instruction.second_word.unwrap_or(0) >> 25) & 0x7f == 125 => {
                 if let Some(load) = live.buffer_image_load(*destination, *buffer, *within) {
                     loads
                         .entry(u32::from(*destination))
@@ -8852,6 +8878,14 @@ pub fn draw_buffers_for(
         });
     }
     let mut buffers = buffers;
+    // A dispatch's images selected from a table at run time (D983).
+    if stage == Stage::Compute {
+        buffers.image_tables = crate::draw_buffers::selected_images(
+            decode,
+            encodings,
+            (user_data.first_register, user_data.count),
+        );
+    }
     // A computed access's prefix may read the program's own address (D842).
     for source in &mut buffers.sources {
         if let crate::draw_buffers::BufferSource::Computed(computed) = source {
@@ -9014,6 +9048,10 @@ pub fn translate_with_user_data(
             masks,
         ),
     );
+    // A dispatch's images selected from a table at run time are read through one array (D983).
+    if stage == Stage::Compute {
+        module.selected_images.clone_from(&buffers.image_tables);
+    }
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     module.type_rewrites = type_rewrites(decode, encodings, &module.descriptor_loads.0);
     module.name_only =
@@ -9877,6 +9915,7 @@ mod computed_image_tests {
                     at: second,
                     register: 0,
                     first_register: 0,
+                    selected: None,
                 }),
                 "{form}: the second is found where it is read"
             );
@@ -9921,6 +9960,7 @@ mod computed_image_tests {
                 at: 0x18,
                 register: 16,
                 first_register: 0,
+                selected: None,
             })
         );
     }
