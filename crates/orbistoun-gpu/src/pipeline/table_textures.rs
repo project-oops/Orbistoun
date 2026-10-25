@@ -86,6 +86,7 @@ mod tests {
             level_user_data: None,
             buffer_offset: None,
             layered: false,
+            computed: None,
         }
     }
 

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::capture::{Capture, CapturedBuffer};
+use crate::capture::{Capture, CapturedBuffer, CapturedGuest};
 use crate::compute::{DispatchError, GuestDispatch};
 use crate::compute_buffers::BufferOut;
 use crate::compute_images::DispatchImages;
@@ -70,24 +70,50 @@ pub fn replay_dispatch(
     };
     let buffers = capture.buffers_in();
     let hash = orbistoun_gpu::content_hash(&capture.module);
+    // A device-addressed dispatch reaches guest memory where it lay: its pages are placed there
+    // again, at the same guest addresses, and the device maps them as a run's (D971).
+    let device_addressed = crate::direct::addresses_directly(&capture.module);
+    let placed = if device_addressed {
+        crate::compute::session()?;
+        Some(Placed::reserve(&capture.guest)?)
+    } else {
+        None
+    };
     let mut runs = Vec::new();
     let mut lost = false;
     let mut latest = None;
+    let mut guest_after = Vec::new();
     for _ in 0..repeat.max(1) {
+        if placed.is_some() {
+            Placed::write(&capture.guest);
+        }
         // Named, so a loss in the replay names the program as the run's would.
         if let Some(program) = capture.program {
             crate::device_lost::note_dispatch(program, capture.groups);
         }
         let _ = crate::compute::take_device_time();
         let started = Instant::now();
-        let dispatched = crate::compute::run_guest_dispatch(
-            (&capture.module, hash),
-            &capture.memory,
-            (&capture.push, capture.groups),
-            &images,
-            &buffers,
-        );
+        let dispatched = if device_addressed {
+            crate::direct::replay(
+                (&capture.module, hash),
+                &capture.memory,
+                (&capture.push, capture.groups),
+                &images,
+                &buffers,
+            )
+        } else {
+            crate::compute::run_guest_dispatch(
+                (&capture.module, hash),
+                &capture.memory,
+                (&capture.push, capture.groups),
+                &images,
+                &buffers,
+            )
+        };
         let host_time = started.elapsed();
+        if placed.is_some() {
+            guest_after = Placed::read(&capture.guest);
+        }
         let run_lost = crate::device_lost::device_lost()
             || dispatched.as_ref().is_err_and(crate::capture::is_loss);
         runs.push(ReplayRun {
@@ -96,7 +122,7 @@ pub fn replay_dispatch(
             outcome: dispatched
                 .map(|done| {
                     let answered = RunOutput {
-                        hash: output_hash(&done),
+                        hash: with_guest(output_hash(&done), &guest_after),
                         escaped: done.escaped,
                         loop_cut: done.loop_cut,
                     };
@@ -111,9 +137,17 @@ pub fn replay_dispatch(
         }
     }
     if let (Some(out), Some(done)) = (out, &latest) {
-        write_outputs(out, &outputs(&capture, done))
+        let mut files = outputs(&capture, done);
+        files.extend(
+            guest_after
+                .iter()
+                .enumerate()
+                .map(|(index, words)| (format!("guest-{index}.bin"), words.clone())),
+        );
+        write_outputs(out, &files)
             .map_err(|e| DispatchError::Capture(format!("{}: {e}", out.display())))?;
     }
+    drop(placed);
     Ok(Replay {
         program: capture.program,
         groups: capture.groups,
@@ -121,6 +155,78 @@ pub fn replay_dispatch(
         runs,
         lost,
     })
+}
+
+/// A captured device-addressed dispatch's guest pages, reserved again at their guest addresses in
+/// this process (D971), and released - the device's mappings over them dropped first - when
+/// dropped.
+struct Placed {
+    space: orbistoun_mem::AddressSpace,
+    ranges: Vec<(u64, u64)>,
+}
+
+impl Placed {
+    /// Reserves each of `guest`'s ranges, read-write, where it lay.
+    fn reserve(guest: &[CapturedGuest<'_>]) -> Result<Self, DispatchError> {
+        let mut placed = Self {
+            space: orbistoun_mem::AddressSpace::new(),
+            ranges: Vec::new(),
+        };
+        for range in guest {
+            let len = range.words.len() as u64 * 4;
+            placed
+                .space
+                .reserve(range.at, len, orbistoun_mem::Protection::READ_WRITE)
+                .map_err(|e| {
+                    DispatchError::Capture(format!(
+                        "the captured guest range {:#x}+{len:#x} cannot be placed where it lay: {e}",
+                        range.at
+                    ))
+                })?;
+            orbistoun_mem::lazy::commit(range.at, len);
+            placed.ranges.push((range.at, len));
+        }
+        Ok(placed)
+    }
+
+    /// Writes `guest`'s words where they lay, as they were captured: where a [`Placed`] of them is
+    /// held.
+    fn write(guest: &[CapturedGuest<'_>]) {
+        for range in guest {
+            // SAFETY: the caller holds a `Placed` of these ranges, which reserved them read-write
+            // and committed them, and keeps them until it drops.
+            let _ = unsafe {
+                orbistoun_mem::guest::write_bytes(
+                    range.at,
+                    zerocopy::IntoBytes::as_bytes(range.words.as_ref()),
+                )
+            };
+        }
+    }
+
+    /// `guest`'s ranges as the dispatch left them, where a [`Placed`] of them is held.
+    fn read(guest: &[CapturedGuest<'_>]) -> Vec<Vec<u32>> {
+        guest
+            .iter()
+            .map(|range| {
+                let mut bytes = vec![0_u8; range.words.len() * 4];
+                // SAFETY: as for `write`.
+                let _ = unsafe { orbistoun_mem::guest::read_into(range.at, &mut bytes) };
+                bytes
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+impl Drop for Placed {
+    fn drop(&mut self) {
+        for &(at, len) in &self.ranges {
+            self.space.release(at, len);
+        }
+    }
 }
 
 /// What a replayed dispatch left, as files named as its capture names its inputs, so an output is
@@ -179,6 +285,27 @@ fn write_outputs(dir: &Path, files: &[(String, Vec<u32>)]) -> std::io::Result<()
         )?;
     }
     Ok(())
+}
+
+/// The hash a replay answers for a run that left `done`, and `guest_after` in its capture's guest
+/// ranges, in order: what a dispatch run outside a replay is compared with (D980).
+pub fn run_hash(done: &GuestDispatch, guest_after: &[Vec<u32>]) -> u64 {
+    with_guest(output_hash(done), guest_after)
+}
+
+/// `hash` folded with the guest ranges a device-addressed dispatch left (D971); `hash` itself
+/// where it reached none.
+fn with_guest(hash: u64, guest: &[Vec<u32>]) -> u64 {
+    if guest.is_empty() {
+        return hash;
+    }
+    let mut parts = vec![hash];
+    parts.extend(guest.iter().map(|words| orbistoun_gpu::content_hash(words)));
+    let words: Vec<u32> = parts
+        .iter()
+        .flat_map(|part| [*part as u32, (part >> 32) as u32])
+        .collect();
+    orbistoun_gpu::content_hash(&words)
 }
 
 /// One hash of everything a dispatch left: guest memory, each stored image and each buffer, and
@@ -328,6 +455,7 @@ mod tests {
             memory: vec![1, 2, 3],
             escaped: false,
             loop_cut: None,
+            escaped_page: None,
             stored: vec![vec![4, 5]],
             buffers: Vec::new(),
         }

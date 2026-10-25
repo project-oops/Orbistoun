@@ -23,7 +23,7 @@ pub(crate) const INDEX: &str = "dispatch-recent.txt";
 #[derive(Debug)]
 pub(crate) enum Entry {
     /// Kept: its inputs, its module left out and named by its hash.
-    Kept(Capture<'static>, u64),
+    Kept(Box<Capture<'static>>, u64),
     /// Passed over: its ordinal, program and the bytes its inputs would have taken.
     Skipped(Option<u64>, Option<u64>, u64),
 }
@@ -85,8 +85,10 @@ impl Ring {
             vacant.insert(capture.module.to_vec());
             self.bytes += module_bytes;
         }
-        self.entries
-            .push_back(Entry::Kept(capture.owned_without_module(), module));
+        self.entries.push_back(Entry::Kept(
+            Box::new(capture.owned_without_module()),
+            module,
+        ));
         self.bytes += data;
         self.cost.0 += 1;
         self.cost.1 += copied;

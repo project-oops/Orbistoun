@@ -371,6 +371,8 @@ pub fn plan(
                 user_data: words,
                 inputs: ComputeInputs {
                     workgroup_ids: [false; 3],
+                    table_buffers: 0,
+                    loop_cap: 0,
                     thread_id_components: 1,
                     threads: [lanes, 1, 1],
                     unwritten_user_data,
@@ -384,6 +386,9 @@ pub fn plan(
                     first_thread: first,
                     sampled_buffers: 0,
                     scratch_wave_bytes: 0,
+                    device_addressed: false,
+                    // The vertex stage's subnormals, from bits 19:12 of its `RSRC1`.
+                    float_mode: u8::try_from((rsrc1 >> 12) & 0xff).ok(),
                 },
                 width,
                 dx10_clamp: Some(rsrc1 & DX10_CLAMP != 0),
@@ -522,6 +527,59 @@ mod tests {
         assert!(ran.dispatches.iter().all(|d| d.user_data[11] == Some(2)));
         assert_eq!(ran.vertices, 69);
         assert_eq!(ran.after.0[0], Some(8 + 69 * 4));
+    }
+
+    /// Every wave of every streamout draw of one program is one module: a wave's first vertex is
+    /// read from the push block, not compiled in (D861), so draws with other first vertices
+    /// translate nothing new and compile nothing new.
+    #[test]
+    fn every_wave_of_every_draw_shares_one_module() {
+        use crate::pipeline::{GuestMemory, MAX_SHADER_BYTES, Pipeline};
+        use orbistoun_translate::wavefront::FIRST_THREAD_PUSH_WORD;
+        use orbistoun_translate::{Fidelity, Strategy};
+        /// The vertex program, alone in guest memory.
+        struct Program(Vec<u8>);
+        impl GuestMemory for Program {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let at = usize::try_from(address.checked_sub(0x4_0280_0400)?).ok()?;
+                self.0.get(at..at.checked_add(length)?)
+            }
+        }
+        // v_mov_b32 v1, v0; s_endpgm; s_code_end: a program that reads its vertex id.
+        let mut bytes = [0x7e02_0300_u32, 0xbf81_0000, 0xbf9f_0000]
+            .map(u32::to_le_bytes)
+            .concat();
+        bytes.resize(MAX_SHADER_BYTES, 0);
+        let memory = Program(bytes);
+        let mut pairs = one_point();
+        pairs.push((VGT_PRIMITIVE_TYPE, 4));
+        pairs.push((BUFFER_SIZE_0, 1000));
+        pairs.extend((0..9).map(|i| (USER_DATA_VS_0 + i, 0)));
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave32,
+        })
+        .expect("a pipeline");
+        let (mut modules, mut firsts) = (std::collections::BTreeSet::new(), Vec::new());
+        for (vertices, offset) in [(70, 8), (45, 400)] {
+            let at = Offsets([Some(offset), None, None, None]);
+            for dispatch in plan(&writes(&pairs), 0x40, vertices, at)
+                .unwrap()
+                .dispatches
+            {
+                let prepared = pipeline
+                    .prepare_dispatch(&dispatch, &memory)
+                    .expect("the wave prepares");
+                modules.insert(prepared.module_hash);
+                firsts.push(prepared.push[FIRST_THREAD_PUSH_WORD as usize]);
+            }
+        }
+        assert_eq!(
+            firsts,
+            [0, 30, 60, 0, 30],
+            "each wave's first vertex, pushed"
+        );
+        assert_eq!(modules.len(), 1, "five waves of two draws, one module");
     }
 
     /// A pass whose rasterizer is killed is streamout alone; one left rasterizing is drawn too

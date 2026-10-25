@@ -1201,6 +1201,7 @@ fn execute_dispatch_here(
             }
         })
         .collect();
+    let started = std::time::Instant::now();
     let done = perf::span(perf::Span::DispatchOnDevice, || {
         orbistoun_gpu_vulkan::dispatch_guest_hashed(
             module,
@@ -1209,15 +1210,27 @@ fn execute_dispatch_here(
             &bound,
             &buffers,
         )
-    })
-    // Named by its module and size, so the dispatch that loses the device is told apart from those
-    // refused after it.
-    .map_err(|e| {
-        format!(
-            "the device refused it: {e:?} (module {:016x}, {groups:?} groups)",
+    });
+    // A dispatch slow enough on the device to hold a frame by itself is named, by the module the
+    // run's dispatch census names its program beside, so its device time and its preparation's
+    // are read together.
+    let took = started.elapsed();
+    if took >= std::time::Duration::from_millis(500) {
+        tracing::info!(
+            "a dispatch took {} ms on the device: module {:016x}, {groups:?} groups",
+            took.as_millis(),
             module.1
-        )
-    })?;
+        );
+    }
+    let done = done
+        // Named by its module and size, so the dispatch that loses the device is told apart from those
+        // refused after it.
+        .map_err(|e| {
+            format!(
+                "the device refused it: {e:?} (module {:016x}, {groups:?} groups)",
+                module.1
+            )
+        })?;
     write_depths(images, &done.stored)?;
     let buffers = done
         .buffers
@@ -1416,6 +1429,9 @@ fn dispatch_image(
             }
             orbistoun_gpu::pipeline::TexelFormat::Rgba16Unorm => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba16Unorm
+            }
+            orbistoun_gpu::pipeline::TexelFormat::Rgba8Snorm => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba8Snorm
             }
             orbistoun_gpu::pipeline::TexelFormat::R32Float => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R32Float

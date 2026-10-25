@@ -627,6 +627,17 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::install_sample_counter(render::samples_passed);
     // Work the host refuses passed over, when the run asks, to see every wall at once (D896).
     orbistoun_gpu::agc_driver::set_pass_refused(orbistoun_env::PASS_REFUSED.get().is_some());
+    // A dispatch's loop cut sooner than the cap, when the run asks (D949).
+    orbistoun_gpu::agc_driver::set_loop_cap(
+        orbistoun_env::LOOP_CAP
+            .get()
+            .and_then(|cap| cap.parse().ok())
+            .unwrap_or(0),
+    );
+    // Every program's control flow as the dispatch loop, when the run asks (D972).
+    orbistoun_gpu::set_structured_control_flow(
+        orbistoun_env::CONTROL_FLOW.get().as_deref() != Some("dispatch"),
+    );
     orbistoun_gpu::agc_driver::set_write_back_at_flip(
         orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
     );

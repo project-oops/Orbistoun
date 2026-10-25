@@ -38,6 +38,7 @@ macro_rules! span_labels {
             Span::QueueFull => $as!("queue full"),
             Span::QueuedWrites => $as!("queued writes"),
             Span::SettleOver => $as!("settle over"),
+            Span::SettledRead => $as!("settled read"),
             Span::PrepareAgain => $as!("prepare again"),
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
@@ -136,6 +137,7 @@ macro_rules! span_labels {
             Span::CpWalk => $as!("cp: walk"),
             Span::CpDispatch => $as!("cp: dispatch"),
             Span::DispatchPrepare => $as!("dispatch: prepare"),
+            Span::DispatchBuffers => $as!("dispatch: buffers"),
             Span::DispatchRead => $as!("dispatch: read"),
             Span::DispatchExecute => $as!("dispatch: execute"),
             Span::DispatchOnDevice => $as!("dispatch on device"),
@@ -149,6 +151,8 @@ macro_rules! span_labels {
             Span::ReadBackImage => $as!("device: read back image"),
             Span::ReadBackBuffers => $as!("device: read back buffers"),
             Span::DeviceRelease => $as!("device: release"),
+            Span::DirectSync => $as!("direct: sync"),
+            Span::DirectCopies => $as!("direct: copies"),
             Span::WriteBackChanges => $as!("write back: changes"),
             Span::ChangesWindow => $as!("changes: window"),
             Span::ChangesBuffers => $as!("changes: buffers"),
@@ -521,6 +525,9 @@ pub enum Span {
     /// A preparation read waiting for the queue to drain because a queued submission writes over
     /// it (D874, D876).
     SettleOver,
+    /// One read of guest memory by a preparation, with every earlier write settled over it first
+    /// (D874): a host replay of a dispatch's waves makes one a word.
+    SettledRead,
     /// A preparation made again because the one before read what a queued submission writes,
     /// with the drain before it (D876).
     PrepareAgain,
@@ -743,6 +750,9 @@ pub enum Span {
     CpDispatch,
     /// Within [`Self::CpDispatch`]: its registers found and its program translated or kept.
     DispatchPrepare,
+    /// Within a dispatch's preparation or its queued writes: the buffers its program reaches,
+    /// traced, and replayed on the host where a descriptor is computed (D753, D883).
+    DispatchBuffers,
     /// Within [`Self::CpDispatch`]: its window and buffers read out of guest memory.
     DispatchRead,
     /// Within [`Self::CpDispatch`]: the device's part, handed over and answered.
@@ -772,6 +782,13 @@ pub enum Span {
     ReadBackBuffers,
     /// Within [`Self::DispatchExecute`]: its images, buffers and window released.
     DeviceRelease,
+    /// Within [`Self::DispatchOnDevice`]: a device-addressed dispatch's mappings of guest memory
+    /// brought up to date, and its table built where they moved (D964, D968).
+    DirectSync,
+    /// Within [`Self::DispatchOnDevice`]: the device-local copies of the chunks a device-addressed
+    /// dispatch reaches brought up to date before it, and those it stored into copied back after
+    /// (D974).
+    DirectCopies,
     /// Within [`Self::DispatchWriteBack`]: what changed worked out, a stored image tiled back.
     WriteBackChanges,
     /// Within [`Self::WriteBackChanges`]: the window's words compared, run by run.
@@ -825,11 +842,12 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 135] = [
+    pub const ALL: [Self; 139] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
         Self::SettleOver,
+        Self::SettledRead,
         Self::PrepareAgain,
         Self::CommandProcessor,
         Self::RunDraws,
@@ -928,6 +946,7 @@ impl Span {
         Self::CpWalk,
         Self::CpDispatch,
         Self::DispatchPrepare,
+        Self::DispatchBuffers,
         Self::DispatchRead,
         Self::DispatchExecute,
         Self::DispatchOnDevice,
@@ -941,6 +960,8 @@ impl Span {
         Self::ReadBackImage,
         Self::ReadBackBuffers,
         Self::DeviceRelease,
+        Self::DirectSync,
+        Self::DirectCopies,
         Self::WriteBackChanges,
         Self::ChangesWindow,
         Self::ChangesBuffers,

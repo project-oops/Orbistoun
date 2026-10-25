@@ -70,6 +70,10 @@ mod rsrc2 {
 /// `COMPUTE_PGM_RSRC1.DX10_CLAMP`, bit 21.
 const DX10_CLAMP: u32 = 1 << 21;
 
+/// Where `COMPUTE_PGM_RSRC1.FLOAT_MODE` starts, its eight bits 19:12 (Mesa
+/// `src/amd/registers/gfx10.json:11880`).
+const FLOAT_MODE_SHIFT: u32 = 12;
+
 /// Everything a dispatch runs with, read from the stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchState {
@@ -321,6 +325,8 @@ pub fn state_at(
         user_data,
         inputs: ComputeInputs {
             workgroup_ids,
+            table_buffers: 0,
+            loop_cap: 0,
             thread_id_components,
             threads,
             unwritten_user_data,
@@ -330,7 +336,11 @@ pub fn state_at(
             first_thread: 0,
             // Set where the preparation binds its buffers (D951).
             sampled_buffers: 0,
+            float_mode: latest(PGM_RSRC1)
+                .and_then(|word| u8::try_from((word >> FLOAT_MODE_SHIFT) & 0xff).ok()),
             scratch_wave_bytes,
+            // Set where the host cannot know what it reaches before it runs (D964).
+            device_addressed: false,
         },
         width: if initiator_word & initiator::CS_W32_EN != 0 {
             Width::Wave32
@@ -402,19 +412,18 @@ pub fn place_window_except(
     place_window_over(state, (decode, encodings), (served, &[]), readable)
 }
 
-/// [`place_window_except`] over `hierarchies` as well, the `(first byte, bytes)` ranges of the
-/// hierarchies its ray intersections read through the window: the window then spans as many as
-/// [`HIERARCHY_WINDOW_WORDS`].
-fn place_window_over(
+/// The buffer accesses a dispatch's window takes - those `served` does not name, but for its scratch
+/// accesses (D954) and cache invalidations - by byte offset, each with its descriptor's words from
+/// the dispatch's user data, or why they are not known before the program runs.
+fn window_accesses(
     state: &DispatchState,
     (decode, encodings): (&Decode, &EncodingTable),
-    (served, hierarchies): (&BTreeMap<u32, u32>, &[(u64, u64)]),
-    readable: impl Fn(u64, u64) -> bool,
-) -> Result<Option<Window>, &'static str> {
+    served: &BTreeMap<u32, u32>,
+) -> Vec<(u32, Result<[u32; 4], &'static str>)> {
     let families = encodings.encodings();
-    let mut span: Option<(u64, u64)> = None;
     // A wave's scratch is its own private memory, which no window holds (D954).
     let scratch = scratch_accesses(state, (decode, encodings));
+    let mut accesses = Vec::new();
     for instruction in &decode.instructions {
         if served.contains_key(&instruction.offset) || scratch.contains(&instruction.offset) {
             continue;
@@ -432,18 +441,55 @@ fn place_window_over(
             continue;
         }
         let Some(Operand::Scalar(first)) = instruction.operands.get(2) else {
-            return Err("a buffer access whose descriptor is not in scalar registers");
+            accesses.push((
+                instruction.offset,
+                Err("a buffer access whose descriptor is not in scalar registers"),
+            ));
+            continue;
         };
         let first = usize::from(*first);
         let words = state
             .user_data
             .get(first..first + 4)
             .and_then(|words| words.iter().copied().collect::<Option<Vec<u32>>>())
-            .ok_or(concat!(
-                "a buffer access whose descriptor is not in user data the stream wrote, so ",
-                "where its memory is is not known before the program runs"
-            ))?;
-        let (base, bytes) = descriptor_span([words[0], words[1], words[2], words[3]]);
+            .map(|words| [words[0], words[1], words[2], words[3]])
+            .ok_or(UNKNOWN_DESCRIPTOR);
+        accesses.push((instruction.offset, words));
+    }
+    accesses
+}
+
+/// Why a window cannot take a buffer access whose descriptor the program forms itself.
+pub(crate) const UNKNOWN_DESCRIPTOR: &str = concat!(
+    "a buffer access whose descriptor is not in user data the stream wrote, so ",
+    "where its memory is is not known before the program runs"
+);
+
+/// The byte offset of the first buffer access a dispatch's window takes whose descriptor is not
+/// known before the program runs: what a window placement refused for it names.
+pub(crate) fn unplaced_access(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    served: &BTreeMap<u32, u32>,
+) -> Option<u32> {
+    window_accesses(state, (decode, encodings), served)
+        .into_iter()
+        .find_map(|(at, words)| words.is_err().then_some(at))
+}
+
+/// [`place_window_except`] over `hierarchies` as well, the `(first byte, bytes)` ranges of the
+/// hierarchies its ray intersections read through the window: the window then spans as many as
+/// [`HIERARCHY_WINDOW_WORDS`].
+fn place_window_over(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    (served, hierarchies): (&BTreeMap<u32, u32>, &[(u64, u64)]),
+    readable: impl Fn(u64, u64) -> bool,
+) -> Result<Option<Window>, &'static str> {
+    let mut span: Option<(u64, u64)> = None;
+    for (_, words) in window_accesses(state, (decode, encodings), served) {
+        let words = words?;
+        let (base, bytes) = descriptor_span(words);
         let end = base.saturating_add(bytes);
         span = Some(match span {
             None => (base, end),
@@ -825,6 +871,8 @@ mod tests {
             state.inputs,
             ComputeInputs {
                 workgroup_ids: [true, false, false],
+                table_buffers: 0,
+                loop_cap: 0,
                 thread_id_components: 1,
                 threads: [64, 1, 1],
                 unwritten_user_data: 1 << 1,
@@ -834,6 +882,10 @@ mod tests {
                 first_thread: 0,
                 sampled_buffers: 0,
                 scratch_wave_bytes: 0,
+                device_addressed: false,
+                // `FLOAT_MODE` 0xc0 from bits 19:12 of 0x002c0001: 16- and 64-bit subnormals
+                // kept, 32-bit ones flushed.
+                float_mode: Some(0xc0),
             }
         );
         assert_eq!(state.width, Width::Wave64);

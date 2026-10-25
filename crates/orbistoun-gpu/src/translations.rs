@@ -16,10 +16,17 @@ pub const TRANSLATOR_INPUTS: &str = env!("ORBISTOUN_TRANSLATOR_INPUTS");
 
 /// The translator in `build`: the build line for whoever reads the file, and the digest of what
 /// translates, so a build from an edited tree is another translator though it names the same
-/// commit.
+/// commit. A run that lays every program out as the dispatch loop (`ORBISTOUN_CONTROL_FLOW`, D972)
+/// is another translator too: its modules differ from the structured ones a store keeps under the
+/// same keys, so the store is made again rather than served.
 #[must_use]
 pub fn translator(build: &str) -> String {
-    identity(build, TRANSLATOR_INPUTS)
+    let made = identity(build, TRANSLATOR_INPUTS);
+    if orbistoun_translate::structured::enabled() {
+        made
+    } else {
+        format!("{made} - dispatch loop")
+    }
 }
 
 fn identity(build: &str, inputs: &str) -> String {
@@ -426,5 +433,17 @@ mod tests {
             super::TRANSLATOR_INPUTS
         );
         assert!(super::translator("v").ends_with(super::TRANSLATOR_INPUTS));
+    }
+
+    /// A run that lays programs out as the dispatch loop is another translator (D972): a store kept
+    /// by a structured run is made again for it, rather than serving modules of the other layout
+    /// under the same keys, and the next structured run makes it again in turn.
+    #[test]
+    fn the_layout_of_control_flow_is_part_of_the_translator() {
+        use orbistoun_translate::structured::with_shape;
+        let structured = with_shape(true, || super::translator("v"));
+        let dispatched = with_shape(false, || super::translator("v"));
+        assert_ne!(structured, dispatched);
+        assert!(structured.ends_with(super::TRANSLATOR_INPUTS));
     }
 }

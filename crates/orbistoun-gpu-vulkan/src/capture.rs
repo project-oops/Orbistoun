@@ -8,8 +8,9 @@
 //! reads. A buffer it only stores to is its length, and an alias is the buffer it shares.
 //!
 //! `ORBISTOUN_CAPTURE_DISPATCH` names programs whose first dispatch, or each of their first
-//! `EVERY_DISPATCH_MOST` with `:all`, is written before it is submitted. A dispatch that loses the
-//! device is written after it fails, from the inputs it still borrows, while the run's ending is
+//! `EVERY_DISPATCH_MOST` with `:all`, is written before it is submitted; a device-addressed one
+//! after it has run, with every guest chunk it reached as it was before (D980). A dispatch that
+//! loses the device is written after it fails, from the inputs it still borrows, while the run's ending is
 //! held back (`device_lost::hold_ending`): nothing is copied or kept for the dispatches that
 //! succeed.
 
@@ -18,6 +19,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use orbistoun_gpu::bound_ranges::BoundRanges;
+use orbistoun_gpu::translation_source::Source;
 use orbistoun_gpu::{BorderColour, MipFilter, TextureFilter, TextureSampling, TextureWrap};
 
 use crate::compute::DispatchError;
@@ -26,6 +28,12 @@ use crate::compute_images::{DispatchFormat, DispatchImage, DispatchImages};
 
 /// The file in a capture directory that names the rest.
 pub const MANIFEST: &str = "dispatch.txt";
+
+/// The file holding the guest program a capture's module was translated from.
+pub const PROGRAM: &str = "program.bin";
+
+/// The file holding the translation context, as the kept translations serialise it.
+pub const CONTEXT: &str = "translation.json";
 
 /// The manifest's first line, which says what the directory is.
 const HEADER: &str = "# a guest compute dispatch: orbistoun-cli replay-dispatch <this directory>";
@@ -37,7 +45,8 @@ const _: () = assert!(cfg!(target_endian = "little"));
 /// Why a dispatch was written out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    /// `ORBISTOUN_CAPTURE_DISPATCH` named its program; written before it was submitted.
+    /// `ORBISTOUN_CAPTURE_DISPATCH` named its program; written before it was submitted, or a
+    /// device-addressed one after it ran, with what it reached as it was before (D980).
     Asked,
     /// It lost the device; written after it failed.
     DeviceLost,
@@ -128,6 +137,51 @@ pub enum CapturedBuffer<'a> {
     Alias(usize, u64),
 }
 
+/// Guest memory a device-addressed dispatch reaches by device address, kept at its guest address
+/// (D971): what a replay places where it was before it runs the dispatch again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedGuest<'a> {
+    /// The guest address of its first byte.
+    pub at: u64,
+    /// Its words.
+    pub words: Cow<'a, [u32]>,
+}
+
+/// The bytes of a guest page a capture keeps (D971).
+const GUEST_PAGE: u64 = 1 << orbistoun_spirv::DISPATCH_ESCAPE_PAGE_SHIFT;
+
+/// The guest pages `pages` - first bytes, in order, each [`GUEST_PAGE`] long - as their words now,
+/// those that touch read as one range.
+///
+/// Each page must be one the device maps (`direct`), which holds them committed and readable for as
+/// long as its lock is held: the caller holds it.
+pub(crate) fn guest_pages(pages: &[u64]) -> Vec<CapturedGuest<'static>> {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for &page in pages {
+        match ranges.last_mut() {
+            Some((at, len)) if *at + *len == page => *len += GUEST_PAGE,
+            _ => ranges.push((page, GUEST_PAGE)),
+        }
+    }
+    ranges
+        .into_iter()
+        .filter_map(|(at, len)| {
+            let mut bytes = vec![0_u8; usize::try_from(len).ok()?];
+            // SAFETY: every page lies in a guest range the device maps, committed and readable,
+            // and the mappings' lock the caller holds keeps it so for the read.
+            unsafe { orbistoun_mem::guest::read_into(at, &mut bytes) }.then(|| CapturedGuest {
+                at,
+                words: Cow::Owned(
+                    bytes
+                        .chunks_exact(4)
+                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .collect(),
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Everything a guest compute dispatch was handed: enough to run it again alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture<'a> {
@@ -153,6 +207,15 @@ pub struct Capture<'a> {
     /// Which of the run's guest dispatches it was, counting from one, so captures of several
     /// programs are put in the order they ran.
     pub ordinal: Option<u64>,
+    /// What the module was translated from, where the pipeline noted it: the guest program and
+    /// the translation context, so the program can be translated again and compared.
+    pub source: Option<Source>,
+    /// The guest memory a device-addressed dispatch's user data names, page by page (D971); empty
+    /// for any other dispatch.
+    pub guest: Vec<CapturedGuest<'a>>,
+    /// Whether [`Self::guest`] holds its words as they were before the dispatch ran; after it, for a
+    /// dispatch written only once it had lost the device.
+    pub guest_before: bool,
 }
 
 impl<'a> Capture<'a> {
@@ -212,6 +275,9 @@ impl<'a> Capture<'a> {
             buffers,
             ranges: BoundRanges::default(),
             ordinal: None,
+            source: None,
+            guest: Vec::new(),
+            guest_before: true,
         }
     }
 
@@ -296,6 +362,16 @@ impl<'a> Capture<'a> {
                 .collect(),
             ranges: self.ranges.clone(),
             ordinal: self.ordinal,
+            source: self.source.clone(),
+            guest: self
+                .guest
+                .iter()
+                .map(|range| CapturedGuest {
+                    at: range.at,
+                    words: owned(&range.words),
+                })
+                .collect(),
+            guest_before: self.guest_before,
         }
     }
 
@@ -311,8 +387,13 @@ impl<'a> Capture<'a> {
                     CapturedBuffer::Words(words) => words.len(),
                     _ => 0,
                 })
-                .sum::<usize>();
-        words as u64 * 4
+                .sum::<usize>()
+            + self.guest.iter().map(|g| g.words.len()).sum::<usize>();
+        let program = self
+            .source
+            .as_ref()
+            .map_or(0, |source| source.program.len());
+        words as u64 * 4 + program as u64
     }
 
     /// The manifest and each file of words, by name, as `put` is to store them.
@@ -373,8 +454,23 @@ impl<'a> Capture<'a> {
                 }
             }
         }
+        if !self.guest.is_empty() {
+            let state = if self.guest_before { "before" } else { "after" };
+            let _ = writeln!(manifest, "guest-state {state}");
+        }
+        for (index, range) in self.guest.iter().enumerate() {
+            let name = format!("guest-{index}.bin");
+            let _ = writeln!(manifest, "guest {name} {:#x}", range.at);
+            files.push((name, &range.words));
+        }
         for (name, words) in files {
             put(&name, zerocopy::IntoBytes::as_bytes(words))?;
+        }
+        if let Some(source) = &self.source {
+            let context = source.context_text().map_err(std::io::Error::other)?;
+            let _ = writeln!(manifest, "source {:#x} {PROGRAM} {CONTEXT}", source.address);
+            put(PROGRAM, &source.program)?;
+            put(CONTEXT, context.as_bytes())?;
         }
         // Last, so a directory with a manifest holds every file it names.
         put(MANIFEST, manifest.as_bytes())
@@ -385,6 +481,7 @@ impl<'a> Capture<'a> {
     /// # Errors
     ///
     /// A file `get` cannot answer, or a manifest line this does not write.
+    #[expect(clippy::too_many_lines, reason = "one match arm per manifest line")]
     pub fn load(
         get: &mut dyn FnMut(&str) -> std::io::Result<Vec<u8>>,
     ) -> Result<Capture<'static>, DispatchError> {
@@ -400,6 +497,7 @@ impl<'a> Capture<'a> {
             &[],
         );
         let mut seen_module = false;
+        let mut source = None;
         for line in manifest.lines().filter(|line| !line.starts_with('#')) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             let Some((&key, rest)) = fields.split_first() else {
@@ -407,13 +505,15 @@ impl<'a> Capture<'a> {
             };
             let unread = || bad(format!("unreadable line: {line}"));
             let (rest, range) = split_range(rest).ok_or_else(unread)?;
-            match (key, range) {
-                ("memory", _) => capture.ranges.window = range,
-                ("buffer", Some(range)) => capture.ranges.buffers.push(range),
-                (_, None) => {}
-                _ => return Err(unread()),
-            }
+            place(&mut capture.ranges, key, range).ok_or_else(unread)?;
             match (key, rest) {
+                ("source", [at, program, context]) => {
+                    source = Some((
+                        number(at).ok_or_else(unread)?,
+                        (*program).to_owned(),
+                        (*context).to_owned(),
+                    ));
+                }
                 ("ordinal", [ordinal]) => {
                     capture.ordinal = Some(ordinal.parse().map_err(|_| unread())?);
                 }
@@ -456,6 +556,12 @@ impl<'a> Capture<'a> {
                 ("buffer", ["words", name]) => {
                     capture.buffers.push(CapturedBuffer::Words(words(name)?));
                 }
+                ("guest-state", ["before"]) => capture.guest_before = true,
+                ("guest-state", ["after"]) => capture.guest_before = false,
+                ("guest", [name, at]) => capture.guest.push(CapturedGuest {
+                    words: words(name)?,
+                    at: number(at).ok_or_else(unread)?,
+                }),
                 ("buffer", ["unread", count]) => capture
                     .buffers
                     .push(CapturedBuffer::Unread(count.parse().map_err(|_| unread())?)),
@@ -471,6 +577,9 @@ impl<'a> Capture<'a> {
         if !seen_module {
             return Err(bad(format!("{MANIFEST} names no module")));
         }
+        capture.source = source
+            .map(|(address, program, context)| read_source(get, address, (&program, &context)))
+            .transpose()?;
         if !capture.ranges.buffers.is_empty()
             && capture.ranges.buffers.len() != capture.buffers.len()
         {
@@ -519,6 +628,37 @@ fn read_words(
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect(),
     ))
+}
+
+/// Keeps the guest range a manifest line with `key` ends with, where it has one: the window's for
+/// `memory`, the next buffer's for `buffer`; `None` for a range on any other line.
+fn place(ranges: &mut BoundRanges, key: &str, range: Option<(u64, u64)>) -> Option<()> {
+    match (key, range) {
+        ("memory", _) => ranges.window = range,
+        ("buffer", Some(range)) => ranges.buffers.push(range),
+        (_, None) => {}
+        _ => return None,
+    }
+    Some(())
+}
+
+/// What a capture's module was translated from: the program at `address` in the file named
+/// `program`, under the context in the file named `context`.
+fn read_source(
+    get: &mut dyn FnMut(&str) -> std::io::Result<Vec<u8>>,
+    address: u64,
+    (program, context): (&str, &str),
+) -> Result<Source, DispatchError> {
+    let mut file = |name: &str| {
+        if !plain_name(name) {
+            return Err(bad(format!("{name} is not a file of this directory")));
+        }
+        get(name).map_err(|e| bad(format!("{name}: {e}")))
+    };
+    let bytes = file(program)?;
+    let text =
+        String::from_utf8(file(context)?).map_err(|_| bad(format!("{context} is not text")))?;
+    Source::from_parts(address, bytes, &text).map_err(|e| bad(format!("{context}: {e}")))
 }
 
 /// A manifest line's fields.
@@ -617,7 +757,7 @@ fn parse_image(fields: &[&str], texels: Cow<'static, [u32]>) -> Option<CapturedI
 }
 
 /// Every image format, for reading one back by its name.
-const FORMATS: [DispatchFormat; 17] = [
+const FORMATS: [DispatchFormat; 18] = [
     DispatchFormat::Rgba8,
     DispatchFormat::R8,
     DispatchFormat::R8Uint,
@@ -634,6 +774,7 @@ const FORMATS: [DispatchFormat; 17] = [
     DispatchFormat::Rgb10A2,
     DispatchFormat::Rgba16Float,
     DispatchFormat::Rgba16Unorm,
+    DispatchFormat::Rgba8Snorm,
     DispatchFormat::Float11_11_10,
 ];
 
@@ -656,6 +797,7 @@ const fn format_name(format: DispatchFormat) -> &'static str {
         DispatchFormat::Rgb10A2 => "rgb10a2",
         DispatchFormat::Rgba16Float => "rgba16-float",
         DispatchFormat::Rgba16Unorm => "rgba16-unorm",
+        DispatchFormat::Rgba8Snorm => "rgba8-snorm",
         DispatchFormat::Float11_11_10 => "float11-11-10",
     }
 }
@@ -1043,8 +1185,8 @@ pub(crate) fn write(capture: &Capture<'_>, module_hash: u64, numbered: Option<u6
 #[cfg(test)]
 mod tests {
     use super::{
-        Capture, CapturedBuffer, CapturedImage, EVERY_DISPATCH_MOST, ImageRole, Reason, Selection,
-        Taken, Wanted, directory_name, take_number, written_for_loss,
+        Capture, CapturedBuffer, CapturedGuest, CapturedImage, EVERY_DISPATCH_MOST, ImageRole,
+        Reason, Selection, Taken, Wanted, directory_name, take_number, written_for_loss,
     };
     use crate::compute_images::DispatchFormat;
     use orbistoun_gpu::bound_ranges::BoundRanges;
@@ -1121,6 +1263,12 @@ mod tests {
                 ],
             },
             ordinal: Some(4127),
+            source: None,
+            guest: vec![CapturedGuest {
+                at: 0x7400_9ce7_0000,
+                words: Cow::Owned(vec![3; 0x4000]),
+            }],
+            guest_before: false,
         }
     }
 
@@ -1179,6 +1327,8 @@ mod tests {
             "buffer words buffer-0.bin at 0x400002000000 bytes 0xc",
             "buffer unread 1048576 at 0x400003000000 bytes 0x400000",
             "buffer alias 0 0x100 at 0x400002000100 bytes 0x4",
+            "guest-state after",
+            "guest guest-0.bin 0x74009ce70000",
         ] {
             assert!(manifest.lines().any(|l| l == line), "{line} in {manifest}");
         }
@@ -1197,6 +1347,7 @@ mod tests {
             [
                 "buffer-0.bin",
                 "dispatch.txt",
+                "guest-0.bin",
                 "image-0.bin",
                 "image-1.bin",
                 "image-2.bin",

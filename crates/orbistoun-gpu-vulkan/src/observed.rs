@@ -15,25 +15,50 @@ pub(crate) fn dispatch(
     (push, groups): (&[u32], [u32; 3]),
     images: &DispatchImages<'_>,
     buffers: &[BufferIn<'_>],
+    guest: &[u64],
 ) -> Result<GuestDispatch, DispatchError> {
     let program = crate::device_lost::noted_compute();
     let ordinal = crate::capture::next_ordinal();
-    let wanted = crate::capture::asked(program);
-    // Where the command processor placed the bindings, read only for a diagnostic that names it.
-    let ranges = || orbistoun_gpu::bound_ranges::noted(module.1);
-    let capture = |reason| Capture {
-        ranges: ranges().unwrap_or_default(),
-        ordinal: Some(ordinal),
-        ..Capture::of(
-            (program, reason),
-            module.0,
-            memory,
-            (push, groups),
-            images,
-            buffers,
+    // A device-addressed dispatch was asked before its table was placed, so it records what it
+    // touches, and its capture is held until it has run (D980).
+    let armed = crate::direct::reached::armed();
+    let wanted = armed.unwrap_or_else(|| crate::capture::asked(program));
+    // The guest pages a device-addressed dispatch's user data names (D971), as they are before it
+    // runs where a capture may be written of it; a capture written only after it ran, of a dispatch
+    // that lost the device, keeps them as it left them, and says so.
+    let before = (!guest.is_empty() && (wanted.written() || crate::recent::kept()))
+        .then(|| crate::capture::guest_pages(guest));
+    let reached = || {
+        before.clone().map_or_else(
+            || (crate::capture::guest_pages(guest), false),
+            |pages| (pages, true),
         )
     };
+    // Where the command processor placed the bindings, read only for a diagnostic that names it.
+    let ranges = || orbistoun_gpu::bound_ranges::noted(module.1);
+    let capture = |reason| {
+        let (guest, guest_before) = reached();
+        Capture {
+            guest,
+            guest_before,
+            ranges: ranges().unwrap_or_default(),
+            ordinal: Some(ordinal),
+            source: orbistoun_gpu::translation_source::noted(module.1),
+            ..Capture::of(
+                (program, reason),
+                module.0,
+                memory,
+                (push, groups),
+                images,
+                buffers,
+            )
+        }
+    };
     match wanted {
+        _ if armed.is_some() && wanted.written() => {
+            let asked = owned(&capture(Reason::Asked), module.0);
+            crate::direct::reached::hold(asked, module.1);
+        }
         Wanted::Once => crate::capture::write(&capture(Reason::Asked), module.1, None),
         Wanted::Numbered(n) => {
             crate::capture::write(&capture(Reason::Asked), module.1, Some(u64::from(n)));
@@ -85,4 +110,12 @@ pub(crate) fn dispatch(
     }
     drop(held);
     dispatched
+}
+
+/// An owned copy of `capture`, its module `module`, to keep past the dispatch it borrows from.
+fn owned(capture: &Capture<'_>, module: &[u32]) -> Capture<'static> {
+    Capture {
+        module: std::borrow::Cow::Owned(module.to_vec()),
+        ..capture.owned_without_module()
+    }
 }

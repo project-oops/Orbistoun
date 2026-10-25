@@ -26,6 +26,7 @@ use crate::registers::decode_buffer_descriptor;
 type Refusal = std::borrow::Cow<'static, str>;
 
 mod resolved;
+pub(crate) mod tables;
 
 /// The bytes from a descriptor's base every read the program makes through it can reach, as the
 /// descriptor's bounds rules admit them, or why nothing bounds them.
@@ -148,7 +149,7 @@ fn mapped_prefix(memory: &impl GuestMemory, address: u64, length: usize) -> Opti
 }
 
 /// The most bytes one draw buffer binds; a descriptor naming more is refused rather than read.
-const MOST_BYTES: u64 = 256 << 20;
+pub(crate) const MOST_BYTES: u64 = 256 << 20;
 
 /// How many bytes [`BufferCache`] keeps, the oldest ranges going first past it: a world's vertex
 /// buffers, which a frame draws from again, and a bound for a guest streaming new ones every frame.
@@ -649,7 +650,7 @@ fn evaluate_computed_now(
 
 /// [`decode_prefix`], kept by the prefix's words: a draw resolves its descriptors from the same
 /// prefix every time, and PPSA25872's draws each decoded it again, 0.1 ms of every draw.
-fn decoded_prefix(
+pub(crate) fn decoded_prefix(
     prefix: &[u32],
 ) -> Result<
     (
@@ -978,7 +979,7 @@ fn wave_entry(user_data: usize, inputs: orbistoun_translate::wavefront::ComputeI
 
 /// The range a dispatch binds for its global loads (D883, D950), or for a computed access a sample
 /// of its groups reached (D951).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GlobalRange {
     /// The guest range bound, `(address, bytes)`: what the waves run read, and where they were a
     /// sample, a margin about it.
@@ -988,6 +989,10 @@ pub(crate) struct GlobalRange {
     /// How many groups were run, where they were a sample of the dispatch's rather than all of
     /// them: a load outside the range is then possible, and the module reports it as an escape.
     pub(crate) sampled: Option<u64>,
+    /// Every page the waves run read a byte of, ascending, by guest address: what a dispatch's
+    /// global loads' buffer holds where every wave ran ([`crate::global_pages`]). Empty for a
+    /// computed access's range.
+    pub(crate) pages: Vec<u64>,
 }
 
 /// The most margin a sampled dispatch's global range has on each side beyond what its waves read
@@ -1047,7 +1052,7 @@ fn with_margin(read: (u64, u64), memory: &impl GuestMemory) -> (u64, u64) {
         return read;
     }
     let mapped = |(address, bytes): (u64, u64)| {
-        usize::try_from(bytes).is_ok_and(|bytes| memory.read(address, bytes).is_some())
+        usize::try_from(bytes).is_ok_and(|bytes| memory.mapped(address, bytes))
     };
     let end = read.0 + read.1;
     let low = read.0.saturating_sub(margin);
@@ -1108,6 +1113,15 @@ fn global_range_within(
     };
     let waves_per_group = u64::from(inputs.waves(width));
     let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * waves_per_group;
+    // A sample of a dispatch too large to run whole is device-addressed instead, where the backend
+    // offers it (D981).
+    if runs > MOST_DISPATCH_WAVES && !crate::device_addressed::host_runs_allowed() {
+        return Err(format!(
+            "its global loads' range: {}",
+            crate::device_addressed::HOST_RUN_PASSED
+        )
+        .into());
+    }
     let (entries, sampled) = if runs > MOST_DISPATCH_WAVES {
         let chosen = sampled_groups(groups, waves_per_group, MOST_DISPATCH_WAVES);
         let count = chosen.len() as u64;
@@ -1127,6 +1141,8 @@ fn global_range_within(
     };
     // The span every wave reads, folded wave by wave: a long loop's addresses are many.
     let mut span: Option<(u64, u64)> = None;
+    // And every page they read a byte of.
+    let mut pages = std::collections::BTreeSet::new();
     // The steps every wave shares, the model's and the native run's each (D951).
     let (allowed, allowed_native) = (steps, native);
     let waves = entries.len();
@@ -1170,6 +1186,7 @@ fn global_range_within(
                 return Err(format!("{why}; {}", wave_entry(user_data.len(), inputs)).into());
             }
         };
+        note_pages(global, &addresses, &mut pages);
         let (first, bytes) = span_of(global, addresses);
         if bytes > 0 {
             let end = first + bytes;
@@ -1185,7 +1202,36 @@ fn global_range_within(
         },
         read,
         sampled,
+        pages: pages.into_iter().collect(),
     })
+}
+
+/// Adds to `pages` every page a load's lanes read a byte of: from the word each address is in to
+/// the end of the word its last byte is in, as [`span_of`] counts them.
+fn note_pages(
+    global: &GlobalLoads,
+    found: &orbistoun_translate::evaluate::LaneAddresses,
+    pages: &mut std::collections::BTreeSet<u64>,
+) {
+    for (at, addresses) in found {
+        let reads = global
+            .loads
+            .iter()
+            .find(|&&(load, _)| load == *at)
+            .map_or(16, |&(_, bytes)| u64::from(bytes));
+        let words = |address: u64| {
+            let first = address & !3;
+            (
+                first,
+                (address.saturating_add(reads).saturating_add(3) & !3) - first,
+            )
+        };
+        if let Some(held) =
+            crate::global_pages::GlobalPages::of(0, addresses.iter().map(|&a| words(a)))
+        {
+            pages.extend(held.pages);
+        }
+    }
 }
 
 /// Every wave of a dispatch of `groups` workgroups as the hardware starts it (D883), group by group
@@ -1608,6 +1654,7 @@ pub(crate) fn sampled_reached_range(
         range: if within(widened) { widened } else { read },
         read,
         sampled: reached.sampled,
+        pages: Vec::new(),
     })
 }
 
@@ -2517,6 +2564,7 @@ mod tests {
                 range: (0x7_0000_1000, 0x1a0),
                 read: (0x7_0000_1000, 0x1a0),
                 sampled: None,
+                pages: vec![0x7_0000_1000],
             })
         );
         // A refusal says what the run seeded each wave with, so a register past it reads as one the
@@ -2561,6 +2609,67 @@ mod tests {
         // Group 4999's thread 103 reads the last byte, 0x1523 past the base.
         assert_eq!(sampled.read, (0x7_0000_1000, 0x1524));
         assert!(sampled.sampled.is_some_and(|groups| groups < 5000));
+    }
+
+    /// A global load through a pointer each lane loaded from a buffer binds what every lane's
+    /// pointer reaches, as Grand Theft Auto V's compute program at 0x3cf9d00 loads each object's
+    /// pointer at its thread's index and reads the object: the index each lane loads at is in the
+    /// address's slice, so the run computes it rather than leaving it zero, which read lane zero's
+    /// pointer in every lane and bound one object.
+    #[test]
+    fn a_global_load_through_loaded_pointers_binds_every_lanes_object() {
+        use orbistoun_shader::EncodingTable;
+        use orbistoun_translate::draw_buffers::GlobalLoads;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        const TABLE: u64 = 0x1000;
+        const OBJECTS: u64 = 0x2000;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let (family, opcode) = encodings
+            .find_by_name("v_lshlrev_b32_e32")
+            .expect("v_lshlrev_b32_e32");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        let global = GlobalLoads {
+            prefix: vec![
+                // v_lshlrev_b32 v5, 3, v0: each lane's byte in the table.
+                encoding.value | (opcode << encoding.opcode.shift) | (5 << 17) | 0x83,
+                // buffer_load_dwordx2 v[2:3], v5, s[4:7], 0 offen.
+                0xe034_1000,
+                0x8001_0205,
+                // s_waitcnt vmcnt(0).
+                0xbf8c_3f70,
+                // global_load_dword v4, v[2:3], off.
+                0xdc30_8000,
+                0x047d_0002,
+            ],
+            loads: vec![(16, 4)],
+            first_register: 0,
+            user_data: 8,
+            width: 64,
+        };
+        let inputs = ComputeInputs {
+            thread_id_components: 1,
+            threads: [64, 1, 1],
+            ..ComputeInputs::default()
+        };
+        // Lane i's pointer, at byte 8i of the table, is to the object 0x40 bytes after lane i - 1's.
+        let mut bytes = vec![0u8; 0x3000];
+        for lane in 0..64 {
+            let pointer = OBJECTS + lane * 0x40;
+            let at = usize::try_from(lane * 8).expect("small");
+            bytes[at..at + 8].copy_from_slice(&pointer.to_le_bytes());
+        }
+        let memory = At(TABLE, bytes);
+        let user_data = [0, 0, 0, 0, TABLE as u32, 0, 64 * 8, RAW];
+        let found =
+            super::dispatch_global_range(&global, (&user_data, inputs, [1, 1, 1], 64), &memory)
+                .expect("every lane's pointer is known");
+        // Lane 63's object, 0xfc0 past lane 0's, holds the last word read.
+        assert_eq!(found.range, (OBJECTS, 0xfc4));
+        assert_eq!(found.pages, [OBJECTS]);
     }
 
     /// A dispatch of far more waves than a preparation runs, whose global loads index a table by

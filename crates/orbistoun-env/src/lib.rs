@@ -268,7 +268,7 @@ pub const DUMP_IMAGE: Var = Var {
 pub const CAPTURE_DISPATCH: Var = Var {
     name: "ORBISTOUN_CAPTURE_DISPATCH",
     kind: Kind::Diagnostic,
-    summary: "a comma-separated list of compute program guest addresses: each one's first dispatch is written to dispatch-<addr>/ in ORBISTOUN_FRAME_DIR before it is submitted, for orbistoun-cli replay-dispatch; <addr>:all writes each of its first 32 dispatches to dispatch-<addr>-<n>/",
+    summary: "a comma-separated list of compute program guest addresses: each one's first dispatch is written to dispatch-<addr>/ in ORBISTOUN_FRAME_DIR before it is submitted (a device-addressed one after it runs, with every guest chunk it reached as it was before), for orbistoun-cli replay-dispatch; <addr>:all writes each of its first 32 dispatches to dispatch-<addr>-<n>/",
     example: "0x400003ce6000:all,0x400003dc3400",
     effect: Effect::Observes,
     read_by: "orbistoun-gpu-vulkan",
@@ -462,6 +462,37 @@ pub const PASS_REFUSED: Var = Var {
     example: "1",
     read_by: "orbistoun-worker",
     effect: Effect::Intervenes,
+};
+
+/// Cut a guest dispatch's loop sooner than the cap.
+///
+/// A dispatch's invocation leaves a loop for the program's end once its backward jumps pass
+/// `control::LOOP_CAP`, 2^20, and the dispatch is refused naming the loop (D949). Where each trip is
+/// slow, the device's watchdog takes the device before the cap is reached, and the run ends naming
+/// only the last submissions. A smaller cap cuts the loop first: a refusal naming the loop says it
+/// was the loop that ran on; a lost device again says the trips, not their count, cost the time.
+pub const LOOP_CAP: Var = Var {
+    name: "ORBISTOUN_LOOP_CAP",
+    kind: Kind::Diagnostic,
+    summary: "cut a dispatch's loop after this many backward jumps instead of 2^20 - which loop did the lost device run?",
+    example: "4096",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
+
+/// Lay out every guest program's control flow as the dispatch loop.
+///
+/// A program's blocks are emitted as the selections and loops they form where its flow nests, and
+/// as arms of one switch on a program counter only where it does not (D972). `dispatch` takes the
+/// switch for every program, so a difference in what a dispatch computes, or in how long the driver
+/// takes to compile it, can be put on the layout.
+pub const CONTROL_FLOW: Var = Var {
+    name: "ORBISTOUN_CONTROL_FLOW",
+    kind: Kind::Diagnostic,
+    summary: "lay out every shader's control flow as one switch in a loop - does the structured layout change what it computes?",
+    example: "dispatch",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
 };
 
 /// Fill the guest stack before entering.
@@ -989,6 +1020,8 @@ pub const REGISTRY: &[Var] = &[
     DLSYM_STUBS,
     FLIP_TO_ALL,
     PASS_REFUSED,
+    LOOP_CAP,
+    CONTROL_FLOW,
     STACK_FILL,
     DIRECT_FILL,
     HOST_LACKS,
@@ -1096,6 +1129,8 @@ mod tests {
         super::DLSYM_STUBS,
         super::FLIP_TO_ALL,
         super::PASS_REFUSED,
+        super::LOOP_CAP,
+        super::CONTROL_FLOW,
         super::STACK_FILL,
         super::DIRECT_FILL,
         super::HOST_LACKS,

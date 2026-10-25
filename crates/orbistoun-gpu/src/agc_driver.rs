@@ -1589,6 +1589,20 @@ pub fn install_dispatch_executor(executor: DispatchExecutor) {
 /// its queue (D896): `ORBISTOUN_PASS_REFUSED`, an intervention.
 static PASS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static LOOP_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the backward jumps a dispatch's invocation takes before its loop is cut (D949), where a run
+/// asks for fewer than the cap: zero keeps the cap.
+pub fn set_loop_cap(cap: u32) {
+    LOOP_CAP.store(cap, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The backward jumps a run asked a dispatch's loop be cut at, zero for the cap (D949).
+#[must_use]
+pub fn loop_cap() -> u32 {
+    LOOP_CAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Sets whether a refused dispatch or draw segment is passed over (D896).
 pub fn set_pass_refused(pass: bool) {
     PASS_REFUSED.store(pass, std::sync::atomic::Ordering::Relaxed);
@@ -1711,6 +1725,41 @@ fn refuse_inexact(
     Ok(())
 }
 
+/// Tells every cache of guest memory that a device-addressed dispatch may have written `ranges`
+/// (D964): a device store passes the host's write-watch and page protection by. Each range is
+/// treated as a host write there: a protected target's trust is dropped (D720) and the write-watch
+/// notes its pages written (D824).
+fn note_device_writes(ranges: Vec<(u64, u64)>) {
+    for (base, len) in ranges {
+        unprotect_overlapping(base, len);
+        orbistoun_mem::watch::note_written(base, len);
+    }
+}
+
+/// What a device-addressed dispatch's run says of its exactness (D964): a loop cut stands, since
+/// what the dispatch wrote is then not the guest's; an access no mapping held read zero and stored
+/// nothing, where the hardware would fault, and is reported rather than refused - what the
+/// dispatch stored is in guest memory already, and refusing it would undo none of it.
+fn device_addressed_exactness(
+    prepared: &crate::pipeline::PreparedDispatch,
+    (escaped, loop_cut): (bool, Option<u32>),
+) -> (bool, Option<u32>) {
+    if escaped && let Some(branch) = loop_cut {
+        // A loop that polls memory nothing maps reads zero for ever: the escape is then the
+        // likelier cause of the cut than the guest's own loop (D968).
+        tracing::warn!(
+            "the device-addressed dispatch of the program at {:#x} cut the loop at +{branch:#x} and reached guest memory no mapping holds: a loop waiting on a word nothing maps never sees it change (D964, D968)",
+            prepared.program
+        );
+    } else if escaped {
+        tracing::debug!(
+            "the device-addressed dispatch of the program at {:#x} reached guest memory no mapping holds (D964)",
+            prepared.program
+        );
+    }
+    (false, loop_cut)
+}
+
 /// Why a dispatch of the compute program at `program` is refused when its module cut the loop
 /// closed by the backward branch at byte `branch` (D949), naming the guest ranges it bound by slot,
 /// `buffers`: what the loop read is there, for `ORBISTOUN_SAVE` to keep.
@@ -1727,7 +1776,10 @@ fn loop_cut_refusal(program: u64, branch: u32, buffers: &[(u64, u64)]) -> String
         ),
         branch,
         program,
-        orbistoun_translate::control::LOOP_CAP,
+        match loop_cap() {
+            0 => orbistoun_translate::control::LOOP_CAP,
+            asked => asked,
+        },
         if bound.is_empty() {
             "none".to_owned()
         } else {
@@ -2325,6 +2377,58 @@ fn buffer_writes_into<'a>(
     Ok(fills)
 }
 
+/// The guest writes a dispatch's buffers make, from their words `before` and `after` it ran:
+/// each buffer's own ([`buffer_writes_into`]), and its global buffer's pages
+/// ([`global_page_writes`]).
+fn dispatch_buffer_writes<'a>(
+    (writes, scattered): (&mut GuestWrites, &mut Vec<Scattered<'a>>),
+    prepared: &crate::pipeline::PreparedDispatch,
+    (before, after): (
+        &[crate::dispatch::BufferBefore],
+        &'a [crate::dispatch::BufferAfter],
+    ),
+) -> Result<Vec<cp::Fill>, String> {
+    global_page_writes(writes, prepared, (before, after));
+    buffer_writes_into((writes, scattered), &written_back(prepared), before, after)
+}
+
+/// Adds to `writes` the words a dispatch's global stores changed in its global buffer's pages, each
+/// at its own page's address (D961).
+fn global_page_writes(
+    writes: &mut GuestWrites,
+    prepared: &crate::pipeline::PreparedDispatch,
+    (before, after): (
+        &[crate::dispatch::BufferBefore],
+        &[crate::dispatch::BufferAfter],
+    ),
+) {
+    let Some(pages) = &prepared.global_pages else {
+        return;
+    };
+    if let (Some(crate::dispatch::BufferBefore::Words(was)), Some(now)) =
+        (before.get(pages.slot), after.get(pages.slot))
+    {
+        for (address, words) in pages.changed_runs((was, &now.words)) {
+            writes.push_words(address, words, usize::MAX);
+        }
+    }
+}
+
+/// The guest range each of a dispatch's buffers writes back to, by slot: its own, but none for the
+/// global buffer, whose words are pages behind a table rather than its span's, and whose changes
+/// [`global_page_writes`] finds (D961).
+fn written_back(prepared: &crate::pipeline::PreparedDispatch) -> Vec<(u64, u64)> {
+    prepared
+        .buffers
+        .iter()
+        .enumerate()
+        .map(|(slot, &(address, bytes))| match &prepared.global_pages {
+            Some(global) if global.slot == slot => (address, 0),
+            _ => (address, bytes),
+        })
+        .collect()
+}
+
 /// Each of a dispatch's own buffers its run left holding one word throughout, as the fill it
 /// amounts to (D750): what a buffer clear leaves, whether or not memory held it already. radeonsi
 /// clears a depth surface's HTILE this way, and the clear is a clear even where the words were
@@ -2393,16 +2497,33 @@ fn readable_words(span: usize, readable: impl Fn(usize) -> bool) -> usize {
 
 impl GuestCp<'_> {
     /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746) -
-    /// except one the program only stores to, which is not read (D809).
+    /// except one the program only stores to, which is not read (D809), and the global loads'
+    /// buffer, which holds the pages they read (D883).
     fn read_buffers(
         &self,
-        ranges: &[(u64, u64)],
-        (unread, aliases): (&[bool], &[crate::pipeline::SharedBuffer]),
+        prepared: &crate::pipeline::PreparedDispatch,
     ) -> Result<Vec<crate::dispatch::BufferBefore>, String> {
-        ranges
+        let (unread, aliases) = (&prepared.unread, &prepared.aliases);
+        let global = prepared.global_pages.as_ref();
+        prepared
+            .buffers
             .iter()
             .enumerate()
             .map(|(slot, &(address, bytes))| {
+                // The global loads' buffer holds the pages they read, behind its table (D883).
+                if let Some(global) = global.filter(|global| global.slot == slot) {
+                    let page = usize::try_from(crate::global_pages::PAGE).unwrap_or(usize::MAX);
+                    return Ok(crate::dispatch::BufferBefore::Words(global.buffer_words(
+                        |at| {
+                            cp::CpMemory::read(self, at, page).map(|bytes| {
+                                bytes
+                                    .chunks_exact(4)
+                                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                                    .collect()
+                            })
+                        },
+                    )));
+                }
                 // The same range as another slot, or part of one it shares (D937, D953), binds
                 // that slot's buffer.
                 if let Some(&Some((holder, offset))) = aliases.get(slot) {
@@ -2487,9 +2608,11 @@ impl GuestCp<'_> {
         read: impl FnOnce(&[crate::registers::RegisterWrite]) -> Result<T, String>,
     ) -> Result<T, String> {
         let walked = crate::packet::walk(stream);
-        let live = live_pipeline()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
+            live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let pipeline = live.as_ref().ok_or("no pipeline is live")?;
         let (writes, _) = match self.submission {
             Some(whole) => pipeline.writes_as_submitted(whole, &walked, stream, Some(&self.memory)),
@@ -2504,16 +2627,80 @@ impl GuestCp<'_> {
         &self,
         state: &crate::dispatch::DispatchState,
     ) -> Result<crate::pipeline::PreparedDispatch, String> {
-        let mut live = live_pipeline()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut live = crate::perf::span(crate::perf::Span::LivePipelineWait, || {
+            live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+        let device = crate::dispatch::DispatchState {
+            inputs: orbistoun_translate::wavefront::ComputeInputs {
+                device_addressed: true,
+                ..state.inputs
+            },
+            ..state.clone()
+        };
+        // A program the host trace could not follow before, and which was prepared device-addressed
+        // then, is prepared so from the start: its trace runs every group and wave of the dispatch
+        // only to end in the same refusal (D970).
+        let program = self
+            .memory
+            .read(state.program, crate::device_addressed::PROGRAM_KEY_BYTES)
+            .map(<[u8]>::to_vec);
+        let remembered = program.as_deref().is_some_and(|bytes| {
+            crate::device_addressed::goes_device_addressed(state.program, bytes)
+        });
+        if remembered && !state.inputs.device_addressed && crate::device_addressed::offered() {
+            return pipeline.prepare_dispatch(&device, &SettledReads(&self.memory));
+        }
+        // One whose device-addressed preparation was refused runs its host runs from the start
+        // (D981).
+        if program
+            .as_deref()
+            .is_some_and(|bytes| crate::device_addressed::needs_host_runs(state.program, bytes))
+        {
+            return crate::device_addressed::allowing_host_runs(|| {
+                pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
+            });
+        }
         // Read as a draw segment's tables are: a frame a draw left on the device, held or deferred
         // onto its target's pages (D719, D885), is carried out before its texels are read. Read
         // raw, a compute pass over a target drawn earlier in the frame reads what the target held
         // before - Grand Theft Auto V's chain from a 640x360 target into its ray-tracing tile
         // classifier read zeros at every step, so the ray-traced passes were handed no work.
-        pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
+        let prepared = pipeline.prepare_dispatch(state, &SettledReads(&self.memory));
+        // A dispatch whose ranges the host cannot know before it runs reaches guest memory by
+        // device address instead, where the backend maps it (D964). Its module carries the control
+        // flow the host trace could not follow; the trace's refusal is named first, then the
+        // device-addressed preparation's own where that fails too.
+        match prepared {
+            Err(why)
+                if !state.inputs.device_addressed
+                    && crate::device_addressed::offered()
+                    && crate::device_addressed::host_cannot_know(&why) =>
+            {
+                let prepared = pipeline
+                    .prepare_dispatch(&device, &SettledReads(&self.memory))
+                    .map_err(|again| format!("{why}; device-addressed (D964): {again}"));
+                // A host run passed over for a device-addressed preparation that is refused is run
+                // after all, and from the start for the program's later dispatches (D981).
+                if prepared.is_err() && why.contains(crate::device_addressed::HOST_RUN_PASSED) {
+                    if let Some(bytes) = &program {
+                        crate::device_addressed::remember_host_runs(state.program, bytes);
+                    }
+                    return crate::device_addressed::allowing_host_runs(|| {
+                        pipeline.prepare_dispatch(state, &SettledReads(&self.memory))
+                    });
+                }
+                if prepared.is_ok()
+                    && let Some(bytes) = &program
+                {
+                    crate::device_addressed::remember_device_addressed(state.program, bytes);
+                }
+                prepared
+            }
+            prepared => prepared,
+        }
     }
 
     /// Carries out a segment's streamout draws (D861): each `DRAW_INDEX_AUTO` as its legacy vertex
@@ -2594,6 +2781,33 @@ impl GuestCp<'_> {
         self.run_prepared(&|cp: &Self| cp.prepare_dispatch(dispatch))
     }
 
+    /// What a dispatch reads before it runs: the guest words its window covers, at the window's
+    /// address, and its buffers as they are now. A program with no buffer runs over one word
+    /// nobody reads, and writes nothing back there.
+    fn read_dispatch(
+        &self,
+        prepared: &crate::pipeline::PreparedDispatch,
+    ) -> Result<DispatchRead, String> {
+        let window = match prepared.window {
+            Some(window) => {
+                let span = window.words() as usize * 4;
+                let bytes = cp::CpMemory::read(self, window.address(), span)
+                    .ok_or("its window is not readable guest memory")?;
+                let words: Vec<u32> = bytes
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect();
+                (Some(window.address()), words)
+            }
+            None => (None, vec![0]),
+        };
+        // Named with its program, so the listing of the code that formed the range is found.
+        let buffers = self
+            .read_buffers(prepared)
+            .map_err(|why| format!("{why}, in the program at {:#x}", prepared.program))?;
+        Ok((window, buffers))
+    }
+
     /// Runs the dispatch `prepare` makes over guest memory as it holds it now, and writes back
     /// exactly the words it changed. Nothing is written unless the whole dispatch ran exactly.
     fn run_prepared(
@@ -2620,28 +2834,13 @@ impl GuestCp<'_> {
             }
             prepared = prepare(self)?;
         }
-        let ((base, before), buffers_before) = span(Span::DispatchRead, || {
-            // A program with no buffer runs over one word nobody reads, and writes nothing back
-            // there.
-            let window = match prepared.window {
-                Some(window) => {
-                    let span = window.words() as usize * 4;
-                    let bytes = cp::CpMemory::read(self, window.address(), span)
-                        .ok_or("its window is not readable guest memory")?;
-                    let words: Vec<u32> = bytes
-                        .chunks_exact(4)
-                        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                        .collect();
-                    (Some(window.address()), words)
-                }
-                None => (None, vec![0]),
-            };
-            // Named with its program, so the listing of the code that formed the range is found.
-            let buffers = self
-                .read_buffers(&prepared.buffers, (&prepared.unread, &prepared.aliases))
-                .map_err(|why| format!("{why}, in the program at {:#x}", prepared.program))?;
-            Ok::<_, String>((window, buffers))
-        })?;
+        // A device-addressed dispatch reads guest memory anywhere, as it lies: every frame and
+        // deferred copy still owed to guest memory goes in first (D964).
+        if prepared.device_addressed {
+            self.settle_everything()?;
+        }
+        let ((base, before), buffers_before) =
+            span(Span::DispatchRead, || self.read_dispatch(&prepared))?;
         // For a backend's diagnostics, which see only the words.
         crate::bound_ranges::note(
             prepared.module_hash,
@@ -2657,6 +2856,14 @@ impl GuestCp<'_> {
             )
         })?;
         let _written_back = crate::perf::SpanGuard::start(Span::DispatchWriteBack);
+        // What a device-addressed dispatch stored is in guest memory already: every cache of it
+        // learns so before anything else is decided, whatever the dispatch is then found to be.
+        let exactness = if prepared.device_addressed {
+            note_device_writes(crate::device_addressed::take_written());
+            device_addressed_exactness(&prepared, exactness)
+        } else {
+            exactness
+        };
         refuse_inexact(&prepared, exactness)?;
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
@@ -2676,11 +2883,10 @@ impl GuestCp<'_> {
         }
         let mut scattered = Vec::new();
         let buffer_fills = span(Span::ChangesBuffers, || {
-            buffer_writes_into(
+            dispatch_buffer_writes(
                 (&mut writes, &mut scattered),
-                &prepared.buffers,
-                &buffers_before,
-                &buffers_after,
+                &prepared,
+                (&buffers_before, &buffers_after),
             )
         })?;
         let images = span(Span::ChangesImages, || {
@@ -2698,7 +2904,7 @@ impl GuestCp<'_> {
         );
         writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
-        let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
+        let fills = uniform_buffers(&written_back(&prepared), (&buffers_before, &buffers_after));
         if !fills.is_empty()
             && let Some(pipeline) = live_pipeline()
                 .lock()
@@ -2710,6 +2916,9 @@ impl GuestCp<'_> {
         Ok(())
     }
 }
+
+/// What a dispatch reads before it runs: its window's address and words, and its buffers.
+type DispatchRead = ((Option<u64>, Vec<u32>), Vec<crate::dispatch::BufferBefore>);
 
 /// Answers the frame the executor's last draws left on the target, as linear `Rgba8` words - read
 /// off the device when the frame is written back (D714). Installed by the worker with the executor.
@@ -4952,6 +5161,19 @@ impl GuestCp<'_> {
         true
     }
 
+    /// The frame pending on the device written back (D714), as [`Self::settle_pending`] does for
+    /// one range - here for all of guest memory - and every deferred copy carried out, before a
+    /// device-addressed dispatch reads guest memory anywhere (D964).
+    fn settle_everything(&mut self) -> Result<(), String> {
+        if pending_target().is_some() && !write_back_pending(self) {
+            return Err("the frame pending on the device could not be written back".to_owned());
+        }
+        if !carry_out_overlapping(0, u64::MAX) {
+            return Err("a deferred copy into guest memory could not be carried out".to_owned());
+        }
+        Ok(())
+    }
+
     /// Memory work that touches a target whose frame is still on the device writes that frame back
     /// first (D714): deferring to the flip holds only while nothing else looks at the target, and a
     /// GL context copies its colour target into a readback buffer after each submission. `false`
@@ -5763,15 +5985,17 @@ struct SettledReads<'m>(&'m MappedRegions);
 
 impl GuestMemory for SettledReads<'_> {
     fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
-        let span = length as u64;
-        command_processor::settle_over(address, span);
-        // Settled as a flip settles it - deferred onto the target's own pages where it can be
-        // (D719) - and then carried out by this read, with any other copy over it.
-        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, span)) {
-            let _ = write_back_at_this_flip();
-        }
-        carry_out_overlapping(address, span);
-        self.0.read(address, length)
+        crate::perf::span(crate::perf::Span::SettledRead, || {
+            let span = length as u64;
+            command_processor::settle_over(address, span);
+            // Settled as a flip settles it - deferred onto the target's own pages where it can be
+            // (D719) - and then carried out by this read, with any other copy over it.
+            if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, span)) {
+                let _ = write_back_at_this_flip();
+            }
+            carry_out_overlapping(address, span);
+            self.0.read(address, length)
+        })
     }
 }
 

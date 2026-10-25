@@ -338,6 +338,7 @@ mod tests {
             memory: Vec::new(),
             escaped: false,
             loop_cut: None,
+            escaped_page: None,
             stored: Vec::new(),
             buffers: vec![out(left.clone()), out(left)],
         };
@@ -419,6 +420,7 @@ mod tests {
             memory: vec![1, 9, 9, 4],
             escaped: false,
             loop_cut: None,
+            escaped_page: None,
             stored: Vec::new(),
             buffers: vec![
                 out(vec![5, 0, 7, 0]),

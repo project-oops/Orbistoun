@@ -34,6 +34,9 @@ fn a_captured_dispatch_replays_alone_with_the_same_output() {
         ],
         ranges: BoundRanges::default(),
         ordinal: None,
+        source: None,
+        guest: Vec::new(),
+        guest_before: true,
     };
     capture.write_to(&dir).expect("the capture was written");
     let out = dir.join("out");

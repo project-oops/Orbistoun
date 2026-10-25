@@ -27,6 +27,7 @@ mod shaders;
 mod status;
 mod submit;
 mod system;
+mod trace;
 mod turn;
 mod worklist;
 
@@ -806,7 +807,9 @@ enum Command {
     Lanes,
     /// Measure what each kept shader program of a title costs this build, without running it: its
     /// translation's size against its guest instructions, and with `--compile` the driver's compile
-    /// time. Ranked by compile time and by words, with totals.
+    /// time. Ranked by compile time and by words, with totals. With `--validate`, every module is
+    /// also run through `spirv-val` for Vulkan 1.3, each invalid one listed, and the exit status
+    /// says whether any was.
     ShaderCensus {
         /// The title whose kept translations to measure; every title's when omitted.
         title: Option<String>,
@@ -814,6 +817,10 @@ enum Command {
         /// module's whole pipeline, a draw's shader module alone.
         #[arg(long)]
         compile: bool,
+        /// Validate each module with `spirv-val` (`ORBISTOUN_SPIRV_VAL`, the SDK `VULKAN_SDK`
+        /// names, or `PATH`), and fail where any is invalid.
+        #[arg(long)]
+        validate: bool,
         /// Rows each ranking shows.
         #[arg(long, default_value_t = 10)]
         top: usize,
@@ -832,6 +839,63 @@ enum Command {
         repeat: u32,
         /// A directory to write what the last run left into: the window and each buffer, named as
         /// the capture names them, to compare with another dispatch's inputs.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Run one wave of a captured guest dispatch on the host interpreter.
+    ///
+    /// The host and the translator are two implementations of the instruction set: from the same
+    /// registers and memory, a word they store differently names the store, and `--points` shows
+    /// the registers each instruction left, to find the one that computed something else. A group
+    /// that is one wave has its local data share modelled exactly.
+    TraceDispatch {
+        /// The capture's directory, `dispatch-<addr>` where the run keeps its frames.
+        dir: std::path::PathBuf,
+        /// The title whose kept translations hold the captured module: its program, and the
+        /// context it was translated under, which `--device` translates it again in.
+        #[arg(long)]
+        kept: Option<String>,
+        /// The guest program's bytes, from its first instruction, where no title is named.
+        #[arg(long)]
+        program: Option<std::path::PathBuf>,
+        /// How many of the push words are user data, in `s0` upward, where no title is named; the
+        /// group id follows them.
+        #[arg(long)]
+        user_words: Option<usize>,
+        /// Which group's first wave to run.
+        #[arg(long, default_value_t = 0)]
+        group: u32,
+        /// A `replay-dispatch --out` directory of the same capture, to compare stores with.
+        #[arg(long)]
+        against: Option<std::path::PathBuf>,
+        /// Print each instruction run with the registers it changed: the scalars, and the vector
+        /// registers of `--lane`.
+        #[arg(long)]
+        points: bool,
+        /// The lane whose vector registers `--points` shows.
+        #[arg(long, default_value_t = 0)]
+        lane: u32,
+        /// Run a group of this many threads instead of the module's `LocalSize`: what the dispatch
+        /// would store had the device run that many lanes.
+        #[arg(long)]
+        threads: Option<u32>,
+        /// Translate the program again under its kept context, run it on the device over the
+        /// capture's inputs, and compare every word the two store.
+        #[arg(long)]
+        device: bool,
+        /// Stop the program at the instruction at this byte, on both: it becomes a branch to the
+        /// end, so every instruction is still translated and the buffers bind as captured.
+        #[arg(long, value_parser = parse_address)]
+        stop_at: Option<u64>,
+        /// Replace the instruction at one byte by a branch to another, `from:to`, on both: to run an
+        /// existing store as a probe of the registers it reads. Repeatable.
+        #[arg(long = "jump", value_parser = parse_jump)]
+        jumps: Vec<(u32, u32)>,
+        /// Write words over the program at a byte, `at=word,word`, on both: an instruction replaced
+        /// by others of its length, its control flow left as it was. Repeatable.
+        #[arg(long = "patch", value_parser = parse_patch)]
+        patches: Vec<(u32, Vec<u32>)>,
+        /// Where `--device` writes what the device left, named as `replay-dispatch --out` names it.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
@@ -1080,6 +1144,35 @@ impl From<KnownBy> for orbistoun_hle::knowledge::Oracle {
 }
 
 /// Parses an address in decimal or `0x`-prefixed hex.
+/// An `at=word,word` patch: a program byte and the words to write there, each as [`parse_address`]
+/// reads it.
+fn parse_patch(text: &str) -> Result<(u32, Vec<u32>), String> {
+    let (at, words) = text
+        .split_once('=')
+        .ok_or_else(|| format!("{text:?} is not at=word,word"))?;
+    let number = |text: &str| {
+        parse_address(text)
+            .and_then(|value| u32::try_from(value).map_err(|e| format!("{text:?}: {e}")))
+    };
+    let words = words
+        .split(',')
+        .map(number)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((number(at)?, words))
+}
+
+/// A `from:to` pair of program bytes, each as [`parse_address`] reads it.
+fn parse_jump(text: &str) -> Result<(u32, u32), String> {
+    let (from, to) = text
+        .split_once(':')
+        .ok_or_else(|| format!("{text:?} is not from:to"))?;
+    let byte = |text: &str| {
+        parse_address(text)
+            .and_then(|value| u32::try_from(value).map_err(|e| format!("{text:?}: {e}")))
+    };
+    Ok((byte(from)?, byte(to)?))
+}
+
 fn parse_address(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let parsed = t.strip_prefix("0x").map_or_else(
@@ -1120,6 +1213,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Lanes
         | Command::ShaderCensus { .. }
         | Command::ReplayDispatch { .. }
+        | Command::TraceDispatch { .. }
         | Command::Verify { .. }
         | Command::Report { .. }
         | Command::Load { .. }
@@ -1248,12 +1342,44 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::ShaderCensus {
             title,
             compile,
+            validate,
             top,
             write,
-        } => cmd_shader_census(title.as_deref(), compile, top, write.as_deref())?,
+        } => cmd_shader_census(title.as_deref(), (compile, validate), top, write.as_deref())?,
         Command::ReplayDispatch { dir, repeat, out } => {
             cmd_replay_dispatch(&dir, repeat, out.as_deref())?;
         }
+        Command::TraceDispatch {
+            dir,
+            kept,
+            program,
+            user_words,
+            group,
+            against,
+            points,
+            lane,
+            threads,
+            device,
+            stop_at,
+            jumps,
+            patches,
+            out,
+        } => trace::cmd_trace_dispatch(&trace::TraceRequest {
+            dir: &dir,
+            program: program.as_deref(),
+            kept: kept.as_deref(),
+            user_words,
+            group,
+            against: against.as_deref(),
+            out: out.as_deref(),
+            points,
+            lane,
+            threads,
+            device,
+            stop_at: stop_at.map(u32::try_from).transpose()?,
+            jumps,
+            patches,
+        })?,
         Command::Verify { path } => cmd_verify(service, &path)?,
         Command::Report { path } => cmd_report(service, &path)?,
         Command::Load { path, base } => cmd_load(service, &path, base)?,

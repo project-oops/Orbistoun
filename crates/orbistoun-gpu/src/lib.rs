@@ -17,10 +17,12 @@ pub mod cp;
 pub mod dcc;
 pub mod depth;
 pub mod detiled;
+pub mod device_addressed;
 pub mod dispatch;
 pub mod display;
 pub mod draw_buffers;
 pub mod formats;
+pub mod global_pages;
 pub mod memory_watch;
 pub mod msaa;
 pub mod packet;
@@ -36,7 +38,12 @@ pub mod swizzle;
 pub mod tally;
 pub mod tessellation;
 pub mod tiling;
+pub mod translation_source;
 pub mod translations;
+
+/// Lays out every program's control flow as structure where it nests (`true`, the default), or as
+/// the dispatch loop, for the process (D972).
+pub use orbistoun_translate::structured::set_enabled as set_structured_control_flow;
 #[cfg(test)]
 mod translator_inputs;
 

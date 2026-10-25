@@ -5,23 +5,36 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Result, bail};
 use orbistoun_gpu::shader_census::{self, Compiled, MOST_THREADS, Program, Row};
 use orbistoun_shader::{EncodingTable, OperandTable};
+use orbistoun_spirv::validator::Validation;
 
 /// Translates every program `title`'s store keeps - every title's when none is named - again,
-/// compiles each where `compile` asks, prints the summary and the `top` of each ranking, and writes
-/// every row as TSV to `write`.
+/// compiles each where `compile` asks and validates each where `validate` does, prints the summary
+/// and the `top` of each ranking, and writes every row as TSV to `write`. Fails where any module is
+/// invalid, after reporting them all.
 pub(crate) fn cmd_shader_census(
     title: Option<&str>,
-    compile: bool,
+    (compile, validate): (bool, bool),
     top: usize,
     write: Option<&std::path::Path>,
 ) -> Result<()> {
     let paths = orbistoun_paths::Paths::resolve();
+    // Laid out as a run would lay them out (D972).
+    orbistoun_translate::structured::set_enabled(
+        orbistoun_env::CONTROL_FLOW.get().as_deref() != Some("dispatch"),
+    );
     let tables = (EncodingTable::builtin()?, OperandTable::builtin()?);
     if compile
         && let orbistoun_gpu_vulkan::Availability::Unavailable { reason } =
             orbistoun_gpu_vulkan::probe()
     {
         bail!("--compile needs a device: {reason}");
+    }
+    if validate && !orbistoun_spirv::validator::available() {
+        bail!(
+            "--validate needs spirv-val: none at {} (set {} or VULKAN_SDK)",
+            orbistoun_spirv::validator::validator().display(),
+            orbistoun_spirv::validator::VALIDATOR_VARIABLE
+        );
     }
     let titles = if let Some(title) = title {
         vec![title.to_owned()]
@@ -39,6 +52,14 @@ pub(crate) fn cmd_shader_census(
     let time: &(dyn Fn(&Program<'_>) -> Compiled + Sync) =
         &orbistoun_gpu_vulkan::shader_census::time_compile;
     let measure = compile.then_some(time);
+    // A module the validator could not be asked about is not passed: it is reported with why.
+    let validator: &shader_census::Validate<'_> =
+        &|module| match orbistoun_spirv::validator::validate(module) {
+            Validation::Valid => None,
+            Validation::Invalid(message) => Some(message),
+            Validation::Unavailable(reason) => Some(format!("not validated: {reason}")),
+        };
+    let check = validate.then_some(validator);
 
     let mut rows = Vec::new();
     for title in &titles {
@@ -57,14 +78,20 @@ pub(crate) fn cmd_shader_census(
             (title, &store),
             (&tables.0, &tables.1),
             threads,
-            measure,
+            (measure, check),
             &|row| progress(made.fetch_add(1, Ordering::Relaxed) + 1, row),
         ));
     }
     print!("{}", shader_census::report(&rows, top));
+    let (structured, dispatched) = orbistoun_translate::structured::shapes();
+    println!("\nsegments: {structured} laid out as structure, {dispatched} as a dispatch loop");
     if let Some(path) = write {
         std::fs::write(path, shader_census::tsv(&rows))?;
         println!("\nwrote {} rows to {}", rows.len(), path.display());
+    }
+    let invalid = rows.iter().filter(|row| row.invalid().is_some()).count();
+    if invalid > 0 {
+        bail!("{invalid} of {} modules are invalid SPIR-V", rows.len());
     }
     Ok(())
 }
@@ -79,6 +106,13 @@ fn progress(made: usize, row: &Row) {
             row.program,
             row.words,
             seconds.map(|s| format!(", {s:.1} s")).unwrap_or_default()
+        );
+    }
+    if let Some(message) = row.invalid() {
+        eprintln!(
+            "  invalid: {:016x}: {}",
+            row.program,
+            message.lines().next().unwrap_or_default()
         );
     }
 }

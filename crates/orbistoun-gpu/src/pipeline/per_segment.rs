@@ -143,6 +143,7 @@ mod tests {
                 level_user_data: None,
                 buffer_offset: None,
                 layered: false,
+                computed: None,
             }],
         );
         let (texels, width, height) = (0x1_0000_u64, 8u32, 4u32);

@@ -18,6 +18,7 @@ pub mod compute_images;
 mod depth;
 mod device_lost;
 pub mod device_memory;
+pub mod direct;
 pub use device_lost::{device_lost, note_dispatch, on_device_lost};
 
 /// The host memory the device's buffers held for reuse or upload take, by what holds it: spare
@@ -44,7 +45,7 @@ pub mod shader_census;
 mod watch;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest,
-    dispatch_guest_hashed, dispatch_guest_with_buffers, probe,
+    dispatch_guest_hashed, dispatch_guest_with_buffers, dispatch_pushing, probe,
 };
 pub use replay::replay_dispatch;
 

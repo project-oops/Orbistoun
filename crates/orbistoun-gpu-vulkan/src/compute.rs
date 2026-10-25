@@ -49,6 +49,9 @@ pub struct Properties {
     /// depends on it: on a flushing device its subnormal tests both answer false and the scaling is
     /// skipped.
     pub subnormals_preserved: bool,
+    /// Whether 32-bit subnormal inputs and results are flushed to zero in a module that declares
+    /// they must be, as a program's `FLOAT_MODE` may ask.
+    pub subnormals_flushed: bool,
     /// Whether 32-bit signed zeros, infinities and NaNs survive a module that declares they must.
     ///
     /// Every translated module declares it; on a device without it the declaration is removed
@@ -330,13 +333,53 @@ struct BoundPipeline {
 /// Whether the device took up the float-controls guarantee, recorded when its properties are read.
 static INF_NAN_PRESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Whether the device keeps, and flushes, 32-bit subnormals as a module declares, recorded when its
+/// properties are read.
+static SUBNORMALS_PRESERVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+/// See [`SUBNORMALS_PRESERVED`].
+static SUBNORMALS_FLUSHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// A module as this device can take it: translated modules declare `SignedZeroInfNanPreserve`, and
-/// a device that does not offer it gets the module without that declaration.
+/// a device that does not offer it gets the module without that declaration. A module declaring a
+/// subnormal mode the device does not offer, as its program's `FLOAT_MODE` asks, gets the closest
+/// the device has (`orbistoun_spirv::subnormals_for`), said once for each module.
 pub(crate) fn for_this_device(words: &[u32]) -> std::borrow::Cow<'_, [u32]> {
-    if INF_NAN_PRESERVED.load(std::sync::atomic::Ordering::Relaxed) {
-        std::borrow::Cow::Borrowed(words)
-    } else {
-        std::borrow::Cow::Owned(orbistoun_spirv::without_inf_nan_preserve(words))
+    let offered = (
+        SUBNORMALS_PRESERVED.load(std::sync::atomic::Ordering::Relaxed),
+        SUBNORMALS_FLUSHED.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let mut module = std::borrow::Cow::Borrowed(words);
+    if let Some(closest) = orbistoun_spirv::subnormals_for(words, offered) {
+        note_subnormals_unhonoured(words, &closest);
+        module = std::borrow::Cow::Owned(closest);
+    }
+    if !INF_NAN_PRESERVED.load(std::sync::atomic::Ordering::Relaxed) {
+        module = std::borrow::Cow::Owned(orbistoun_spirv::without_inf_nan_preserve(&module));
+    }
+    module
+}
+
+/// Says, once for each module, that the device cannot keep or flush 32-bit subnormals as `asked`
+/// declares, and what `closest` declares instead.
+fn note_subnormals_unhonoured(asked: &[u32], closest: &[u32]) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(orbistoun_gpu::content_hash(asked)));
+    if first {
+        let wanted = orbistoun_spirv::subnormal_mode(asked)
+            .map_or("", |kept| if kept { "keep" } else { "flush" });
+        let instead = match orbistoun_spirv::subnormal_mode(closest) {
+            Some(true) => "keeps them",
+            Some(false) => "flushes them",
+            None => "leaves them to the driver",
+        };
+        tracing::warn!(
+            "this device cannot {wanted} 32-bit subnormals as a program's FLOAT_MODE asks; the module {instead}"
+        );
     }
 }
 
@@ -1044,7 +1087,7 @@ impl Session {
         // SAFETY: the handle came from enumeration on this live instance, and the chained structure
         // outlives the call.
         unsafe { instance.get_physical_device_features2(physical, &mut chained) };
-        let mut wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
+        let wanted_float16 = vk::PhysicalDeviceVulkan12Features::default()
             .shader_float16(offered_float16.shader_float16 == vk::TRUE)
             // The 64-bit buffer atomics a dispatch's `buffer_atomic_swap_x2` and `_or_x2` are.
             .shader_buffer_int64_atomics(offered_float16.shader_buffer_int64_atomics == vk::TRUE);
@@ -1055,18 +1098,10 @@ impl Session {
         // SAFETY: the handle came from enumeration on this live instance.
         let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
             .map_err(|e| ("enumerate_device_extension_properties", e))?;
-        let mesh_offered = extensions.iter().any(|extension| {
-            extension
-                .extension_name_as_c_str()
-                .is_ok_and(|name| name == ash::ext::mesh_shader::NAME)
-        });
+        let mesh_offered = names(&extensions, ash::ext::mesh_shader::NAME);
         // `VK_EXT_depth_clip_control` where the device has it: a GL guest clips z to `-w..w`, and a
         // pipeline can clip so only with it.
-        let clip_control_offered = extensions.iter().any(|extension| {
-            extension
-                .extension_name_as_c_str()
-                .is_ok_and(|name| name == ash::ext::depth_clip_control::NAME)
-        });
+        let clip_control_offered = names(&extensions, ash::ext::depth_clip_control::NAME);
         let border_offered = Self::custom_border_offered(instance, physical, &extensions);
         // `VK_EXT_device_fault` where the device has it: a lost device then says what faulted.
         let fault_offered = Self::fault_offered(instance, physical, &extensions);
@@ -1074,7 +1109,10 @@ impl Session {
         // run's memory breakdown names device memory by (`device_memory`).
         let (report_offered, budget_offered) =
             crate::device_memory::offered(instance, physical, &extensions);
-        let enabled_extensions: Vec<*const core::ffi::c_char> = [
+        let direct_offered =
+            crate::direct::offered(&extensions, &offered_float16, &wanted_features);
+        let mut wanted_float16 = wanted_float16.buffer_device_address(direct_offered);
+        let enabled_extensions = offered_names([
             (mesh_offered, ash::ext::mesh_shader::NAME.as_ptr()),
             (
                 clip_control_offered,
@@ -1087,10 +1125,11 @@ impl Session {
                 ash::ext::device_memory_report::NAME.as_ptr(),
             ),
             (budget_offered, ash::ext::memory_budget::NAME.as_ptr()),
-        ]
-        .into_iter()
-        .filter_map(|(offered, name)| offered.then_some(name))
-        .collect();
+            (
+                direct_offered,
+                ash::ext::external_memory_host::NAME.as_ptr(),
+            ),
+        ]);
         let mut wanted_mesh =
             vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(mesh_offered);
         let mut wanted_clip_control = vk::PhysicalDeviceDepthClipControlFeaturesEXT::default()
@@ -1124,6 +1163,7 @@ impl Session {
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         crate::device_memory::note_enabled(report_offered, budget_offered, (instance, physical));
+        crate::direct::note_enabled(direct_offered, (instance, physical, &device));
         if fault_offered {
             crate::device_lost::keep_fault_reader(instance, &device);
         }
@@ -1192,7 +1232,16 @@ impl Session {
                 |_| "unnamed device".to_owned(),
                 |s| s.to_string_lossy().into_owned(),
             ),
-            subnormals_preserved: float_controls.shader_denorm_preserve_float32 == vk::TRUE,
+            subnormals_preserved: {
+                let preserved = float_controls.shader_denorm_preserve_float32 == vk::TRUE;
+                SUBNORMALS_PRESERVED.store(preserved, std::sync::atomic::Ordering::Relaxed);
+                preserved
+            },
+            subnormals_flushed: {
+                let flushed = float_controls.shader_denorm_flush_to_zero_float32 == vk::TRUE;
+                SUBNORMALS_FLUSHED.store(flushed, std::sync::atomic::Ordering::Relaxed);
+                flushed
+            },
             inf_nan_preserved: {
                 let preserved =
                     float_controls.shader_signed_zero_inf_nan_preserve_float32 == vk::TRUE;
@@ -1223,6 +1272,23 @@ impl Session {
             compressed_textures: wanted_features.texture_compression_bc == vk::TRUE,
         }
     }
+}
+
+/// Whether `extensions` include the one called `name`.
+pub(crate) fn names(extensions: &[vk::ExtensionProperties], name: &core::ffi::CStr) -> bool {
+    extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str().is_ok_and(|n| n == name))
+}
+
+/// The names of the extensions offered, of each extension and whether the device offers it.
+fn offered_names<const N: usize>(
+    extensions: [(bool, *const core::ffi::c_char); N],
+) -> Vec<*const core::ffi::c_char> {
+    extensions
+        .into_iter()
+        .filter_map(|(offered, name)| offered.then_some(name))
+        .collect()
 }
 
 /// Which of the host's GPUs runs the guest's graphics and compute, as `ORBISTOUN_GPU` names it
@@ -1801,6 +1867,21 @@ pub fn dispatch(
     memory_words: usize,
     groups: [u32; 3],
 ) -> Result<Output, DispatchError> {
+    dispatch_pushing(module, (words, memory_words), &[], groups)
+}
+
+/// [`dispatch`] with `push` as the module's push constants: what a module that reaches guest
+/// memory by device address (D964) is told where it is through.
+///
+/// # Errors
+///
+/// No device, or a device that refused the module or a step of the dispatch.
+pub fn dispatch_pushing(
+    module: &[u32],
+    (words, memory_words): (usize, usize),
+    push: &[u32],
+    groups: [u32; 3],
+) -> Result<Output, DispatchError> {
     // A poisoned lock means an earlier dispatch panicked. Every handle a dispatch creates is
     // released before it returns, so the session is still sound and later dispatches proceed.
     let session = session()?;
@@ -1847,7 +1928,7 @@ pub fn dispatch(
         &binding1,
         (
             groups,
-            &[],
+            push,
             &crate::compute_images::BoundImages::none(),
             None,
         ),
@@ -1979,11 +2060,20 @@ pub struct GuestDispatch {
     /// The byte offset of the backward branch of a loop the module cut for running past its cap,
     /// where it cut one (D949); what the dispatch wrote is then not the guest's either.
     pub loop_cut: Option<u32>,
+    /// The first byte of a 64 KiB guest page a device-addressed access escaped at, the highest of
+    /// those it reached, where one did at an address it formed (D971).
+    pub escaped_page: Option<u64>,
     /// Each stored image's texels after the dispatch, in the order they were bound (D893).
     pub stored: Vec<Vec<u32>>,
     /// Each traced buffer's words after the dispatch and its write mask, by slot (D746, D809);
     /// empty when it bound none.
     pub buffers: Vec<crate::compute_buffers::BufferOut>,
+}
+
+/// The first byte of the guest page the observation's escape-page word names (D971), where it names
+/// one.
+fn escaped_page(word: u32) -> Option<u64> {
+    (word != 0).then(|| u64::from(word) << orbistoun_spirv::DISPATCH_ESCAPE_PAGE_SHIFT)
 }
 
 /// Words of the observation a guest dispatch module declares: the register-observation layout,
@@ -2043,7 +2133,11 @@ pub fn dispatch_guest_hashed(
     images: &crate::compute_images::DispatchImages<'_>,
     buffers: &[crate::compute_buffers::BufferIn<'_>],
 ) -> Result<GuestDispatch, DispatchError> {
-    crate::observed::dispatch(module, memory, (push, groups), images, buffers)
+    // A module that reaches guest memory by device address runs over the mapped runs (D964).
+    if crate::direct::addresses_directly(module.0) {
+        return crate::direct::dispatch(module, memory, (push, groups), images, buffers);
+    }
+    crate::observed::dispatch(module, memory, (push, groups), images, buffers, &[])
 }
 
 /// [`dispatch_guest_hashed`] without capturing it: what a replay runs.
@@ -2164,6 +2258,7 @@ pub(crate) fn run_guest_dispatch(
         memory: after,
         escaped: word(orbistoun_spirv::DISPATCH_ESCAPE_WORD) != 0,
         loop_cut: word(orbistoun_spirv::DISPATCH_LOOP_WORD).checked_sub(1),
+        escaped_page: escaped_page(word(orbistoun_spirv::DISPATCH_ESCAPE_PAGE_WORD)),
         stored,
         buffers: buffers_after?,
     })

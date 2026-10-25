@@ -3,8 +3,9 @@
 //! Every distinct translation a title's store keeps is made again from its recorded program and
 //! context by this build's translator, and its module's size is set against the guest
 //! instructions it came from. A caller with a device also has each module compiled and timed
-//! ([`Program`]). Rows are ranked by compile time and by size, summed, and written as TSV, so two
-//! builds' censuses diff line for line.
+//! ([`Program`]), and a caller with a validator has each module validated ([`Validate`]), so a
+//! module a driver happens to accept is still found invalid. Rows are ranked by compile time and by
+//! size, summed, and written as TSV, so two builds' censuses diff line for line.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -48,6 +49,12 @@ pub struct Compiled {
     /// Why the driver refused it, where it did.
     pub failed: Option<String>,
 }
+
+/// Times a module's compile.
+pub type Measure<'a> = dyn Fn(&Program<'_>) -> Compiled + Sync + 'a;
+
+/// Validates a module: `None` where it is valid, else the validator's message.
+pub type Validate<'a> = dyn Fn(&[u32]) -> Option<String> + Sync + 'a;
 
 /// A translated module as a compile is asked of it.
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +102,9 @@ pub struct Row {
     pub refusal: Option<String>,
     /// Its compile, where one was asked for.
     pub compiled: Option<Compiled>,
+    /// Whether its module was validated, and the validator's message where it is invalid: `None`
+    /// where no validation was asked for or the program was refused.
+    pub validated: Option<Option<String>>,
     /// How many of the program's kept contexts made this same module, and so one row: a
     /// dispatch's window or user data can differ where its module does not.
     pub contexts: usize,
@@ -110,19 +120,24 @@ impl Row {
     fn seconds(&self) -> Option<f64> {
         self.compiled.as_ref().map(|compiled| compiled.seconds)
     }
+
+    /// The validator's message, where its module was validated and found invalid.
+    pub fn invalid(&self) -> Option<&str> {
+        self.validated.as_ref()?.as_deref()
+    }
 }
 
 /// What makes two translations one compile: the module, and the images its layout binds.
 type ModuleKey = (u64, usize, usize);
 
 /// Translates every distinct translation `store` keeps for `title` again, on `threads` threads, and
-/// has `measure` time each distinct module's compile where given. `done` hears of each row as it is
-/// made, in no set order; the rows come back in the store's order.
+/// has `measure` time each distinct module's compile and `validate` validate it, each where given.
+/// `done` hears of each row as it is made, in no set order; the rows come back in the store's order.
 pub fn census(
     (title, store): (&str, &TranslationStore),
     (encodings, operands): (&EncodingTable, &OperandTable),
     threads: usize,
-    measure: Option<&(dyn Fn(&Program<'_>) -> Compiled + Sync)>,
+    (measure, validate): (Option<&Measure<'_>>, Option<&Validate<'_>>),
     done: &(dyn Fn(&Row) + Sync),
 ) -> Vec<Row> {
     let programs = distinct(store);
@@ -146,9 +161,13 @@ pub fn census(
                     let Some(kept) = programs.get(at) else {
                         break;
                     };
-                    let made = row(title, kept, (encodings, operands), measure, &|key| {
-                        first(key, at)
-                    });
+                    let made = row(
+                        title,
+                        kept,
+                        (encodings, operands),
+                        (measure, validate),
+                        &|key| first(key, at),
+                    );
                     if let Some(made) = &made {
                         done(made);
                     }
@@ -186,13 +205,13 @@ fn distinct(store: &TranslationStore) -> Vec<&Kept> {
         .collect()
 }
 
-/// One kept translation made again, and compiled where `measure` is given; `None` where `first`
-/// says another translation already made the same module.
+/// One kept translation made again, and compiled where `measure` is given and validated where
+/// `validate` is; `None` where `first` says another translation already made the same module.
 fn row(
     title: &str,
     kept: &Kept,
     tables: (&EncodingTable, &OperandTable),
-    measure: Option<&(dyn Fn(&Program<'_>) -> Compiled + Sync)>,
+    (measure, validate): (Option<&Measure<'_>>, Option<&Validate<'_>>),
     first: &dyn Fn(ModuleKey) -> bool,
 ) -> Option<Row> {
     let context = &kept.context;
@@ -207,6 +226,7 @@ fn row(
         model: None,
         refusal: None,
         compiled: None,
+        validated: None,
         contexts: 1,
     };
     match translated {
@@ -221,6 +241,7 @@ fn row(
             }
             row.words = translated.module.len();
             row.model = Some(translated.fidelity);
+            row.validated = validate.map(|validate| validate(&translated.module));
             row.compiled = measure.map(|measure| {
                 measure(&Program {
                     stage: context.stage,
@@ -297,10 +318,11 @@ pub fn sort_by_words(rows: &mut [Row]) {
 }
 
 /// The TSV a census is kept as: a header, then one line per row in the order given. A refusal or a
-/// compile failure is kept to one field, its tabs and line breaks made spaces.
+/// compile failure is kept to one field, as is the validator's message, its tabs and line breaks
+/// made spaces; `valid` is empty where nothing was validated.
 pub fn tsv(rows: &[Row]) -> String {
     let mut out = String::from(
-        "title\tprogram\tcontext\tcontexts\tstage\tinstructions\twords\twords_per_instruction\tmodel\ttimed\tcompile_seconds\trefused\n",
+        "title\tprogram\tcontext\tcontexts\tstage\tinstructions\twords\twords_per_instruction\tmodel\ttimed\tcompile_seconds\trefused\tvalid\tinvalid\n",
     );
     for row in rows {
         let compiled = row.compiled.as_ref();
@@ -310,9 +332,15 @@ pub fn tsv(rows: &[Row]) -> String {
             .or_else(|| compiled.and_then(|compiled| compiled.failed.as_deref()))
             .unwrap_or("")
             .replace(['\t', '\n', '\r'], " ");
+        let valid = match &row.validated {
+            None => "",
+            Some(None) => "yes",
+            Some(Some(_)) => "no",
+        };
+        let invalid = row.invalid().unwrap_or("").replace(['\t', '\n', '\r'], " ");
         let _ = writeln!(
             out,
-            "{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{refused}",
+            "{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{refused}\t{valid}\t{invalid}",
             row.title,
             row.program,
             row.context,
@@ -354,6 +382,10 @@ pub struct Summary {
     pub compile_failed: usize,
     /// See [`Self::compiled`].
     pub compile_seconds: f64,
+    /// How many modules were validated, and how many of those the validator refused.
+    pub validated: usize,
+    /// See [`Self::validated`].
+    pub invalid: usize,
     /// The translated row with the most words per instruction.
     pub worst: Option<Row>,
 }
@@ -373,6 +405,8 @@ impl Summary {
             compiled: compiled.len(),
             compile_failed: compiled.iter().filter(|c| c.failed.is_some()).count(),
             compile_seconds: compiled.iter().map(|c| c.seconds).sum(),
+            validated: rows.iter().filter(|row| row.validated.is_some()).count(),
+            invalid: rows.iter().filter(|row| row.invalid().is_some()).count(),
             worst: rows
                 .iter()
                 .filter(|row| row.refusal.is_none())
@@ -397,6 +431,13 @@ impl std::fmt::Display for Summary {
                 f,
                 "; {} compiled in {:.1} s, {} refused by the driver",
                 self.compiled, self.compile_seconds, self.compile_failed
+            )?;
+        }
+        if self.validated > 0 {
+            write!(
+                f,
+                "; {} validated, {} invalid",
+                self.validated, self.invalid
             )?;
         }
         if let Some(worst) = &self.worst {
@@ -431,7 +472,35 @@ pub fn report(rows: &[Row], top: usize) -> String {
     }
     sort_by_words(&mut ranked);
     table(&mut out, "by words", &ranked[..top.min(ranked.len())]);
+    invalid(&mut out, rows);
     out
+}
+
+/// Every module the validator refused, each with the first lines of its message: all of them, as
+/// each is a fault to fix rather than a cost to rank.
+fn invalid(out: &mut String, rows: &[Row]) {
+    let refused: Vec<&Row> = rows.iter().filter(|row| row.invalid().is_some()).collect();
+    if refused.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\ninvalid modules\n{:<8} {:<16} {:<8} TITLE",
+        "STAGE", "PROGRAM", "CONTEXT"
+    );
+    for row in refused {
+        let _ = writeln!(
+            out,
+            "{:<8} {:016x} {:08x} {}",
+            stage_name(row.stage),
+            row.program,
+            row.context >> 32,
+            row.title
+        );
+        for line in row.invalid().unwrap_or("").lines().take(2) {
+            let _ = writeln!(out, "    {}", line.trim());
+        }
+    }
 }
 
 fn table(out: &mut String, heading: &str, rows: &[Row]) {
@@ -489,6 +558,7 @@ mod tests {
                 timed: Timed::Pipeline,
                 failed: None,
             }),
+            validated: None,
             contexts: 1,
         }
     }
@@ -547,11 +617,13 @@ mod tests {
                 "lane",
                 "pipeline",
                 "2.500",
+                "",
+                "",
                 ""
             ]
         );
         let second = fields(lines[2]);
-        assert_eq!(second[8..], ["", "", "", "bad thing here"]);
+        assert_eq!(second[8..], ["", "", "", "bad thing here", "", ""]);
     }
 
     /// The summary counts refusals and compile failures, sums words and seconds, and names the
@@ -654,11 +726,17 @@ mod tests {
             }
         };
         let heard = std::sync::atomic::AtomicUsize::new(0);
+        // Every module is refused here, so each row the validator saw says so.
+        let validated = std::sync::atomic::AtomicUsize::new(0);
+        let validate = |module: &[u32]| {
+            validated.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (!module.is_empty()).then(|| "refused".to_owned())
+        };
         let rows = census(
             ("T", &store),
             (&encodings, &operands),
             2,
-            Some(&measure),
+            (Some(&measure), Some(&validate)),
             &|_| {
                 heard.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             },
@@ -666,12 +744,16 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(heard.into_inner(), 2);
         assert_eq!(measured.into_inner(), 1);
+        assert_eq!(validated.into_inner(), 1);
         let made = rows
             .iter()
             .find(|row| row.refusal.is_none())
             .expect("one translates");
         assert!(made.words > 0 && made.instructions == 1 && made.model.is_some());
         assert_eq!(made.contexts, 2);
+        assert_eq!(made.invalid(), Some("refused"));
+        assert!(report(&rows, 5).contains("invalid modules"));
+        assert_eq!(Summary::of(&rows).invalid, 1);
         assert!(
             rows.iter()
                 .any(|row| row.refusal.is_some() && row.compiled.is_none())

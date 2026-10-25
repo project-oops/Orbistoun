@@ -23,6 +23,8 @@ orbistoun-spirv = { workspace = true }
 orbistoun-env = { workspace = true }
 # A batch's draw words, written into the mapped draw-data buffer as bytes (D718).
 zerocopy = { workspace = true }
+# The guest's readable runs, mapped into the device for a device-addressed dispatch (D964).
+orbistoun-mem = { workspace = true }
 
 [dev-dependencies]
 # Only for the end-to-end test: a module that reached a device by way of a command

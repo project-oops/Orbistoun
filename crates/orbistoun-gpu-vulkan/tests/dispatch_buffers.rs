@@ -334,11 +334,103 @@ fn a_sixteen_bit_buffer_load_reads_its_half_word() {
     });
 }
 
-/// A traced global load reads its buffer relative to the base the push block carries (D883), and a
-/// lane whose address the bound buffer does not hold - below its base or past its end - is an
+/// The instruction head of `name`: its family's fixed bits and its opcode.
+fn head(name: &str) -> u32 {
+    let table = EncodingTable::builtin().expect("encodings");
+    let (family, opcode) = table.find_by_name(name).expect("a known instruction");
+    let encoding = table
+        .encodings()
+        .iter()
+        .find(|encoding| encoding.name == family)
+        .expect("its family");
+    encoding.value | (opcode << encoding.opcode.shift)
+}
+
+/// Neighbouring threads' byte stores through a bound buffer each keep the others' bytes of a word
+/// (D977): thread `n` stores the byte `0x80 + n` at byte `n`, four to a word; and every thread the
+/// half `0xcafe` at byte `0x43`, across words 16 and 17.
+///
+/// ```text
+/// v_add_nc_u32_e32 v1, 0x80, v0
+/// buffer_store_byte v1, v0, s[12:15], 0 offen
+/// v_mov_b32_e32 v2, 0xcafe
+/// v_mov_b32_e32 v3, 0x43
+/// buffer_store_short v2, v3, s[12:15], 0 offen
+/// s_endpgm
+/// ```
+#[test]
+fn neighbouring_threads_store_bytes_into_one_bound_word() {
+    let mut program = vec![head("v_add_nc_u32_e32") | (1 << 17) | 255, 0x80];
+    // MUBUF `offen`: the address register, data, the descriptor's register over four and the
+    // inline zero as the scalar offset in the second word.
+    program.extend([
+        head("buffer_store_byte") | 1 << 12,
+        0x80 << 24 | 3 << 16 | 1 << 8,
+    ]);
+    program.extend([head("v_mov_b32_e32") | (2 << 17) | 255, 0xcafe]);
+    program.extend([head("v_mov_b32_e32") | (3 << 17) | 255, 0x43]);
+    program.extend([
+        head("buffer_store_short") | 1 << 12,
+        0x80 << 24 | 3 << 16 | 2 << 8 | 3,
+    ]);
+    program.push(head("s_endpgm"));
+    both_models(|| {
+        if !device_present() {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, _) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                first_register: 0,
+                count: 16,
+                block_offset: 0,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false; 3],
+                    thread_id_components: 1,
+                    threads: [64, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                draw_buffers: true,
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the stores translate through their buffer");
+        let destination = [0_u32; 64];
+        let done = dispatch_guest_with_buffers(
+            &module,
+            &[0],
+            (&user_data(), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&destination)],
+        )
+        .expect("dispatched");
+        let words = &done.buffers[0].words;
+        for word in 0..16u32 {
+            let byte = |n: u32| (0x80 + 4 * word + n) << (8 * n);
+            let wanted = byte(0) | byte(1) | byte(2) | byte(3);
+            assert_eq!(words[word as usize], wanted, "word {word}");
+        }
+        assert_eq!(words[16], 0xfe00_0000, "the half's low byte");
+        assert_eq!(words[17], 0xca, "its high byte, in the next word");
+    });
+}
+
+/// A traced global load reads its buffer, which holds the pages the dispatch's waves read behind a
+/// table, against the first page the push block carries (D883), and a lane whose page the buffer
+/// does not hold - below its first page, past its table, or a page between not held - is an
 /// escape, not a read of another word (D950): a range placed from a sample of a dispatch's groups
 /// is kept honest so. Each of 64 threads loads the word at `s[0:1]` plus four times its id and
-/// stores it through the descriptor in `s[8:11]`.
+/// stores it through the descriptor in `s[8:11]`; its words straddle two pages, read through
+/// their table entries.
 #[test]
 fn a_global_load_outside_its_bound_buffer_is_an_escape() {
     // v_lshlrev_b32 v1, 2, v0; v_add_nc_u32 v1, s0, v1; v_mov_b32 v2, s1;
@@ -367,7 +459,9 @@ fn a_global_load_outside_its_bound_buffer_is_an_escape() {
         0xbf81_0000,
         0xbf9f_0000,
     ];
-    let global = 0x4_0a60_0000_u64;
+    // Lanes 0 to 31 read the last 128 bytes of one page, lanes 32 to 63 the first of the next.
+    let global = 0x4_0a60_0f80_u64;
+    let page = orbistoun_gpu::global_pages::PAGE;
     both_models(|| {
         if !device_present() {
             return;
@@ -399,6 +493,7 @@ fn a_global_load_outside_its_bound_buffer_is_an_escape() {
         )
         .expect("the load translates through its traced buffer");
         let source: Vec<u32> = (0..64).map(|i| 0x6000_0000 | i).collect();
+        let held = |pages: &[u64]| held_pages(pages, (global, &source));
         // The global address in s[0:1]; the store's descriptor in s[8:11], slot 0, so the global
         // loads' buffer is slot 1.
         let push = |base: u64| {
@@ -412,28 +507,296 @@ fn a_global_load_outside_its_bound_buffer_is_an_escape() {
             block[orbistoun_translate::wavefront::GLOBAL_BASE_PUSH_WORD as usize] = base as u32;
             block
         };
-        let run = |base: u64, held: &[u32]| {
+        let run = |(base, held): (u64, Vec<u32>)| {
             let destination = vec![0_u32; 64];
             dispatch_guest_with_buffers(
                 &module,
                 &[0],
                 (&push(base), [1, 1, 1]),
                 &DispatchImages::default(),
-                &[BufferIn::Words(&destination), BufferIn::Words(held)],
+                &[BufferIn::Words(&destination), BufferIn::Words(&held)],
             )
             .expect("dispatched")
         };
-        let whole = run(global, &source);
+        let first = global & !(page - 1);
+        let whole = run(held(&[first, first + page]));
         assert!(!whole.escaped, "every lane's word is held");
         assert_eq!(
             whole.buffers[0].words, source,
             "each thread copied its word"
         );
-        // Half the words bound, as a sample that missed the upper threads would place it.
-        assert!(run(global, &source[..32]).escaped, "past the end");
-        // The base a word above the first address: lane 0 reads below it.
-        assert!(run(global + 4, &source[1..]).escaped, "below the base");
+        // The first page alone, as a sample that missed the upper threads would place it.
+        assert!(run(held(&[first])).escaped, "past the table");
+        // The second page alone: the lower threads read below its base.
+        assert!(run(held(&[first + page])).escaped, "below the base");
+        // A table over both pages and one more, holding the outer two: the lower threads' page is
+        // not held.
+        assert!(
+            run(held(&[first - page, first + page])).escaped,
+            "a page between not held"
+        );
+        // The two pages a lane reads, 18 GB apart: each found by its full number.
+        let (base, words) = held_pages(
+            &[first, first + page, first + (18 << 30)],
+            (global, &source),
+        );
+        let far = run((base, words));
+        assert!(!far.escaped, "the pages held, wherever the others lie");
+        assert_eq!(far.buffers[0].words, source);
     });
+}
+
+/// A dispatch's global loads find their pages by their full numbers, however far apart (D961):
+/// threads 0 to 31 load the word at `s[0:1]` plus four times their id, threads 32 to 63 at
+/// `s[2:3]` plus four times theirs, 18 GB above, as Grand Theft Auto V's program at
+/// 0x74005b87e400 reads pages across 18 GB. Each thread copies its own word.
+#[test]
+fn a_global_load_finds_pages_gigabytes_apart() {
+    let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let (family, opcode) = encodings.find_by_name(name).expect(name);
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+    };
+    // v_mov_b32 v5..v8, s0..s3; v_cmp_gt_u32 vcc, 32, v0; v_cndmask_b32 v1, v7, v5, vcc;
+    // v_cndmask_b32 v2, v8, v6, vcc; v_lshlrev_b32 v9, 2, v0; v_add_nc_u32 v1, v1, v9;
+    // global_load_dword v3, v[1:2], off; s_waitcnt vmcnt(0); v_lshlrev_b32 v0, 2, v0;
+    // buffer_store_dword v3, v0, s[8:11], 0 offen; s_endpgm.
+    let program = [
+        short_form("v_mov_b32_e32", 5, 0, 0),
+        short_form("v_mov_b32_e32", 6, 1, 0),
+        short_form("v_mov_b32_e32", 7, 2, 0),
+        short_form("v_mov_b32_e32", 8, 3, 0),
+        short_form("v_cmp_gt_u32_e32", 0, 160, 0),
+        short_form("v_cndmask_b32_e32", 1, 256 + 7, 5),
+        short_form("v_cndmask_b32_e32", 2, 256 + 8, 6),
+        short_form("v_lshlrev_b32_e32", 9, 130, 0),
+        short_form("v_add_nc_u32_e32", 1, 256 + 1, 9),
+        0xdc30_8000,
+        0x037d_0001,
+        0xbf8c_3f70,
+        0x3400_0082,
+        0xe070_1000,
+        0x8002_0300,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let low = 0x4_0a60_0000_u64;
+    // Thread 32's word at the far page's first byte.
+    let high = low + (18 << 30) - 128;
+    both_models(|| {
+        if !device_present() {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, _) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                first_register: 0,
+                count: 16,
+                block_offset: 0,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false; 3],
+                    thread_id_components: 1,
+                    threads: [64, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                draw_buffers: true,
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the load translates through its traced buffer");
+        let source: Vec<u32> = (0..64).map(|i| 0x6000_0000 | i).collect();
+        let held = orbistoun_gpu::global_pages::GlobalPages {
+            slot: 1,
+            base: low,
+            pages: vec![low, low + (18 << 30)],
+        };
+        let words = held.buffer_words(|at| Some(split_page(at, (low, high), &source)));
+        let mut block = user_data();
+        block[..4].copy_from_slice(&[
+            low as u32,
+            (low >> 32) as u32,
+            high as u32,
+            (high >> 32) as u32,
+        ]);
+        block.resize(
+            orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
+            0,
+        );
+        block[orbistoun_translate::wavefront::GLOBAL_BASE_PUSH_WORD as usize] = low as u32;
+        let destination = vec![0_u32; 64];
+        let done = dispatch_guest_with_buffers(
+            &module,
+            &[0],
+            (&block, [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&destination), BufferIn::Words(&words)],
+        )
+        .expect("dispatched");
+        assert!(!done.escaped, "both pages held");
+        assert_eq!(done.buffers[0].words, source, "each thread copied its word");
+    });
+}
+
+/// The words of the page at `at` in guest memory where threads 0 to 31 find their words of `source`
+/// from `low`, and threads 32 to 63 theirs from `high`, four bytes a thread; zero elsewhere.
+fn split_page(at: u64, (low, high): (u64, u64), source: &[u32]) -> Vec<u32> {
+    (0..orbistoun_gpu::global_pages::PAGE / 4)
+        .map(|word| {
+            let address = at + word * 4;
+            let near = at == low;
+            let lane = (address - if near { low } else { high }) / 4;
+            source
+                .get(usize::try_from(lane).unwrap_or(usize::MAX))
+                .filter(|_| (lane < 32) == near)
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// A dispatch's global store writes the word its page's table entry places (D961): each of 64
+/// threads stores its id at `s[0:1]` plus four times its id, straddling two pages, and what comes
+/// back is each id at its own guest address, page by page. A store to a page the buffer does not
+/// hold is an escape and changes nothing.
+#[test]
+fn a_global_store_writes_its_page_of_the_global_buffer() {
+    // v_lshlrev_b32 v1, 2, v0; v_add_nc_u32 v1, s0, v1; v_mov_b32 v2, s1;
+    // global_store_dword v[1:2], v0, off; s_endpgm.
+    let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let (family, opcode) = encodings.find_by_name(name).expect(name);
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+    };
+    let program = [
+        short_form("v_lshlrev_b32_e32", 1, 130, 0),
+        short_form("v_add_nc_u32_e32", 1, 0, 1),
+        short_form("v_mov_b32_e32", 2, 1, 0),
+        0xdc70_8000,
+        0x007d_0001,
+        0xbf81_0000,
+        0xbf9f_0000,
+    ];
+    let global = 0x4_0a60_0f80_u64;
+    let page = orbistoun_gpu::global_pages::PAGE;
+    let first = global & !(page - 1);
+    both_models(|| {
+        if !device_present() {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, _) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                first_register: 0,
+                count: 16,
+                block_offset: 0,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false; 3],
+                    thread_id_components: 1,
+                    threads: [64, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                draw_buffers: true,
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the store translates through its traced buffer");
+        let run = |pages: &[u64]| {
+            let held = orbistoun_gpu::global_pages::GlobalPages {
+                slot: 0,
+                base: pages[0],
+                pages: pages.to_vec(),
+            };
+            let (_, before) = held_pages(pages, (global, &[]));
+            let mut block = vec![0_u32; 16];
+            block[0] = global as u32;
+            block[1] = (global >> 32) as u32;
+            block.resize(
+                orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
+                0,
+            );
+            block[orbistoun_translate::wavefront::GLOBAL_BASE_PUSH_WORD as usize] =
+                held.base as u32;
+            let done = dispatch_guest_with_buffers(
+                &module,
+                &[0],
+                (&block, [1, 1, 1]),
+                &DispatchImages::default(),
+                &[BufferIn::Words(&before)],
+            )
+            .expect("dispatched");
+            let runs: Vec<(u64, Vec<u32>)> = held
+                .changed_runs((&before, &done.buffers[0].words))
+                .into_iter()
+                .map(|(at, words)| (at, words.to_vec()))
+                .collect();
+            (done.escaped, runs)
+        };
+        let (escaped, runs) = run(&[first, first + page]);
+        assert!(!escaped, "every lane's page is held");
+        assert_eq!(
+            runs,
+            [
+                (global + 4, (1..32).collect()),
+                (first + page, (32..64).collect()),
+            ],
+            "each id at its own address, page by page; lane 0's zero changed nothing"
+        );
+        let (escaped, runs) = run(&[first]);
+        assert!(escaped, "the upper threads' page is not held");
+        assert_eq!(runs.len(), 1, "only the held page changes");
+    });
+}
+
+/// A global loads' buffer holding `pages`, from the first, over guest memory holding `words` from
+/// `at` and zero elsewhere: its first page and its words.
+fn held_pages(pages: &[u64], (at, words): (u64, &[u32])) -> (u64, Vec<u32>) {
+    let held = orbistoun_gpu::global_pages::GlobalPages {
+        slot: 1,
+        base: pages[0],
+        pages: pages.to_vec(),
+    };
+    let buffer = held.buffer_words(|page| {
+        Some(
+            (0..orbistoun_gpu::global_pages::PAGE / 4)
+                .map(|word| {
+                    (page + word * 4)
+                        .checked_sub(at)
+                        .and_then(|from| words.get(usize::try_from(from / 4).ok()?))
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect(),
+        )
+    });
+    (held.base, buffer)
 }
 
 /// A buffer placed from a sample of a dispatch's groups (D951) is read relative to the base the

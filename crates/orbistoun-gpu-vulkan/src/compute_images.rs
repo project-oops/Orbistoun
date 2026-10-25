@@ -48,6 +48,9 @@ pub enum DispatchFormat {
     /// Four normalised sixteen-bit channels, the guest's `16_16_16_16_UNORM`: two words a texel,
     /// red lowest (D923).
     Rgba16Unorm,
+    /// Four signed normalised eight-bit channels, the guest's `8_8_8_8_SNORM`: a word a texel, red
+    /// lowest.
+    Rgba8Snorm,
     /// Three packed unsigned floats, the guest's `10_11_11_FLOAT`: eleven bits of red from the low
     /// end, eleven of green, ten of blue, a word a texel (D908).
     Float11_11_10,
@@ -72,6 +75,7 @@ impl DispatchFormat {
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
             Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
             Self::Rgba16Unorm => vk::Format::R16G16B16A16_UNORM,
+            Self::Rgba8Snorm => vk::Format::R8G8B8A8_SNORM,
             Self::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         }
     }
@@ -85,7 +89,8 @@ impl DispatchFormat {
             | Self::Float11_11_10
             | Self::R32Uint
             | Self::Rg16Float
-            | Self::R32Float => 4,
+            | Self::R32Float
+            | Self::Rgba8Snorm => 4,
             Self::R8 | Self::R8Uint => 1,
             Self::R16Uint | Self::R16Unorm | Self::R16Float | Self::Rg8Unorm => 2,
             Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
@@ -148,7 +153,7 @@ pub struct DispatchImages<'a> {
     /// ([`orbistoun_spirv::TEXTURE_BINDINGS`]).
     pub more_fetched: &'a [DispatchImage<'a>],
     /// The images it stores to, in order, each at its storage-image binding
-    /// ([`orbistoun_spirv::STORAGE_IMAGE_BINDINGS`]) and read back after the dispatch (D893).
+    /// ([`orbistoun_spirv::STORAGE_IMAGE_BINDINGS`]) and read back after the dispatch (D893, D963).
     pub stored: &'a [DispatchImage<'a>],
 }
 
@@ -196,6 +201,17 @@ impl BoundImages {
             return Err(DispatchError::Unsupported(
                 "more stored images than a stage has storage-image bindings".to_owned(),
             ));
+        }
+        // The device's own bound, which may be as low as four (D963).
+        // SAFETY: the physical device came from this instance.
+        let reach = unsafe { instance.get_physical_device_properties(physical) }
+            .limits
+            .max_per_stage_descriptor_storage_images;
+        if images.stored.len() > reach as usize {
+            return Err(DispatchError::Unsupported(format!(
+                "{} stored images, more than the {reach} storage images this device lets one stage reach (D963)",
+                images.stored.len()
+            )));
         }
         let mut wanted = vec![(images.fetched, orbistoun_spirv::TEXTURE_BINDING, false)];
         wanted.extend(

@@ -24,6 +24,10 @@ pub struct MemoryWait {
     pub now: Option<u64>,
     /// The last value a `RELEASE_MEM` wrote there this run, and how many did.
     pub released: Option<(u64, u64)>,
+    /// Whether the command processor polls the wait while the title's threads run (D932): only on
+    /// its own thread, so a wait a guest thread's store meets is never seen to hold where
+    /// submissions run synchronously.
+    pub polled: bool,
 }
 
 /// Where a queue stands.
@@ -165,6 +169,12 @@ pub fn describe(state: &QueueState) -> String {
                         wait.reference,
                         wait.function
                     );
+                    if !wait.polled {
+                        line.push_str(concat!(
+                            "; nothing polls it, because submissions run synchronously: ",
+                            "ORBISTOUN_SUBMIT=async polls it as a title is played (D932)",
+                        ));
+                    }
                 }
                 None => {
                     let _ = write!(line, "; {stopped}");
@@ -206,6 +216,7 @@ fn standing(bytes: &[u8], offset: u32, stopped: &cp::Stopped) -> Stands {
             function,
             now,
             released,
+            polled: super::asynchronous(),
         }
     });
     Stands::At {
@@ -355,6 +366,7 @@ mod tests {
                     function: 0x15,
                     now: Some(0x15be),
                     released: Some((0x15be, 12)),
+                    polled: true,
                 }),
                 stopped: String::new(),
             },
@@ -370,5 +382,37 @@ mod tests {
             behind: 0,
         };
         assert_eq!(describe(&running), "graphics: not stopped");
+    }
+
+    /// A wait nothing polls says so, and what would poll it: run 334 of Grand Theft Auto V stood
+    /// 300 s at a wait its word already met, with submissions run synchronously.
+    #[test]
+    fn a_wait_nothing_polls_says_so() {
+        let state = QueueState {
+            queue: "graphics".to_owned(),
+            stands: Stands::At {
+                offset: 0xf0,
+                header: 0xc007_9300,
+                packet: "WAIT_REG_MEM64".to_owned(),
+                wait: Some(MemoryWait {
+                    address: 0x7400_4314_5900,
+                    reference: 0x20e,
+                    mask: u64::MAX,
+                    function: 0x400_0015,
+                    now: Some(0x20e),
+                    released: None,
+                    polled: false,
+                }),
+                stopped: String::new(),
+            },
+            behind: 1,
+        };
+        assert!(
+            describe(&state).ends_with(
+                "no RELEASE_MEM has written it; nothing polls it, because submissions run synchronously: ORBISTOUN_SUBMIT=async polls it as a title is played (D932); 1 streams behind it"
+            ),
+            "{}",
+            describe(&state)
+        );
     }
 }

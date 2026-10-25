@@ -45,6 +45,7 @@ orbistoun-shell = { workspace = true }
 orbistoun-proto = { workspace = true }
 orbistoun-probe = { workspace = true }
 orbistoun-shader = { workspace = true }
+orbistoun-spirv = { workspace = true }
 orbistoun-translate = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

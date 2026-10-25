@@ -3060,6 +3060,7 @@ dependencies = [
  "orbistoun-service",
  "orbistoun-shader",
  "orbistoun-shell",
+ "orbistoun-spirv",
  "orbistoun-submit",
  "orbistoun-translate",
  "orbistoun-turn",
@@ -3183,6 +3184,7 @@ dependencies = [
  "ash",
  "orbistoun-env",
  "orbistoun-gpu",
+ "orbistoun-mem",
  "orbistoun-shader",
  "orbistoun-spirv",
  "orbistoun-translate",
@@ -3559,6 +3561,7 @@ dependencies = [
  "orbistoun-shader",
  "orbistoun-spirv",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
