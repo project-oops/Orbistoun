@@ -15,8 +15,8 @@
 //! or fiber a stack of the guest's own).
 
 use std::collections::BTreeMap;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use crate::Protection;
 
@@ -100,6 +100,60 @@ struct Lazy {
     protections: Protections,
     /// Bytes of it committed.
     committed: AtomicU64,
+    /// The spans of it known committed: committed here, or found committed by the host. Nothing
+    /// decommits a page of a reservation while it is held, so a span once known stays so, and a
+    /// [`commit`] wholly inside them asks the host nothing. The host's answer costs a walk of its
+    /// pages that grows with the allocation (D974): 3 ms and more in Grand Theft Auto V's, before
+    /// every dispatch's write back (D984).
+    known: Mutex<Spans>,
+}
+
+impl Lazy {
+    /// [`Self::known`], held.
+    fn known(&self) -> std::sync::MutexGuard<'_, Spans> {
+        self.known
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Byte spans, `start` to `end`, none overlapping or touching another.
+#[derive(Debug, Default)]
+struct Spans(BTreeMap<u64, u64>);
+
+impl Spans {
+    /// Whether `[from, to)` lies wholly inside one span.
+    fn covers(&self, from: u64, to: u64) -> bool {
+        from >= to
+            || self
+                .0
+                .range(..=from)
+                .next_back()
+                .is_some_and(|(_, &end)| to <= end)
+    }
+
+    /// Adds `[from, to)`, joining every span it overlaps or touches.
+    fn insert(&mut self, mut from: u64, mut to: u64) {
+        if from >= to {
+            return;
+        }
+        if let Some((&start, &end)) = self.0.range(..=from).next_back()
+            && end >= from
+        {
+            from = start;
+            to = to.max(end);
+        }
+        let joined: Vec<(u64, u64)> = self
+            .0
+            .range(from..=to)
+            .map(|(&start, &end)| (start, end))
+            .collect();
+        for (start, end) in joined {
+            self.0.remove(&start);
+            to = to.max(end);
+        }
+        self.0.insert(from, to);
+    }
 }
 
 fn registry() -> &'static RwLock<BTreeMap<u64, Lazy>> {
@@ -119,6 +173,7 @@ pub(crate) fn register(base: u64, len: u64, protection: Protection) {
             len,
             protections: Protections::new(base, base.saturating_add(len), protection),
             committed: AtomicU64::new(0),
+            known: Mutex::new(Spans::default()),
         },
     );
     if let Some(old) = replaced {
@@ -155,11 +210,14 @@ pub fn commit(base: u64, len: u64) {
     let held = registry()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (&start, lazy) in held.range(..end) {
+    // Latest first: reservations do not overlap, so once one ends at or before `base`, every one
+    // before it does too.
+    for (&start, lazy) in held.range(..end).rev() {
         let (from, to) = (base.max(start), end.min(start.saturating_add(lazy.len)));
-        if from < to {
-            commit_in(lazy, from, to);
+        if from >= to {
+            break;
         }
+        commit_in(lazy, from, to);
     }
 }
 
@@ -193,7 +251,10 @@ pub fn commit_on_touch(address: u64) -> bool {
     let Some((run_start, run_end, protection)) = lazy.protections.run_at(address) else {
         return false;
     };
-    if protection == Protection::NONE || !imp::uncommitted(address) {
+    if protection == Protection::NONE
+        || lazy.known().covers(address, address.saturating_add(1))
+        || !imp::uncommitted(address)
+    {
         return false;
     }
     let chunk = address & !(TOUCH_CHUNK - 1);
@@ -206,12 +267,20 @@ pub fn commit_on_touch(address: u64) -> bool {
 }
 
 /// Commits the uncommitted pages of `[from, to)`, inside `lazy`, by its recorded protections;
-/// the bytes committed.
+/// the bytes committed. A range already known committed asks the host nothing.
 fn commit_in(lazy: &Lazy, from: u64, to: u64) -> u64 {
+    if lazy.known().covers(from, to) {
+        return 0;
+    }
     let mut committed = 0;
     for (start, end, protection) in lazy.protections.runs(from, to) {
         if protection != Protection::NONE {
-            committed += imp::commit_uncommitted(start, end, protection);
+            let (bytes, whole) = imp::commit_uncommitted(start, end, protection);
+            committed += bytes;
+            // Known only where every page of the run was found committed or committed now.
+            if whole {
+                lazy.known().insert(start, end);
+            }
         }
     }
     lazy.committed.fetch_add(committed, Ordering::Relaxed);
@@ -316,6 +385,13 @@ mod imp {
 
     use crate::Protection;
 
+    #[cfg(test)]
+    thread_local! {
+        /// How many times this thread asked the host about its pages: what a test of a commit
+        /// that should ask nothing counts.
+        pub(super) static QUERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
     /// The host's state of the pages from `at`: where their run of alike pages ends, and its
     /// state. `None` when it says nothing.
     fn query(at: u64) -> Option<(u64, u32)> {
@@ -325,6 +401,8 @@ mod imp {
     /// The host's description of the pages from `at`: where their run of alike pages ends, and
     /// the description. `None` when it says nothing.
     fn query_info(at: u64) -> Option<(u64, MEMORY_BASIC_INFORMATION)> {
+        #[cfg(test)]
+        QUERIES.with(|queries| queries.set(queries.get() + 1));
         let mut info = MEMORY_BASIC_INFORMATION {
             BaseAddress: std::ptr::null_mut(),
             AllocationBase: std::ptr::null_mut(),
@@ -402,13 +480,15 @@ mod imp {
     }
 
     /// Commits the pages of `[from, to)` that are reserved and not committed with `protection`,
-    /// leaving committed ones as they are - a guard's protection among them; the bytes committed.
-    pub(super) fn commit_uncommitted(from: u64, to: u64, protection: Protection) -> u64 {
+    /// leaving committed ones as they are - a guard's protection among them; the bytes committed,
+    /// and whether every page of the range is committed now.
+    pub(super) fn commit_uncommitted(from: u64, to: u64, protection: Protection) -> (u64, bool) {
         let mut at = from;
         let mut committed = 0;
+        let mut whole = true;
         while at < to {
             let Some((run_end, state)) = query(at) else {
-                break;
+                return (committed, false);
             };
             let piece_end = run_end.min(to);
             if state == MEM_RESERVE
@@ -426,13 +506,17 @@ mod imp {
                         crate::platform::protection_flags(protection),
                     )
                 };
-                if !got.is_null() {
+                if got.is_null() {
+                    whole = false;
+                } else {
                     committed += piece_end - at;
                 }
+            } else if state != MEM_COMMIT {
+                whole = false;
             }
             at = piece_end;
         }
-        committed
+        (committed, whole)
     }
 
     /// Applies `protection` to the committed pages of `[from, to)`; the reserved ones carry it in
@@ -497,8 +581,12 @@ mod imp {
         writable_runs(from, to)
     }
 
-    pub(super) const fn commit_uncommitted(_from: u64, _to: u64, _protection: Protection) -> u64 {
-        0
+    pub(super) const fn commit_uncommitted(
+        _from: u64,
+        _to: u64,
+        _protection: Protection,
+    ) -> (u64, bool) {
+        (0, false)
     }
 
     pub(super) const fn protect_committed(
@@ -546,6 +634,49 @@ mod tests {
         runs.set(0x8000, 0x9000, Protection::READ_ONLY);
         assert_eq!(runs.0.len(), 3);
         assert_eq!(runs.run_at(0x9000), None, "past its end");
+    }
+
+    /// Known spans join what they overlap or touch, and cover only what lies inside one.
+    #[test]
+    fn known_spans_join_and_cover() {
+        let mut spans = super::Spans::default();
+        assert!(!spans.covers(0x1000, 0x2000), "nothing known");
+        assert!(spans.covers(0x1000, 0x1000), "an empty range is covered");
+        spans.insert(0x1000, 0x2000);
+        spans.insert(0x3000, 0x4000);
+        assert!(spans.covers(0x1000, 0x2000) && spans.covers(0x3800, 0x4000));
+        assert!(!spans.covers(0x1800, 0x3800), "the gap between them");
+        spans.insert(0x2000, 0x3000);
+        assert_eq!(spans.0.len(), 1, "touching spans join: {:?}", spans.0);
+        assert!(spans.covers(0x1000, 0x4000));
+        spans.insert(0x800, 0x5000);
+        assert_eq!(spans.0, [(0x800, 0x5000)].into_iter().collect());
+        spans.insert(0x6000, 0x7000);
+        assert!(!spans.covers(0x4800, 0x6800));
+        assert_eq!(spans.0.len(), 2);
+    }
+
+    /// A commit over pages already committed asks the host nothing, once they are known: the
+    /// host's walk of its pages before each write back cost Grand Theft Auto V 3 ms and more.
+    #[cfg(windows)]
+    #[test]
+    fn a_commit_of_known_committed_pages_asks_the_host_nothing() {
+        use super::{TOUCH_CHUNK, commit, imp};
+        let base = crate::unique_test_base();
+        let len = 4 * TOUCH_CHUNK;
+        let _held =
+            crate::platform::reserve_lazily(base, len, Protection::READ_WRITE).expect("reserved");
+        let asked = || imp::QUERIES.with(std::cell::Cell::get);
+        commit(base, 2 * TOUCH_CHUNK);
+        assert!(!imp::uncommitted(base + TOUCH_CHUNK));
+        let before = asked();
+        commit(base + 8, TOUCH_CHUNK);
+        commit(base, 2 * TOUCH_CHUNK);
+        assert_eq!(asked(), before, "known committed");
+        commit(base + TOUCH_CHUNK, 2 * TOUCH_CHUNK);
+        assert!(asked() > before, "a range past what is known asks");
+        assert!(!imp::uncommitted(base + 2 * TOUCH_CHUNK), "and commits it");
+        assert!(imp::uncommitted(base + 3 * TOUCH_CHUNK), "nothing past it");
     }
 
     /// A reservation is counted while it is registered and not once forgotten, and the census

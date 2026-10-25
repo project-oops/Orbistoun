@@ -159,7 +159,7 @@ impl Record {
     fn harvest(&mut self, base: u64, len: u64) -> Option<bool> {
         let epoch = self.epoch;
         let mut found = false;
-        imp::harvest(base, len, &mut |page| {
+        harvest_by_reservation(base, len, &mut |page| {
             self.note(page, epoch);
             found = true;
         })?;
@@ -182,6 +182,25 @@ impl Record {
                         .any(|(_, &harvested)| harvested > since)
             })
     }
+}
+
+/// [`imp::harvest`] of `[base, base + len)`, each part of it lying in a reservation the guest's
+/// record holds walked as one span of that allocation, asking the host nothing about its regions
+/// first. The host's answer of where a region ends walks the allocation, and its cost grows with
+/// it: 4 - 8 ms a question in Grand Theft Auto V's (D974), asked at every texture's and buffer's
+/// check (D984). What lies in no recorded reservation is asked as before.
+fn harvest_by_reservation(base: u64, len: u64, found: &mut impl FnMut(u64)) -> Option<()> {
+    let end = base.saturating_add(len);
+    let mut at = base;
+    while at < end {
+        let Some((held, held_len)) = crate::mappings::reservation_of(at) else {
+            return imp::harvest(at, end - at, found);
+        };
+        let piece_end = end.min(held.saturating_add(held_len));
+        imp::harvest_span(at, piece_end, found)?;
+        at = piece_end;
+    }
+    Some(())
 }
 
 /// A point in time for `[base, base + len)`: every write to it before now is behind the answer,
@@ -215,6 +234,78 @@ pub fn mark(base: u64, len: u64) -> Option<u64> {
     }
     record.epoch += 1;
     Some(epoch)
+}
+
+/// [`mark`] of every range of `ranges` at once, guarding none: one point in time for all of them,
+/// which [`recorded_since`] then answers for each, or for any part of one, from the record.
+///
+/// The host's walk of its pages costs in proportion to the allocation they lie in, not to the
+/// range asked about: a page of a gigabyte reservation cost 0.26 ms a mark, 0.92 ms once the
+/// device mapped it (D974). So the ranges are taken an allocation at a time, and each allocation
+/// is walked once, from the first range in it to the end of the last. `None`, having recorded what
+/// it could, when part of a range is not watched.
+pub fn mark_all(ranges: &[(u64, u64)]) -> Option<u64> {
+    let mut record = record()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let epoch = record.epoch;
+    let watched = record.harvest_all(ranges);
+    record.epoch += 1;
+    watched.then_some(epoch)
+}
+
+/// Brings the record up to date over every range of `ranges` with one walk of each allocation
+/// they lie in, as [`mark_all`] does, without a new point in time: what [`recorded_since`] then
+/// answers for any part of them is exact. Whether every range was watched.
+pub fn harvest_all(ranges: &[(u64, u64)]) -> bool {
+    record()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .harvest_all(ranges)
+}
+
+impl Record {
+    /// [`harvest_all`] with the record held.
+    fn harvest_all(&mut self, ranges: &[(u64, u64)]) -> bool {
+        let mut sorted: Vec<(u64, u64)> =
+            ranges.iter().copied().filter(|&(_, len)| len > 0).collect();
+        sorted.sort_unstable();
+        let epoch = self.epoch;
+        let mut watched = true;
+        let mut at = 0;
+        while at < sorted.len() {
+            let (base, len) = sorted[at];
+            let (first, _) = pages_of(base, len);
+            // The reservation is the allocation, as the guest's record keeps it: asking the host
+            // which allocation a page lies in walks it, and cost as much as the harvest saved.
+            let Some((held, held_len)) = crate::mappings::reservation_of(first) else {
+                watched &= self.harvest(base, len).is_some();
+                at += 1;
+                continue;
+            };
+            let held_end = held.saturating_add(held_len);
+            let mut end = first;
+            while let Some(&(base, len)) = sorted.get(at) {
+                let (start, stop) = pages_of(base, len);
+                if start < held || stop > held_end {
+                    break;
+                }
+                end = end.max(stop);
+                at += 1;
+            }
+            if end == first {
+                // A range running past its reservation's end: asked alone, as the host cuts it.
+                watched &= self.harvest(base, len).is_some();
+                at += 1;
+                continue;
+            }
+            let walked = imp::harvest_span(first, end, &mut |page| {
+                self.note(page, epoch);
+            });
+            watched &= walked.is_some();
+        }
+        watched
+    }
 }
 
 /// Whether any page of `[base, base + len)` was written after `since`, a [`mark`] of it. `None`
@@ -325,9 +416,23 @@ mod imp {
         VirtualProtect, VirtualQuery,
     };
 
+    #[cfg(test)]
+    thread_local! {
+        /// How many times this thread asked the host where its regions end: what a test of a
+        /// harvest that should ask nothing counts.
+        pub(super) static QUERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Counts a question of the host's regions, in a test.
+    fn asked() {
+        #[cfg(test)]
+        QUERIES.with(|queries| queries.set(queries.get() + 1));
+    }
+
     /// What the host says of the pages from `at`: where their run of alike pages ends, its state
     /// and protection. `None` when it says nothing.
     fn query(at: usize) -> Option<(usize, u32, u32)> {
+        asked();
         let mut info = MEMORY_BASIC_INFORMATION {
             BaseAddress: std::ptr::null_mut(),
             AllocationBase: std::ptr::null_mut(),
@@ -351,8 +456,24 @@ mod imp {
         (answered != 0 && run_end > at).then_some((run_end, info.State, info.Protect))
     }
 
-    /// Sets `protection` on `[first, end)`, a piece at a time as the host's regions lie.
+    /// Sets `protection` on `[first, end)`: at once where the host takes it so - every page
+    /// committed, in one allocation - and otherwise a piece at a time as the host's regions lie.
+    /// Asking where a region ends walks the allocation, at a cost that grows with it (D974).
     fn set(first: usize, end: usize, protection: u32) -> bool {
+        let mut old = 0u32;
+        // SAFETY: `[first, end)` is guest pages the caller guards or releases; changing their
+        // protection changes no bytes, and a call the host refuses changes nothing.
+        let whole = unsafe {
+            VirtualProtect(
+                std::ptr::with_exposed_provenance_mut::<core::ffi::c_void>(first),
+                end - first,
+                protection,
+                &raw mut old,
+            )
+        };
+        if whole != 0 {
+            return true;
+        }
         let mut at = first;
         while at < end {
             let Some((run_end, _, _)) = query(at) else {
@@ -412,6 +533,44 @@ mod imp {
     /// Addresses one call hands back at most.
     const BATCH: usize = 512;
 
+    /// [`harvest`] of `[first, end)`, which the caller found lies in one allocation: one walk of
+    /// the host's pages, however its pages' states and protections are cut.
+    pub(super) fn harvest_span(first: u64, end: u64, found: &mut impl FnMut(u64)) -> Option<()> {
+        let at = usize::try_from(first).ok()?;
+        let end = usize::try_from(end).ok()?;
+        let mut from = at;
+        while from < end {
+            let mut addresses = [std::ptr::null_mut::<core::ffi::c_void>(); BATCH];
+            let mut count = BATCH;
+            let mut granularity = 0u32;
+            // SAFETY: `[from, end)` lies in one allocation (the caller's contract); the array
+            // holds `count` entries, and every out-parameter outlives the call.
+            let failed = unsafe {
+                GetWriteWatch(
+                    WRITE_WATCH_FLAG_RESET,
+                    std::ptr::with_exposed_provenance::<core::ffi::c_void>(from),
+                    end - from,
+                    addresses.as_mut_ptr(),
+                    &raw mut count,
+                    &raw mut granularity,
+                )
+            };
+            if failed != 0 {
+                return None;
+            }
+            for page in &addresses[..count.min(BATCH)] {
+                found(*page as u64);
+            }
+            if count < BATCH {
+                break;
+            }
+            // A full batch: what follows the last page handed over is asked again, its pages'
+            // record reset only as far as they were handed over.
+            from = (addresses[BATCH - 1] as usize).saturating_add(super::PAGE as usize);
+        }
+        Some(())
+    }
+
     /// Hands `found` every page of `[base, base + len)` the host has seen written since its last
     /// harvest, resetting the host's record of them. `None`, having handed over what it could,
     /// when part of the range is not write-watched.
@@ -429,6 +588,7 @@ mod imp {
                 Protect: 0,
                 Type: 0,
             };
+            asked();
             // SAFETY: querying any address is safe; the structure is the size passed and outlives
             // the call.
             let answered = unsafe {
@@ -481,6 +641,11 @@ mod imp {
 mod imp {
     /// No watch away from Windows yet: every asker compares the bytes.
     pub(super) fn harvest(_base: u64, _len: u64, _found: &mut impl FnMut(u64)) -> Option<()> {
+        None
+    }
+
+    /// Nothing is watched.
+    pub(super) fn harvest_span(_first: u64, _end: u64, _found: &mut impl FnMut(u64)) -> Option<()> {
         None
     }
 
@@ -634,6 +799,77 @@ mod tests {
         let _ = mark(base, len).expect("watched");
         assert_eq!(protection_at(base), PAGE_READONLY, "guarded again");
         super::release_overlapping(base, len);
+    }
+
+    /// Ranges marked together answer each for itself from the record: a write after the mark to
+    /// one is seen there and not in the others, once the next harvest has taken it; a write before
+    /// the mark is not seen (D974).
+    #[test]
+    fn ranges_marked_together_answer_each_for_itself() {
+        let base = crate::unique_test_base();
+        let len = super::GUARDED_FROM / 2;
+        let _held = reserve(base, len, Protection::READ_WRITE).expect("reserve");
+        let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base as usize);
+        // SAFETY: the reservation above is `len` read-write bytes, held for the test.
+        unsafe { bytes.write(1) };
+        let ranges = [
+            (base, 0x1000),
+            (base + 0x3000, 0x2000),
+            (base + 0x7000, 0x1000),
+        ];
+        let since = super::mark_all(&ranges).expect("watched");
+        for &(at, len) in &ranges {
+            assert!(
+                !super::recorded_since(at, len, since),
+                "{at:#x}: before the mark"
+            );
+        }
+        // SAFETY: as above, four pages in.
+        unsafe { bytes.wrapping_add(0x4010).write(2) };
+        assert!(super::harvest_all(&ranges));
+        assert!(
+            super::recorded_since(base + 0x3000, 0x2000, since),
+            "written after"
+        );
+        assert!(
+            super::recorded_since(base + 0x4000, 0x1000, since),
+            "its chunk too"
+        );
+        assert!(
+            !super::recorded_since(base, 0x1000, since),
+            "the others not"
+        );
+        assert!(!super::recorded_since(base + 0x7000, 0x1000, since));
+    }
+
+    /// A range in a reservation the guest's record holds is marked and asked about without asking
+    /// the host where its regions end, and still sees the writes after its mark: that question
+    /// cost 4 - 8 ms in Grand Theft Auto V's reservations, at every texture's check. A large range
+    /// guarded and released asks nothing either.
+    #[test]
+    fn a_recorded_reservation_is_harvested_without_asking_its_regions() {
+        let base = crate::unique_test_base();
+        let len = 4 * super::GUARDED_FROM;
+        let _held = reserve(base, len, Protection::READ_WRITE).expect("reserve");
+        crate::mappings::reserved(base, len, true);
+        let asked = || super::imp::QUERIES.with(std::cell::Cell::get);
+        let before = asked();
+        let small = (base + 0x2000, 0x3000);
+        let since = mark(small.0, small.1).expect("watched");
+        assert_eq!(written_since(small.0, small.1, since), Some(false));
+        let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base as usize + 0x3010);
+        // SAFETY: the reservation above is `len` read-write bytes, held for the test, and no
+        // guard stands over this page.
+        unsafe { bytes.write(7) };
+        assert_eq!(written_since(small.0, small.1, since), Some(true), "seen");
+        assert_eq!(asked(), before, "nothing asked of the regions");
+        super::guard_marked_ranges();
+        let large = (base + super::GUARDED_FROM, 2 * super::GUARDED_FROM);
+        let _ = mark(large.0, large.1).expect("watched");
+        let guarding = asked();
+        super::release_overlapping(large.0, 1);
+        assert_eq!(asked(), guarding, "a release asks nothing");
+        crate::mappings::releasing(base, len);
     }
 
     /// A write after a mark is seen, a write before it is not, and two askers do not disturb each

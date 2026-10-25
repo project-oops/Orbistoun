@@ -125,6 +125,17 @@ pub fn on_release(hook: ReleaseHook) -> bool {
     RELEASE_HOOK.set(hook).is_ok()
 }
 
+/// The reservation holding `at`, as `(base, len)`: one host allocation, which the write-watch is
+/// asked about a span of at a time (D974). Answered from the record, asking the host nothing: the
+/// host's own answer walks the allocation's regions and cost a gigabyte reservation 0.25 ms a
+/// question, 0.9 ms once the device mapped it.
+#[must_use]
+pub fn reservation_of(at: u64) -> Option<(u64, u64)> {
+    let registry = locked();
+    let (&base, &(len, _)) = registry.reservations.range(..=at).next_back()?;
+    (at < base.saturating_add(len)).then_some((base, len))
+}
+
 /// Records a reservation, readable or not as the guest asked.
 pub(crate) fn reserved(base: u64, len: u64, readable: bool) {
     locked().reserved(base, len, readable);
