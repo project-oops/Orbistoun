@@ -26,8 +26,9 @@ mod compute_inputs;
 mod input_controls;
 mod pixel_inputs;
 pub use compute_inputs::{
-    ComputeInputs, GLOBAL_BASE_PUSH_WORD, MOST_SAMPLED_BUFFERS, PARTIAL_PUSH_WORD, PartialGroups,
-    SAMPLED_BASES_PUSH_WORD,
+    ComputeInputs, FIRST_THREAD_PUSH_WORD, GLOBAL_BASE_PUSH_WORD, GLOBAL_PAGE_BYTES,
+    GLOBAL_PAGE_HASH, GLOBAL_PAGE_PROBES, MOST_SAMPLED_BUFFERS, PARTIAL_PUSH_WORD, PartialGroups,
+    SAMPLED_BASES_PUSH_WORD, global_page_slot,
 };
 pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
@@ -477,6 +478,12 @@ pub struct UserData {
     /// `S_00B848_DX10_CLAMP`): whether an output clamp turns a NaN into zero (set) or passes it
     /// through (clear). `None` when no `RSRC1` was seen, and then a clamped instruction is refused.
     pub dx10_clamp: Option<bool>,
+    /// The program's `FLOAT_MODE`, bits 19:12 of its `PGM_RSRC1` (Mesa
+    /// `src/amd/registers/gfx10.json:11880`): whether its 32-bit subnormals are kept or flushed,
+    /// which the module declares ([`subnormals`]). `None` when no `RSRC1` was seen, and then the
+    /// module declares nothing and the driver chooses.
+    #[serde(default)]
+    pub float_mode: Option<u8>,
     /// A pixel shader's input registers, which place its system values after the interpolants.
     /// `None` when the stream set none, and then no vector register is seeded.
     #[serde(default)]
@@ -1024,13 +1031,45 @@ pub(crate) fn declare_inf_nan_preserve(b: &mut Builder, main: Id) {
     );
 }
 
+/// What a `FLOAT_MODE`'s 32-bit subnormal field, bits 5:4, asks a module to do with subnormals:
+/// keep them (`true`) or flush them, and whether that is exact. The field is 0 to flush them on
+/// input and output, 1 to keep them on input only, 2 on output only and 3 to keep them (Mesa
+/// `src/amd/compiler/aco_ir.h:137-157`). SPIR-V's float controls say only the two whole modes;
+/// a mode that keeps them one way is translated by what its results do, which the next
+/// instruction reads.
+#[must_use]
+pub fn subnormals(float_mode: u8) -> (bool, bool) {
+    match float_mode >> 4 & 3 {
+        0 => (false, true),
+        1 => (false, false),
+        2 => (true, false),
+        _ => (true, true),
+    }
+}
+
+/// Declares how the module's 32-bit arithmetic treats subnormals, as `float_mode` asks
+/// ([`subnormals`]); nothing where no `FLOAT_MODE` was seen. A device that cannot honour the
+/// declaration gets the closest it can (`orbistoun_spirv::subnormals_for`).
+pub(crate) fn declare_subnormals(b: &mut Builder, main: Id, float_mode: Option<u8>) {
+    let Some(float_mode) = float_mode else {
+        return;
+    };
+    let (capability, execution_mode) = if subnormals(float_mode).0 {
+        (capability::DENORM_PRESERVE, mode::DENORM_PRESERVE)
+    } else {
+        (capability::DENORM_FLUSH_TO_ZERO, mode::DENORM_FLUSH_TO_ZERO)
+    };
+    b.header(op::CAPABILITY, &[capability]);
+    b.header(op::EXECUTION_MODE, &[main.0, execution_mode, 32]);
+}
+
 /// Emits the module header: capabilities, the memory model, the entry point and its execution mode,
 /// and a fragment output's location. A compute module's workgroup is `waves` invocations, one per
 /// wave of the guest's thread group (D858).
 fn emit_header(
     b: &mut Builder,
     (stage, primitive, per_lane, waves): (Stage, MeshPrimitive, Option<(u32, bool)>, u32),
-    main: Id,
+    (main, device_addressed): (Id, bool),
     (output, depth): (Option<Id>, Option<Id>),
 ) {
     if stage == Stage::Mesh {
@@ -1057,7 +1096,22 @@ fn emit_header(
     }
 
     declare_inf_nan_preserve(b, main);
-    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+    // A device-addressed dispatch forms pointers from 64-bit device addresses (D964).
+    let addressing = if device_addressed {
+        b.header(op::CAPABILITY, &[capability::INT64]);
+        b.header(
+            op::CAPABILITY,
+            &[capability::PHYSICAL_STORAGE_BUFFER_ADDRESSES],
+        );
+        b.header(
+            op::EXTENSION,
+            &Builder::literal_string(orbistoun_spirv::PHYSICAL_STORAGE_BUFFER),
+        );
+        addressing::PHYSICAL_STORAGE_BUFFER_64
+    } else {
+        addressing::LOGICAL
+    };
+    b.header(op::MEMORY_MODEL, &[addressing, memory::GLSL450]);
 
     match stage {
         // An invocation a wave (D858), or a lane of each wave where it runs one per lane (D880).
@@ -1974,7 +2028,7 @@ fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
 /// its lanes exchange through workgroup memory because the host's subgroup is narrower - and how
 /// many lanes the per-lane loops run: one then, else the lanes one invocation simulates. A guest
 /// dispatch run per lane exchanges through workgroup memory only where its `masks` say (D880,
-/// D884).
+/// D884), and runs two lanes an invocation where they say it holds a half of each (D973).
 fn lanes_per_invocation(
     stage: Stage,
     width: Width,
@@ -1994,7 +2048,9 @@ fn lanes_per_invocation(
             (width.lanes(), exchanges)
         });
     let modelled = if per_lane.is_some() {
-        1
+        masks
+            .filter(|_| dispatch)
+            .map_or(1, LaneMasks::lanes_an_invocation)
     } else {
         simulated_lanes(stage, width)
     };
@@ -2355,6 +2411,9 @@ pub struct Wavefront<'a> {
     ),
     /// Where a compute module's image descriptors come from, and what it did to their registers.
     images: ImageTrace,
+    /// What each instruction did to the registers that hold only an image's name, for the dataflow
+    /// that finds a value read of them along the program's paths (D970).
+    name_only: crate::name_only::NameOnly,
     /// The offsets of the instructions that rewrite only an image descriptor's type
     /// ([`type_rewrites`]), which translate to nothing.
     type_rewrites: std::collections::BTreeSet<u32>,
@@ -2394,6 +2453,11 @@ pub struct Wavefront<'a> {
     unwritten_user_data: u32,
     /// A guest dispatch's buffers placed from a sample of its waves, one bit a slot (D951).
     sampled_buffers: u32,
+    /// The backward jumps before a loop is cut, zero for [`crate::control::LOOP_CAP`] (D949).
+    loop_cap: u32,
+    /// A guest dispatch's buffers whose descriptor is selected from a table at run time, read in
+    /// the table's pages, one bit a slot, and the slot of the buffer of pages holding them (D966).
+    table_buffers: (u64, Option<u32>),
     /// Whether the program reads one of them, whose value nothing here knows.
     reads_unwritten: bool,
     /// Scalar and vector registers written so far, in program order: seeded at entry, or by an
@@ -2431,6 +2495,52 @@ pub struct Wavefront<'a> {
     vector_copies: BTreeMap<u32, u32>,
     /// A dispatch's scratch, where it has any (D954).
     scratch: Option<Scratch>,
+    /// The types a device-addressed dispatch forms device addresses with (D964), where it is one.
+    device: Option<DeviceTypes>,
+}
+
+/// What a device-addressed dispatch declares to reach guest memory by device address (D964): the
+/// 64-bit integer type, a pointer to one word through a device address, and the four words of one
+/// table slot and a pointer to them, which a lookup reads as one load; and the helper function every
+/// lookup calls (D969), with whether its body is written yet.
+#[derive(Debug, Clone, Copy)]
+struct DeviceTypes {
+    u64_type: Id,
+    word_pointer: Id,
+    slot_type: Id,
+    slot_pointer: Id,
+    lookup: Id,
+    lookup_written: bool,
+}
+
+impl DeviceTypes {
+    fn declare(b: &mut Builder, u32_type: Id) -> Self {
+        let u64_type = b.declare_type(op::TYPE_INT, &[64, 0]);
+        let pointer_to = |b: &mut Builder, pointee: Id| {
+            let pointer = b.id();
+            b.declare(
+                op::TYPE_POINTER,
+                &[
+                    pointer.0,
+                    orbistoun_spirv::storage::PHYSICAL_STORAGE_BUFFER,
+                    pointee.0,
+                ],
+            );
+            pointer
+        };
+        let word_pointer = pointer_to(b, u32_type);
+        let slot_type = b.declare_type(op::TYPE_VECTOR, &[u32_type.0, 4]);
+        let slot_pointer = pointer_to(b, slot_type);
+        let lookup = b.id();
+        Self {
+            u64_type,
+            word_pointer,
+            slot_type,
+            slot_pointer,
+            lookup,
+            lookup_written: false,
+        }
+    }
 }
 
 /// An open loop over the wave's lanes ([`Model::open_lane_loop`]): the lane, a phi of zero and the
@@ -2612,9 +2722,18 @@ impl Wavefront<'_> {
 
     /// Settles each texture's sampler before an access whose sampler registers `reaching` filled:
     /// a sampler reloaded from where the first access's came from is the same sampler, and any
-    /// other write into its registers makes the texture another one (D690).
-    fn settle_samplers(&mut self, reaching: Option<DescriptorLoad>) {
-        for bound in &mut self.textures {
+    /// other write into its registers makes the texture another one (D690). Only an access through
+    /// the same sampler registers reads that sampler: a fetch names none, so whatever came into a
+    /// sampler's registers since leaves it reading the image as it was.
+    fn settle_samplers(&mut self, sampler: Option<u32>, reaching: Option<DescriptorLoad>) {
+        let Some(sampler) = sampler else {
+            return;
+        };
+        for bound in self
+            .textures
+            .iter_mut()
+            .filter(|bound| bound.sampler == Some(sampler))
+        {
             if bound.sampler_disturbed
                 && bound.sampler_load.is_some()
                 && bound.sampler_load == reaching
@@ -2624,6 +2743,113 @@ impl Wavefront<'_> {
             if bound.sampler_disturbed {
                 bound.disturbed = true;
             }
+        }
+    }
+
+    /// Settles the texture an access through `descriptor` reads again, where one was declared, and
+    /// answers whether the access reads another one the program computed: a dispatch's registers
+    /// rewritten since the texture they named was read, by nothing a table load or a user-data word
+    /// names, hold another descriptor - a texture of its own, found per dispatch by running the
+    /// program up to the access (D960). The same load reaching them again is the same
+    /// texture.
+    fn displaced(
+        &mut self,
+        descriptor: u32,
+        (reaching, seeded_word, sampler): (Reaching, Option<u32>, Option<u32>),
+    ) -> bool {
+        let by_register = reaching.is_none() && seeded_word.is_none();
+        let compute = self.stage == Stage::Compute;
+        existing_texture(
+            &mut self.textures,
+            descriptor,
+            (reaching, seeded_word, sampler),
+        )
+        .is_some_and(|bound| {
+            if bound.disturbed && loaded_by(bound, reaching) {
+                bound.disturbed = false;
+            }
+            bound.disturbed && by_register && compute
+        })
+    }
+
+    /// Where the descriptor of a dispatch's new storage image, stored to through `descriptor` at
+    /// byte `at`, comes from: the load that filled the registers for the store, where it is known -
+    /// a program that reloads them names another image there (D690) - or, where `computed`, the
+    /// registers at the store, found per dispatch (D960, D963).
+    fn stored_source(
+        &self,
+        descriptor: u32,
+        (shape, at, computed): (model::ImageShape, u32, bool),
+    ) -> Result<TextureSource, &'static str> {
+        let shape = model::ImageShape {
+            dimension: shape.dimension,
+            ..model::ImageShape::default()
+        };
+        if computed {
+            return Ok(TextureSource {
+                volume: shape.volume(),
+                layered: shape.layered(),
+                computed: Some(ComputedImage {
+                    at,
+                    register: descriptor,
+                    first_register: self.images.user_data_registers.0,
+                }),
+                ..TextureSource::default()
+            });
+        }
+        let reaching = self.descriptor_loads.2.get(&at).copied();
+        self.new_texture_source(descriptor, (reaching, shape, false))
+    }
+
+    /// The slot of the image a store through `descriptor` at byte `at` names again, where one was
+    /// declared, and whether the store names another the program computed (D963). A dispatch's
+    /// store names the image the load reaching its registers read, or the user-data word still in
+    /// them, whatever registers it goes through; otherwise, and at any other stage, the image last
+    /// stored through the same registers - unless they were rewritten since by nothing a load or a
+    /// user-data word names, when a dispatch's hold another, found per dispatch where the store is
+    /// (D960).
+    fn stored_again(&self, descriptor: u32, at: u32) -> (Option<usize>, bool) {
+        let compute = self.stage == Stage::Compute;
+        let reaching = compute
+            .then(|| self.descriptor_loads.2.get(&at).copied())
+            .flatten();
+        let seeded = compute
+            .then(|| self.still_seeded(descriptor, model::IMAGE_DESCRIPTOR_REGISTERS))
+            .flatten();
+        let held = self
+            .images
+            .stored
+            .iter()
+            .zip(&self.images.stored_sources)
+            .zip(self.images.stored_written)
+            .take_while(|((held, _), _)| held.is_some())
+            .enumerate();
+        let same = |source: &Option<TextureSource>| match (reaching, seeded, source) {
+            (Some((table, offset, through)), _, Some(source)) => {
+                table == Some(source.table)
+                    && source.table_offset == Some(offset)
+                    && source.buffer_offset == through
+            }
+            (None, Some(word), Some(source)) => source.user_data == Some(word),
+            _ => false,
+        };
+        if reaching.is_some() || seeded.is_some() {
+            let found = held
+                .clone()
+                .find(|(_, ((_, source), _))| same(source))
+                .map(|(index, _)| index);
+            if found.is_some() || reaching.is_some_and(|(table, _, _)| table.is_some()) {
+                return (found, false);
+            }
+        }
+        let by_register: Vec<(usize, bool)> = held
+            .filter(|(_, ((held, _), _))| held.is_some_and(|(_, was)| was == descriptor))
+            .map(|(index, (_, written))| (index, written))
+            .collect();
+        match by_register.iter().find(|(_, written)| !written) {
+            Some(&(index, _)) => (Some(index), false),
+            None if compute && !by_register.is_empty() => (None, true),
+            None => (by_register.first().map(|&(index, _)| index), false),
         }
     }
 
@@ -2720,9 +2946,10 @@ impl Wavefront<'_> {
                 ));
             }
         };
-        let earlier_resolved = self.textures.iter().all(|earlier| {
-            earlier.source.table_offset.is_some() || earlier.source.user_data.is_some()
-        });
+        let earlier_resolved = self
+            .textures
+            .iter()
+            .all(|earlier| resolved(&earlier.source));
         if !self.textures.is_empty()
             && ((table_offset.is_none() && user_data.is_none()) || !earlier_resolved)
         {
@@ -2747,6 +2974,51 @@ impl Wavefront<'_> {
             compare: shape.compare,
             layered: shape.layered(),
             level_user_data: None,
+            computed: None,
+        })
+    }
+
+    /// The source of a dispatch's texture whose descriptor the program put in the eight registers
+    /// from `descriptor` by something no table load or user-data word names: the next slot, found
+    /// per dispatch by running the program up to the access at byte `at` and reading the registers
+    /// there (D690, D753).
+    ///
+    /// Refused where it would be past the bindings a stage has, or where an earlier texture's
+    /// descriptor was not identified, as [`Self::new_texture_source`] refuses one.
+    fn computed_texture_source(
+        &self,
+        descriptor: u32,
+        (at, shape): (u32, model::ImageShape),
+    ) -> Result<TextureSource, &'static str> {
+        let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
+        if slot as usize >= MAX_TEXTURES {
+            return Err(concat!(
+                "this shader reads more textures than its stage has bindings: thirty-two, the ",
+                "last eight a primitive shader's (D690)"
+            ));
+        }
+        if !self
+            .textures
+            .iter()
+            .all(|earlier| resolved(&earlier.source))
+        {
+            return Err(concat!(
+                "this shader reads more than one texture and at least one descriptor did not come from ",
+                "its descriptor table, so which is which cannot be told (D690)"
+            ));
+        }
+        Ok(TextureSource {
+            slot,
+            cube: shape.cube(),
+            volume: shape.volume(),
+            compare: shape.compare,
+            layered: shape.layered(),
+            computed: Some(ComputedImage {
+                at,
+                register: descriptor,
+                first_register: self.images.user_data_registers.0,
+            }),
+            ..TextureSource::default()
         })
     }
 
@@ -3185,18 +3457,27 @@ impl<'a> Wavefront<'a> {
         let layered = layered.0;
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data, masks);
         let lane_masks = per_lane.and(masks).filter(|_| stage == Stage::Compute);
-        let ballots = lane_masks == Some(LaneMasks::Ballot);
+        let ballots = lane_masks.is_some_and(LaneMasks::by_subgroup);
         // A guest dispatch's group runs as one invocation per wave (D858).
         let waves = user_data
             .compute
             .map_or(1, |inputs| inputs.waves(width.lanes()));
+        let device_addressed = stage == Stage::Compute
+            && user_data
+                .compute
+                .is_some_and(|inputs| inputs.device_addressed);
+        // A wave is as many invocations as it has lanes, or half as many where each holds two
+        // (D973).
+        let invocations = per_lane.map(|(lanes, exchanges)| (lanes / modelled.max(1), exchanges));
         emit_header(
             &mut b,
-            (stage, primitive, per_lane, waves),
-            main,
+            (stage, primitive, invocations, waves),
+            (main, device_addressed),
             (output, depth),
         );
+        declare_subnormals(&mut b, main, user_data.float_mode);
         declare_base_types(&mut b, &ids);
+        let device = device_addressed.then(|| DeviceTypes::declare(&mut b, u32_type));
         let output = FragmentOutputs::declare(
             &mut b,
             (f32_type, u32_type, vec4),
@@ -3221,7 +3502,7 @@ impl<'a> Wavefront<'a> {
             declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
         let scratch = Scratch::declare(
             &mut b,
-            (u32_type, stage, per_lane.map(|(lanes, _)| lanes)),
+            (u32_type, stage, invocations.map(|(lanes, _)| lanes)),
             &user_data,
         );
         let lane_ids = per_lane.map(|shape| {
@@ -3232,11 +3513,13 @@ impl<'a> Wavefront<'a> {
                 (stage == Stage::Compute && !ballots, ballots && waves > 1),
             )
         });
-        // A guest dispatch whose waves are subgroups makes its masks by their ballots (D884).
+        // A guest dispatch whose waves are subgroups makes its masks by their ballots (D884), and
+        // reads another lane by their shuffles (D973).
         if ballots {
             for needed in [
                 capability::GROUP_NON_UNIFORM,
                 capability::GROUP_NON_UNIFORM_BALLOT,
+                capability::GROUP_NON_UNIFORM_SHUFFLE,
             ] {
                 b.header(op::CAPABILITY, &[needed]);
             }
@@ -3378,6 +3661,7 @@ impl<'a> Wavefront<'a> {
             pair_buffers: None,
             textures: Vec::new(),
             descriptor_loads: Default::default(),
+            name_only: crate::name_only::NameOnly::default(),
             type_rewrites: std::collections::BTreeSet::new(),
             images: ImageTrace::seeded(user_data.first_register, user_data.count),
             bool_type,
@@ -3400,6 +3684,17 @@ impl<'a> Wavefront<'a> {
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
             unwritten_user_data: user_data.compute.unwrap_or_default().unwritten_user_data,
             sampled_buffers: user_data.compute.unwrap_or_default().sampled_buffers,
+            loop_cap: user_data.compute.unwrap_or_default().loop_cap,
+            table_buffers: (
+                user_data.compute.unwrap_or_default().table_buffers,
+                buffers
+                    .sources
+                    .iter()
+                    .position(|source| {
+                        matches!(source, crate::draw_buffers::BufferSource::Global(_))
+                    })
+                    .and_then(|slot| u32::try_from(slot).ok()),
+            ),
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
@@ -3419,6 +3714,7 @@ impl<'a> Wavefront<'a> {
             scalar_copies: BTreeMap::new(),
             vector_copies: BTreeMap::new(),
             scratch,
+            device,
         };
 
         this.seed_entry(user_data_source, &user_data, &system);
@@ -4091,6 +4387,8 @@ impl<'a> Wavefront<'a> {
         if register < 128 {
             self.written.0 |= 1 << register;
         }
+        // Whatever name the register held is gone, on the path this instruction lies on (D970).
+        self.name_only.wrote(register);
         let value = self.within_modelled_lanes(register, value);
         if let Some(half) = exec_half(register) {
             self.known_exec[half] = self.constant_value(value);
@@ -4137,6 +4435,16 @@ impl<'a> Wavefront<'a> {
 
     /// Whether `lane`'s bit of the execution mask is known, and if so whether it is set.
     fn lane_known(&self, lane: u32) -> Option<bool> {
+        // Two lanes an invocation (D973): `lane` is a half, and which of its lanes this is a
+        // run-time value, so it is known only where that half of the mask is, whole.
+        if self.holds_two() {
+            let half = self.known_exec[usize::from(lane != 0)]?;
+            return match half {
+                0 => Some(false),
+                u32::MAX => Some(true),
+                _ => None,
+            };
+        }
         // One invocation per lane (D760): which lane this is is a run-time value, so a lane is
         // known only where the wave's whole mask is.
         if self.invocation.is_some() {
@@ -4176,9 +4484,27 @@ impl<'a> Wavefront<'a> {
     /// Where `lane`'s outputs and mask bit go: the lane itself, or this invocation's lane when
     /// each invocation is one lane (D760).
     fn lane_slot(&mut self, lane: u32) -> Id {
-        self.invocation
+        self.own_lane(lane)
             .or(self.lane_loop.map(|looped| looped.lane))
             .unwrap_or_else(|| Self::constant(self, lane))
+    }
+
+    /// Whether each invocation runs two of its wave's lanes, its place in its subgroup and that
+    /// place plus thirty-two (D973).
+    fn holds_two(&self) -> bool {
+        self.invocation.is_some() && self.modelled == 2
+    }
+
+    /// The wave's lane that this invocation's `lane` is, where an invocation's lanes are known only
+    /// at run time: its one lane where each invocation is one (D760); where it holds two (D973),
+    /// its place in its subgroup for `lane` zero and that place plus thirty-two for `lane` one.
+    fn own_lane(&mut self, lane: u32) -> Option<Id> {
+        let invocation = self.invocation?;
+        if !self.holds_two() || lane == 0 {
+            return Some(invocation);
+        }
+        let thirty_two = Self::constant(self, 32);
+        Some(self.binary(op::IADD, invocation, thirty_two))
     }
 
     /// Waits for every lane of the workgroup, making each one's workgroup-memory writes visible to
@@ -4555,7 +4881,7 @@ impl<'a> Wavefront<'a> {
 
     /// Whether a lane is active, as a boolean, read from the mask half that holds its bit.
     fn lane_active(&mut self, lane: u32) -> Id {
-        if let Some(invocation) = self.invocation {
+        if let Some(invocation) = self.own_lane(lane) {
             let low = self.load_scalar(EXEC_LO);
             let high = self.load_scalar(EXEC_HI);
             return self.invocation_bit(invocation, (low, high));
@@ -4794,8 +5120,8 @@ impl<'a> Wavefront<'a> {
     /// Notes a guest-visible read of a register, and, in a mesh module, a geometry-engine input
     /// read before anything wrote it.
     fn note_read(&mut self, scalar: bool, register: u32) {
-        if scalar && register < u128::BITS && self.images.opaque_scalars >> register & 1 != 0 {
-            self.images.reads_opaque = true;
+        if scalar {
+            self.name_only.read(register);
         }
         if self.stage != Stage::Mesh || self.reads_geometry_input {
             return;
@@ -4851,9 +5177,11 @@ impl<'a> Wavefront<'a> {
         if self.reads_geometry_input {
             return Err(TranslateError::ReadsGeometryInputs);
         }
-        if self.images.reads_opaque {
+        // A value read some name-only load reaches along the program's paths, found over its
+        // blocks rather than in the order they were emitted (D970).
+        if let Some(at) = self.name_only.first_read() {
             return Err(TranslateError::Unsupported {
-                offset: 0,
+                offset: at,
                 detail: concat!(
                     "a dispatch reads an image descriptor it loaded from its table as a value, ",
                     "and the load binds the image rather than reading the words"
@@ -5325,6 +5653,32 @@ impl<'a> Wavefront<'a> {
         );
         self.builder.function(op::STORE, &[to.0, value.0]);
     }
+
+    /// Raises the observation's word `slot` of `member` to `value` where it is below it, by a
+    /// device-scope atomic maximum, so invocations racing to it leave the highest whole.
+    fn max_observation(&mut self, member: Id, slot: u32, value: Id) {
+        let index = self.constant(slot);
+        let to = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                self.buffer_element_ptr.0,
+                to.0,
+                self.buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let (device, relaxed) = (
+            self.constant(orbistoun_spirv::scope::DEVICE),
+            self.constant(0),
+        );
+        let held = self.builder.id();
+        self.builder.function(
+            op::ATOMIC_U_MAX,
+            &[self.u32_type.0, held.0, to.0, device.0, relaxed.0, value.0],
+        );
+    }
 }
 
 impl Model for Wavefront<'_> {
@@ -5466,6 +5820,25 @@ impl Model for Wavefront<'_> {
             let own = self.load_lane(register, 0);
             return Some(self.exchange_value(words, invocation, own, lane));
         }
+        // Two lanes an invocation (D973): lane `n` is the subgroup's invocation `n mod 32`, in its
+        // first half below thirty-two and its second from there. Every invocation shuffles both
+        // halves, so each is read whichever half each invocation asks for.
+        if self.holds_two() {
+            let scope = Self::constant(self, orbistoun_spirv::scope::SUBGROUP);
+            let (thirty_one, thirty_two) = (Self::constant(self, 31), Self::constant(self, 32));
+            let within = self.binary(op::BITWISE_AND, lane, thirty_one);
+            let mut read = [lane; 2];
+            for (half, slot) in (0..2).zip(read.iter_mut()) {
+                let own = self.load_lane(register, half);
+                *slot = self.builder.id();
+                self.builder.function(
+                    op::GROUP_NON_UNIFORM_SHUFFLE,
+                    &[self.u32_type.0, slot.0, scope.0, own.0, within.0],
+                );
+            }
+            let upper = self.compare(op::UGREATER_THAN_EQUAL, lane, thirty_two);
+            return Some(self.select(upper, read[1], read[0]));
+        }
         if self.invocation.is_some() {
             let own = self.load_lane(register, 0);
             let scope = Self::constant(self, orbistoun_spirv::scope::SUBGROUP);
@@ -5554,11 +5927,10 @@ impl Model for Wavefront<'_> {
         if !self.exact_memory() || !traced || registers > 2 * model::IMAGE_DESCRIPTOR_REGISTERS {
             return false;
         }
-        for register in first..first + registers {
-            if register < u128::BITS {
-                self.images.opaque_scalars |= 1 << register;
-            }
-        }
+        let named = (first..first + registers)
+            .filter(|&register| register < u128::BITS)
+            .fold(0_u128, |named, register| named | 1 << register);
+        self.name_only.named(named);
         true
     }
 
@@ -5568,9 +5940,69 @@ impl Model for Wavefront<'_> {
         }
     }
 
+    fn note_escape_at(&mut self, escaped: Id, lane: Option<u32>, page: Id) {
+        if let Some(state) = self.dispatch {
+            state.note_at(self, escaped, lane, page);
+        }
+    }
+
+    fn device_addressed(&self) -> bool {
+        self.device.is_some()
+    }
+
+    fn device_lookup_function(&mut self) -> Option<(Id, bool)> {
+        let types = self.device.as_mut()?;
+        let written = std::mem::replace(&mut types.lookup_written, true);
+        Some((types.lookup, written))
+    }
+
+    fn device_table(&mut self) -> Option<crate::device_address::DeviceTable> {
+        let types = self.device?;
+        let at = crate::device_address::DEVICE_TABLE_PUSH_WORD;
+        let [low, high, bits, shift, marks_low, marks_high, recording] =
+            [at, at + 1, at + 2, at + 3, at + 4, at + 5, at + 6].map(|word| self.push_word(word));
+        let (low, high, bits, shift) = (low?, high?, bits?, shift?);
+        let (marks_low, marks_high, recording) = (marks_low?, marks_high?, recording?);
+        let u64_type = types.u64_type;
+        let thirty_two = self.constant(32);
+        let b = &mut self.builder;
+        let mut wide = |low: Id, high: Id| {
+            let (wide_low, wide_high, up, address) = (b.id(), b.id(), b.id(), b.id());
+            b.function(op::UCONVERT, &[u64_type.0, wide_low.0, low.0]);
+            b.function(op::UCONVERT, &[u64_type.0, wide_high.0, high.0]);
+            b.function(
+                op::SHIFT_LEFT_LOGICAL,
+                &[u64_type.0, up.0, wide_high.0, thirty_two.0],
+            );
+            b.function(op::BITWISE_OR, &[u64_type.0, address.0, up.0, wide_low.0]);
+            address
+        };
+        let address = wide(low, high);
+        let marks = wide(marks_low, marks_high);
+        Some(crate::device_address::DeviceTable {
+            u64_type,
+            word_pointer: types.word_pointer,
+            slot_type: types.slot_type,
+            slot_pointer: types.slot_pointer,
+            address,
+            bits,
+            shift,
+            marks,
+            recording,
+        })
+    }
+
     // Only a guest dispatch has an observation the host reads for a cut, so only it cuts (D949).
     fn loop_budget(&mut self) -> Option<Id> {
         self.dispatch.map(compute_inputs::DispatchState::jumps)
+    }
+
+    fn loop_cap(&self) -> u32 {
+        if self.loop_cap == 0 {
+            crate::control::LOOP_CAP
+        } else {
+            self.loop_cap
+        }
     }
 
     fn note_loop_cut(&mut self, cut: Id, branch: u32) {
@@ -5589,6 +6021,10 @@ impl Model for Wavefront<'_> {
 
     fn lane_index(&mut self) -> Option<Id> {
         self.invocation
+    }
+
+    fn lane_number(&mut self, lane: u32) -> Option<Id> {
+        self.own_lane(lane)
     }
 
     fn quad_position(&mut self) -> Option<Id> {
@@ -5699,13 +6135,21 @@ impl Model for Wavefront<'_> {
             return;
         }
         let scope = Self::constant(self, orbistoun_spirv::scope::WORKGROUP);
+        // A wave its subgroup carries waits for its own lanes alone (D973): the subgroup is the
+        // wave, and the group's other waves follow their own scalar control flow, which a
+        // workgroup barrier here would have to share.
+        let waits_for = if self.lane_masks.is_some_and(LaneMasks::by_subgroup) {
+            Self::constant(self, orbistoun_spirv::scope::SUBGROUP)
+        } else {
+            scope
+        };
         let semantics = Self::constant(
             self,
             orbistoun_spirv::semantics::ACQUIRE_RELEASE
                 | orbistoun_spirv::semantics::WORKGROUP_MEMORY,
         );
         self.builder
-            .function(op::CONTROL_BARRIER, &[scope.0, scope.0, semantics.0]);
+            .function(op::CONTROL_BARRIER, &[waits_for.0, scope.0, semantics.0]);
     }
 
     fn set_lane_bit(&mut self, halves: (Id, Id), lane: u32, condition: Id) -> (Id, Id) {
@@ -5715,6 +6159,25 @@ impl Model for Wavefront<'_> {
                 None => model::constant_lane_bit(self, halves, lane, condition),
             };
         };
+        // Two lanes an invocation (D973): the subgroup's ballot of `lane`'s half is that half of
+        // the mask, every lane's bit in it.
+        if self.holds_two() {
+            let uvec4 = self.unsigned_vec4();
+            let scope = Self::constant(self, orbistoun_spirv::scope::SUBGROUP);
+            let u32_type = self.u32_type;
+            let b = &mut self.builder;
+            let (ballot, bits) = (b.id(), b.id());
+            b.function(
+                op::GROUP_NON_UNIFORM_BALLOT,
+                &[uvec4.0, ballot.0, scope.0, condition.0],
+            );
+            b.function(op::COMPOSITE_EXTRACT, &[u32_type.0, bits.0, ballot.0, 0]);
+            return if lane == 0 {
+                (self.binary(op::BITWISE_OR, halves.0, bits), halves.1)
+            } else {
+                (halves.0, self.binary(op::BITWISE_OR, halves.1, bits))
+            };
+        }
         // A guest dispatch run per lane holds only its own lane's bits where its program reads no
         // mask whole, only each lane its own bit (D880); one that reads a mask whole makes every
         // lane's, by ballot or exchange as a primitive shader does (D884).
@@ -5746,7 +6209,8 @@ impl Model for Wavefront<'_> {
     }
 
     fn lane_bit(&mut self, low: Id, high: Id, lane: u32) -> Id {
-        match self.invocation.or(self.lane_loop.map(|looped| looped.lane)) {
+        let own = self.own_lane(lane);
+        match own.or(self.lane_loop.map(|looped| looped.lane)) {
             Some(invocation) => self.invocation_bit(invocation, (low, high)),
             None => model::constant_lane_test(self, (low, high), lane),
         }
@@ -5815,6 +6279,10 @@ impl Model for Wavefront<'_> {
     fn enter_block(&mut self) {
         // A block can be reached from more than one place, each with its own mask.
         self.known_exec = [None; 2];
+    }
+
+    fn begin_instruction(&mut self, offset: u32) {
+        self.name_only.at(offset);
     }
 
     fn constant(&mut self, value: u32) -> Id {
@@ -5893,6 +6361,15 @@ impl Model for Wavefront<'_> {
         self.store_lane_masked(register, lane, value);
     }
 
+    fn write_vector_lane_unmasked(&mut self, register: u32, lane: u32, value: Id) {
+        self.vector_copies.remove(&register);
+        if let Some(word) = self.written.1.get_mut((register / 64) as usize) {
+            *word |= 1 << (register % 64);
+        }
+        let pointer = self.lane_pointer(register, lane);
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
     fn write_scalar(&mut self, register: u32, value: Id) {
         // A user-data word the stream never wrote is unknown only until the program writes its
         // register: a read after that reads the program's own value. In program order, as the
@@ -5902,7 +6379,6 @@ impl Model for Wavefront<'_> {
         }
         if register < u128::BITS {
             self.images.written_scalars |= 1 << register;
-            self.images.opaque_scalars &= !(1 << register);
         }
         // Whatever it held is gone; a copy says so again once the write is done.
         self.scalar_copies.remove(&register);
@@ -5919,6 +6395,18 @@ impl Model for Wavefront<'_> {
             }
             if sampler_disturbed {
                 bound.sampler_disturbed = true;
+            }
+        }
+        for (held, written) in self
+            .images
+            .stored
+            .iter()
+            .zip(&mut self.images.stored_written)
+        {
+            if held.is_some_and(|(_, first)| {
+                (first..first + model::IMAGE_DESCRIPTOR_REGISTERS).contains(&register)
+            }) {
+                *written = true;
             }
         }
         Self::store_scalar(self, register, value);
@@ -5991,12 +6479,16 @@ impl Model for Wavefront<'_> {
                 "two-dimensional one"
             ));
         }
-        // The image a store names again, by the registers holding its descriptor (D690).
-        for (held, source) in self.images.stored.iter().zip(self.images.stored_sources) {
-            let Some((stored, was)) = *held else { break };
-            if was != descriptor {
-                continue;
-            }
+        // The image a store names again: a dispatch's by the load that reached its registers, or
+        // the user data still in them, and otherwise by the registers - unless they were rewritten
+        // since, when they hold another, found where the store is (D690, D960, D963).
+        let (found, computed) = self.stored_again(descriptor, at);
+        if let Some(index) = found {
+            let (Some((stored, _)), source) =
+                (self.images.stored[index], self.images.stored_sources[index])
+            else {
+                return Err("a stored image's slot is empty");
+            };
             let same_level = source.is_none_or(|source| {
                 source.level_user_data == level && source.layered == shape.layered()
             });
@@ -6009,7 +6501,7 @@ impl Model for Wavefront<'_> {
             return Ok(stored);
         }
         // A pixel shader's harness binds one storage image; a compute dispatch binds each the
-        // guest's descriptors name, up to the bindings a stage has (D893).
+        // guest's descriptors name, up to the bindings a stage has (D893, D963).
         let slot = self
             .images
             .stored
@@ -6026,21 +6518,14 @@ impl Model for Wavefront<'_> {
         }
         let Some(&binding) = orbistoun_spirv::STORAGE_IMAGE_BINDINGS.get(slot) else {
             return Err(
-                "this dispatch stores to more images than a stage binds storage images (D893)",
+                "this dispatch stores to more images than a stage binds storage images: sixteen (D963)",
             );
         };
 
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
-            let shape = model::ImageShape {
-                dimension: shape.dimension,
-                ..model::ImageShape::default()
-            };
-            // The load that filled the descriptor registers for this store, where it is known:
-            // a program that reloads them names another image there (D690).
-            let reaching = self.descriptor_loads.2.get(&at).copied();
-            let mut source = self.new_texture_source(descriptor, (reaching, shape, false))?;
+            let mut source = self.stored_source(descriptor, (shape, at, computed))?;
             source.slot = u32::try_from(slot).unwrap_or(u32::MAX);
             source.level_user_data = level;
             self.images.stored_sources[slot] = Some(source);
@@ -6119,17 +6604,15 @@ impl Model for Wavefront<'_> {
         // A sampler reloaded from where the first sample's came from is the same sampler: only a
         // load from elsewhere, or one not traced, makes it another.
         let sampler_reaching = self.descriptor_loads.3.get(&at).copied();
-        self.settle_samplers(sampler_reaching);
+        self.settle_samplers(sampler, sampler_reaching);
+        let computed = self.displaced(descriptor, (reaching, seeded_word, sampler));
         let found = existing_texture(
             &mut self.textures,
             descriptor,
             (reaching, seeded_word, sampler),
-        );
+        )
+        .filter(|_| !computed);
         if let Some(bound) = found {
-            // The same load reached it again: the same texture.
-            if bound.disturbed && loaded_by(bound, reaching) {
-                bound.disturbed = false;
-            }
             if bound.disturbed {
                 return Err(concat!(
                     "the registers holding this shader's image descriptor were written ",
@@ -6149,7 +6632,11 @@ impl Model for Wavefront<'_> {
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }
-        let source = self.new_texture_source(descriptor, (reaching, shape, unwritten))?;
+        let source = if computed {
+            self.computed_texture_source(descriptor, (at, shape))?
+        } else {
+            self.new_texture_source(descriptor, (reaching, shape, unwritten))?
+        };
         let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
         let pointer = self.builder.id();
@@ -6376,9 +6863,12 @@ impl Model for Wavefront<'_> {
             return Ok(());
         }
         let active = self.lane_active(lane);
-        // One invocation per lane (D760): another lane may write this word at the same time, so an
-        // inactive lane writes nothing rather than its old value back.
-        if self.invocation.is_some() {
+        // Another invocation may write this word at the same time - another lane, where each has
+        // its own (D760), or another wave of the group, which shares the words (D892) - so an
+        // inactive lane writes nothing rather than its old value back. Written back, it erased a
+        // worklist entry another wave was writing in Grand Theft Auto V's tree-rotation program at
+        // `0x3dc8900` in its image.
+        if self.invocation.is_some() || self.group_waves() > 1 {
             let b = &mut self.builder;
             let (store, merge) = (b.id(), b.id());
             b.function(op::SELECTION_MERGE, &[merge.0, 0]);
@@ -6409,11 +6899,12 @@ impl Model for Wavefront<'_> {
 
     // Where one invocation is the wave, the array is the wave's scratch, word for word. Where each
     // invocation is one lane (D760), a word whose low bits name the lane is that lane's, at the
-    // word's index over the wave's width; it holds no other lane's.
-    fn scratch_place(&mut self, word: Id, _lane: u32) -> Option<(Id, Id)> {
+    // word's index over the wave's width; it holds no other lane's. Where each holds two lanes
+    // (D973), the two lanes' words alternate, `lane`'s at its index's odd or even place.
+    fn scratch_place(&mut self, word: Id, lane: u32) -> Option<(Id, Id)> {
         let scratch = self.scratch?;
         let words = Model::constant(self, scratch.words);
-        let Some(own) = self.invocation else {
+        let Some(own) = self.own_lane(lane) else {
             let held = self.compare(op::ULESS_THAN, word, words);
             return Some((word, held));
         };
@@ -6423,7 +6914,12 @@ impl Model for Wavefront<'_> {
             Model::constant(self, lanes.trailing_zeros()),
         );
         let owner = self.binary(op::BITWISE_AND, word, low);
-        let index = self.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+        let mut index = self.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+        if self.holds_two() {
+            let (one, half) = (Model::constant(self, 1), Model::constant(self, lane.min(1)));
+            let doubled = self.binary(op::SHIFT_LEFT_LOGICAL, index, one);
+            index = self.binary(op::BITWISE_OR, doubled, half);
+        }
         let mine = self.compare(op::IEQUAL, owner, own);
         let inside = self.compare(op::ULESS_THAN, index, words);
         let held = self.both(mine, inside);
@@ -6495,8 +6991,20 @@ impl Model for Wavefront<'_> {
         }
     }
 
+    fn global_pages(&self) -> bool {
+        self.stage == Stage::Compute
+    }
+
     fn sampled_buffer(&self, slot: u32) -> bool {
         self.stage == Stage::Compute && slot < 32 && self.sampled_buffers >> slot & 1 != 0
+    }
+
+    fn table_pages(&self, slot: u32) -> Option<u32> {
+        // A table's records lie in the dispatch's global buffer of pages (D966).
+        let (tables, pages) = self.table_buffers;
+        (self.stage == Stage::Compute && slot < 64 && tables >> slot & 1 != 0)
+            .then_some(pages)
+            .flatten()
     }
 
     fn sampled_buffer_base(&mut self, slot: u32) -> Option<(Id, Id)> {
@@ -6731,6 +7239,56 @@ impl Model for Wavefront<'_> {
         Ok(before)
     }
 
+    // The word's element of the slot's buffer, at index zero where the buffer is shorter, so the
+    // pointer is always a legal one; whether it holds the word beside it.
+    fn draw_buffer_word(&mut self, slot: u32, word_index: Id) -> Result<(Id, Id), TranslateError> {
+        let refuse = |detail| TranslateError::Unsupported { offset: 0, detail };
+        let Some((array, _)) = self.draw_buffers else {
+            return Err(refuse(
+                "a byte or half store through a buffer in a module that declares none (D977)",
+            ));
+        };
+        if self.stage == Stage::Mesh {
+            return Err(refuse(
+                "a byte or half store in a primitive shader, whose buffers are an arena (D747)",
+            ));
+        }
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let buffer = Self::constant(self, slot);
+        let zero = Self::constant(self, 0);
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[array.block_ptr.0, block.0, array.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        let inside = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, inside.0, word_index.0, length.0],
+        );
+        let index = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, index.0, inside.0, word_index.0, zero.0],
+        );
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                array.element_ptr.0,
+                pointer.0,
+                array.variable.0,
+                buffer.0,
+                zero.0,
+                index.0,
+            ],
+        );
+        Ok((pointer, inside))
+    }
+
     // The pair through the 64-bit view of the dispatch's buffers, at word `word_index / 2` of it
     // ([`PairBuffers::atomic`]).
     fn atomic_draw_buffer_pair(
@@ -6925,17 +7483,14 @@ struct ImageTrace {
     /// Where each stored image's descriptor came from, for a compute module, whose storage images
     /// are the guest's own rather than a harness image.
     stored_sources: [Option<TextureSource>; orbistoun_spirv::MAX_STORED_IMAGES],
+    /// Whether a scalar write landed in each stored image's descriptor registers since it was
+    /// declared: a store through them then names another image (D963).
+    stored_written: [bool; orbistoun_spirv::MAX_STORED_IMAGES],
     /// Scalar registers the program has written, one bit each: a descriptor still in the registers
     /// the user data seeded is read from the user data.
     written_scalars: u128,
     /// The user-data registers this stage was seeded with: the first, and how many.
     user_data_registers: (u32, u32),
-    /// Scalar registers holding an image descriptor a dispatch loaded from its table without
-    /// reading memory, one bit each: the image is bound from the table itself, so the registers
-    /// hold nothing a value read could use.
-    opaque_scalars: u128,
-    /// Whether anything read one of those registers as a value.
-    reads_opaque: bool,
 }
 
 impl ImageTrace {
@@ -7038,6 +7593,32 @@ pub struct TextureSource {
     /// descriptor read from the table itself.
     #[serde(default)]
     pub buffer_offset: Option<u32>,
+    /// Where a dispatch's program puts the image descriptor in its registers by something no table
+    /// load or user-data word names - registers rewritten between one access and the next - so the
+    /// host runs the program up to the access to read it (D960). `None` for any other.
+    #[serde(default)]
+    pub computed: Option<ComputedImage>,
+}
+
+/// An image access whose descriptor a dispatch's program computes: the host finds the descriptor by
+/// running the program, over the dispatch's user data and guest memory, up to the access, and reads
+/// the eight registers it names there (D960). Keyed by the access, not the registers: two
+/// accesses through registers rewritten between them are two of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ComputedImage {
+    /// The access's byte offset in the program.
+    pub at: u32,
+    /// The first of the eight scalar registers holding the descriptor there.
+    pub register: u32,
+    /// The scalar register the stage's first user-data word lands in.
+    pub first_register: u32,
+}
+
+/// Whether `source` names its descriptor: loaded from a table, held in the user data, or computed
+/// and found per dispatch (D690). Any other is read at offset zero of the stage's table, which is a
+/// guess only one texture may make.
+const fn resolved(source: &TextureSource) -> bool {
+    source.table_offset.is_some() || source.user_data.is_some() || source.computed.is_some()
 }
 
 /// Where a descriptor was loaded from: the table's base (where the program formed it from user
@@ -7070,7 +7651,7 @@ fn existing_texture(
 ) -> Option<&mut BoundTexture> {
     let other_sampler =
         |b: &BoundTexture| matches!((b.sampler, sampler), (Some(was), Some(now)) if was != now);
-    textures.iter_mut().find(|b| {
+    let same = |b: &BoundTexture| {
         let same = if reaching.is_some() {
             loaded_by(b, reaching)
         } else if let Some(word) = seeded_word {
@@ -7079,7 +7660,15 @@ fn existing_texture(
             b.descriptor == descriptor
         };
         same && !other_sampler(b)
-    })
+    };
+    // Read through the same registers, the texture they still hold comes first: a dispatch's
+    // registers rewritten since an earlier texture name a later one, found where it is read.
+    let by_register = reaching.is_none() && seeded_word.is_none();
+    let found = textures
+        .iter()
+        .position(|b| by_register && same(b) && !b.disturbed)
+        .or_else(|| textures.iter().position(same))?;
+    textures.get_mut(found)
 }
 
 /// Why a shader reading one image as a cube and as a flat image is refused (D811).
@@ -8093,6 +8682,26 @@ pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> (bool, bool)
     (enabled & 1 != 0, enabled & 4 != 0)
 }
 
+/// Refuses a pixel shader that reaches its local data share. Workgroup memory is a compute or mesh
+/// stage's (`VUID-StandaloneSpirv-None-04645`): a pixel shader's invocations share none, so its
+/// accesses have nowhere to go (D975).
+fn refuse_pixel_local_share(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    stage: Stage,
+) -> Result<(), TranslateError> {
+    if stage == Stage::Fragment && group_program(decode, encodings).local_share {
+        return Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: concat!(
+                "a pixel shader's local data share is not modelled: a host fragment stage has no ",
+                "workgroup memory"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// What a compute program shares between the waves of its group: whether any instruction is
 /// `s_barrier`, and whether any is a local data share access (`ds_*`, the GDS forms aside).
 #[must_use]
@@ -8203,6 +8812,16 @@ pub fn draw_buffers_for(
         }
         _ => std::collections::BTreeSet::new(),
     };
+    // A device-addressed dispatch reaches its global and flat accesses by device address, and what
+    // the host could place only by running the program (D964).
+    let device_addressed = stage == Stage::Compute
+        && user_data
+            .compute
+            .is_some_and(|inputs| inputs.device_addressed);
+    let mut scratch = scratch;
+    if device_addressed {
+        scratch.extend(crate::device_address::flat_accesses(decode, encodings));
+    }
     let buffers = crate::draw_buffers::trace_skipping(
         decode,
         encodings,
@@ -8216,6 +8835,11 @@ pub fn draw_buffers_for(
         ),
         &scratch,
     );
+    let buffers = if device_addressed {
+        crate::device_address::resolved_only(buffers)
+    } else {
+        buffers
+    };
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
         return Err(TranslateError::TooManyBuffers {
             traced: buffers.sources.len(),
@@ -8314,6 +8938,7 @@ pub fn translate_with_user_data(
     if let (Stage::Fragment, Some(inputs)) = (stage, user_data.pixel_inputs) {
         inputs.seeded()?;
     }
+    refuse_pixel_local_share(decode, encodings, stage)?;
     let masks = dispatch_masks(decode, encodings, (stage, width), &user_data)?;
     // A dispatch's scratch accesses add the offset register the module reads as zero (D954).
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute)
@@ -8391,6 +9016,8 @@ pub fn translate_with_user_data(
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     module.type_rewrites = type_rewrites(decode, encodings, &module.descriptor_loads.0);
+    module.name_only =
+        crate::name_only::NameOnly::over(crate::name_only::Flow::of(decode, encodings));
     crate::control::emit(&mut module, decode, encodings)?;
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;
@@ -8413,9 +9040,9 @@ fn dispatch_masks(
     let Some(subgroup) = user_data.per_invocation else {
         return Ok(None);
     };
-    inputs.refuse_meeting_waves(width.lanes(), group_program(decode, encodings))?;
     // One invocation per lane is exact only for a program that never meets its wave (D880), or
-    // meets it only through masks its lanes can exchange (D884).
+    // meets it only through masks its lanes can exchange (D884), or runs where the host's subgroup
+    // carries its wave (D973).
     let needs = crate::lane_exact::lane_needs(decode, encodings, width.lanes());
     let held = crate::lane_exact::lane_masks(
         &needs,
@@ -8423,6 +9050,11 @@ fn dispatch_masks(
         Some(subgroup).filter(|&lanes| lanes != 0),
         inputs.waves(width.lanes()),
     );
+    // A group whose waves are subgroups is one workgroup: its waves share the local data share
+    // and meet at the workgroup's barrier between segments, as a group of whole waves does (D892).
+    if !held.is_ok_and(LaneMasks::by_subgroup) {
+        inputs.refuse_meeting_waves(width.lanes(), group_program(decode, encodings))?;
+    }
     held.map(Some)
         .map_err(|detail| TranslateError::Unsupported {
             // The need that refused it: any but a whole mask before one.
@@ -8775,13 +9407,14 @@ mod exact_memory_tests {
             .iter()
             .find(|encoding| encoding.name == family)
             .expect("its family");
-        // s_buffer_load_dword s4, s[0:3], 0 (no offset register); global_store_dword v[0:1], v2,
-        // off; s_endpgm.
+        // s_buffer_load_dword s4, s[0:3], 0 (no offset register); global_store_dword v0, v2,
+        // s[0:1], a store through a scalar base, which no buffer takes (a byte store through a
+        // buffer is traced, D977); s_endpgm.
         let words = [
             encoding.value | (opcode << encoding.opcode.shift) | (4 << 6),
             125 << 25,
             0xdc70_8000,
-            0x007d_0200,
+            0x0000_0200,
             0xbf81_0000,
         ];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -9156,5 +9789,168 @@ mod buffer_format_tests {
         assert_eq!(formats.get(2), None);
         assert_eq!(formats.get(64), None, "past a stage's slots");
         assert_eq!(formats.slots().flatten().count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod computed_image_tests {
+    use super::{ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data};
+    use crate::Width;
+    use orbistoun_shader::{EncodingTable, OperandTable, decode};
+
+    /// `image_load v[4:7], v[0:1], s[0:7] dmask:0xf dim:2D`, then the same into `v[8:11]`.
+    const FIRST_LOAD: [u32; 2] = [0xf000_1f08, 0x0000_0400];
+    const SECOND_LOAD: [u32; 2] = [0xf000_1f08, 0x0000_0800];
+    /// `image_store v[4:7], v[0:1], s[16:23]`, then `v[8:11]` through `s[24:31]`.
+    const STORES: [u32; 4] = [0xf020_1f08, 0x0004_0400, 0xf020_1f08, 0x0006_0800];
+    const WAIT: u32 = 0xbf8c_c07f;
+    const END: u32 = 0xbf81_0000;
+
+    /// Translates a one-thread dispatch of `words` over thirty-two user-data words.
+    fn translate(words: &[u32]) -> Result<super::ImageSources, crate::TranslateError> {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
+        translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 32,
+                compute: Some(ComputeInputs {
+                    thread_id_components: 2,
+                    threads: [1, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                draw_buffers: true,
+                ..UserData::default()
+            },
+        )
+        .map(|(_, _, images)| images)
+    }
+
+    /// The program fetches through `s[0:7]`, rewrites them with `between`, and fetches through them
+    /// again, then stores each texel to an image of its own.
+    fn rewritten_between(between: &[u32]) -> Vec<u32> {
+        let mut words = FIRST_LOAD.to_vec();
+        words.extend_from_slice(between);
+        words.push(WAIT);
+        words.extend(SECOND_LOAD);
+        words.push(WAIT);
+        words.extend(STORES);
+        words.push(END);
+        words
+    }
+
+    /// Two fetches through registers the program rewrote between them read two images, each its
+    /// own texture: the second's descriptor, which no table load or user-data word names, is found
+    /// per dispatch by running the program up to it. Grand Theft Auto V's full-screen compute pass
+    /// at `0x74005b809c00` reads two textures through `s[0:7]` so.
+    #[test]
+    fn registers_rewritten_between_two_fetches_name_two_images() {
+        for (form, between) in [
+            // s_add_u32 s0, s0, s14: the descriptor's base moved by a user-data word.
+            ("computed", &[0x8000_0e00_u32][..]),
+            // s_buffer_load_dwordx8 s[0:7], s[12:15], 0x40: loaded again, out of a buffer whose
+            // descriptor is user data rather than a table load.
+            ("reloaded", &[0xf42c_0006, 0xfa00_0040][..]),
+        ] {
+            let words = rewritten_between(between);
+            let second = 4 * (2 + between.len() as u32 + 1);
+            let (textures, storage) = translate(&words)
+                .unwrap_or_else(|e| panic!("{form}: two fetches through rewritten registers: {e}"));
+            assert_eq!(textures.len(), 2, "{form}: two textures");
+            assert_eq!(
+                textures[0].user_data,
+                Some(0),
+                "{form}: the first is user data"
+            );
+            assert_eq!(textures[1].user_data, None, "{form}");
+            assert_eq!(textures[1].slot, 1, "{form}");
+            assert_eq!(
+                textures[1].computed,
+                Some(super::ComputedImage {
+                    at: second,
+                    register: 0,
+                    first_register: 0,
+                }),
+                "{form}: the second is found where it is read"
+            );
+            assert_eq!(textures[0].computed, None, "{form}");
+            assert_eq!(
+                storage.iter().map(|s| s.user_data).collect::<Vec<_>>(),
+                [Some(16), Some(24)],
+                "{form}"
+            );
+        }
+    }
+
+    /// Two stores through registers the program rewrote between them, by nothing a load or a
+    /// user-data word names, write two images, the second found per dispatch where it is stored to
+    /// (D960, D963); a store through registers nothing rewrote is the image they held.
+    #[test]
+    fn registers_rewritten_between_two_stores_name_two_images() {
+        let words = [
+            FIRST_LOAD[0], // image_load v[4:7], v[0:1], s[0:7]
+            FIRST_LOAD[1],
+            WAIT,
+            0xf020_1f08, // image_store v[4:7], v[0:1], s[16:23]
+            0x0004_0400,
+            0x8010_0e10, // s_add_u32 s16, s16, s14
+            0xf020_1f08, // image_store v[4:7], v[0:1], s[16:23]
+            0x0004_0400,
+            0xf020_1f08, // and again, nothing between
+            0x0004_0400,
+            END,
+        ];
+        let (_, storage) = translate(&words)
+            .unwrap_or_else(|e| panic!("two stores through rewritten registers: {e}"));
+        assert_eq!(
+            storage.len(),
+            2,
+            "two stored images, the third store the second's"
+        );
+        assert_eq!(storage[0].user_data, Some(16));
+        assert_eq!(
+            storage[1].computed,
+            Some(super::ComputedImage {
+                at: 0x18,
+                register: 16,
+                first_register: 0,
+            })
+        );
+    }
+
+    /// A fetch names no sampler, so a write into the registers of the sampler an earlier sample of
+    /// the same image read through leaves the fetch reading that image (D690): Grand Theft Auto V's
+    /// full-screen compute pass at `0x74005b809c00` gathers `s[0:7]` through a sampler at
+    /// `s[28:31]`, loads another descriptor into `s[24:31]`, and fetches through `s[0:7]` at `0x5c0`.
+    #[test]
+    fn a_fetch_after_its_image_s_sampler_registers_are_rewritten_reads_that_image() {
+        let words = [
+            0xf408_0706_u32, // s_load_dwordx4 s[28:31], s[12:13], 0x170
+            0xfa00_0170,
+            WAIT,
+            0xf09c_0108, // image_sample_lz v2, v[0:1], s[0:7], s[28:31] dmask:0x1 dim:2D
+            0x00e0_0200,
+            0xf40c_0606, // s_load_dwordx8 s[24:31], s[12:13], 0x80
+            0xfa00_0080,
+            WAIT,
+            0xf000_0108, // image_load v3, v[0:1], s[0:7] dmask:0x1 dim:2D
+            0x0000_0300,
+            WAIT,
+            0xf020_0108, // image_store v3, v[0:1], s[16:23] dmask:0x1 dim:2D
+            0x0004_0300,
+            END,
+        ];
+        let (textures, _) = translate(&words)
+            .unwrap_or_else(|e| panic!("a fetch after its sampler's registers are rewritten: {e}"));
+        assert_eq!(textures.len(), 1, "the sample and the fetch read one image");
+        assert_eq!(textures[0].user_data, Some(0));
+        assert_eq!(textures[0].sampler_offset, Some(0x170));
     }
 }

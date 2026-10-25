@@ -781,6 +781,22 @@ pub(super) fn intersect_ray<M: Model + ?Sized>(
         let rest = &values[if operands.wide_pointer { 2 } else { 1 }..];
         let (low, high) = node_address_words(model, descriptor, (values[0], pointer_high));
         let kind = pointer_kind(model, values[0]);
+        // A device-addressed dispatch reads the node where it lies in guest memory (D964).
+        if model.device_addressed() {
+            let (node, placed) = device_node(model, (low, high), kind.box32, lane)?;
+            let mut arithmetic = Emit {
+                model: &mut *model,
+                floats: Vec::new(),
+            };
+            let ray = ray_from(&mut arithmetic, rest, operands.a16);
+            let result = intersect(&mut arithmetic, &node, &ray, (kind, selectors));
+            let missed = model.constant(NO_CHILD);
+            for (register, value) in (operands.destination..).zip(result) {
+                let value = model.select(placed, value, missed);
+                model.write_vector_lane(register, lane, value);
+            }
+            continue;
+        }
         if model.exact_memory() {
             let escaped = node_escapes(model, (low, high), kind.box32);
             model.note_escape(escaped, Some(lane));
@@ -919,6 +935,36 @@ fn node_escapes<M: Model + ?Sized>(model: &mut M, (low, high): (Id, Id), long: I
     let escaped = b.id();
     b.function(op::LOGICAL_NOT, &[bool_type.0, escaped.0, placed.0]);
     escaped
+}
+
+/// A device-addressed dispatch's node at `low`, `high` (D964): its words read by device address,
+/// and whether a mapping holds it to its last word read - a box of floats' or a 64-byte node's, as
+/// `long` says. A node no mapping holds is an escape, and answers no hit as an unplaced one does.
+fn device_node<M: Model + ?Sized>(
+    model: &mut M,
+    (low, high): (Id, Id),
+    long: Id,
+    lane: u32,
+) -> Result<([Id; NODE_WORDS], Id), TranslateError> {
+    let mut node = [low; NODE_WORDS];
+    let mut found = Vec::with_capacity(NODE_WORDS);
+    for (byte, word) in (0..).step_by(4).zip(node.iter_mut()) {
+        let (value, held) = super::device::read_word_found(model, (low, high), byte)?;
+        *word = value;
+        found.push(held);
+    }
+    let short_last = found[(SHORT_LAST_BYTE / 4) as usize];
+    let long_last = found[(LONG_LAST_BYTE / 4) as usize];
+    let last = super::select_bool(model, long, long_last, short_last);
+    let placed = model.both(found[0], last);
+    if model.exact_memory() {
+        let bool_type = model.bool_type();
+        let b = model.builder();
+        let escaped = b.id();
+        b.function(op::LOGICAL_NOT, &[bool_type.0, escaped.0, placed.0]);
+        model.note_escape(escaped, Some(lane));
+    }
+    Ok((node, placed))
 }
 
 /// Whether a node at `low`/`high` lies wholly in the memory the window places: its first word and

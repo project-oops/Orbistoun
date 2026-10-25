@@ -121,9 +121,14 @@ pub struct Predicated<'a> {
 /// `lane_input` is the built-in this module reads its lane number from, when it has one. At
 /// this SPIR-V version an input variable must be named in the entry point's interface as
 /// well as declared, or the module is rejected.
-fn declare_entry_point(builder: &mut Builder, main: Id, lane_input: Option<Id>, group: u32) {
+fn declare_entry_point(
+    builder: &mut Builder,
+    (main, lane_input, group): (Id, Option<Id>, u32),
+    float_mode: Option<u8>,
+) {
     builder.header(op::CAPABILITY, &[capability::SHADER]);
     crate::wavefront::declare_inf_nan_preserve(builder, main);
+    crate::wavefront::declare_subnormals(builder, main, float_mode);
 
     builder.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
@@ -179,8 +184,8 @@ fn declare_mask(builder: &mut Builder, lane: Id, u32_type: Id, bool_type: Id) ->
 
 impl<'a> Predicated<'a> {
     /// Prepares a module with no lane mask: the per-lane model.
-    pub fn new(encodings: &'a EncodingTable, window: Window) -> Self {
-        Self::build(encodings, None, window)
+    pub fn new(encodings: &'a EncodingTable, window: Window, float_mode: Option<u8>) -> Self {
+        Self::build(encodings, None, (window, float_mode))
     }
 
     /// Prepares a module whose lanes are the invocations of a subgroup.
@@ -188,14 +193,22 @@ impl<'a> Predicated<'a> {
     /// The same model with a mask added: one invocation is one lane either way, and a
     /// subgroup can be polled for a mask word. Correct only where the host subgroup is as
     /// wide as the guest wavefront; [`Predicated::finish`] reports the width it needs.
-    pub fn subgroup(encodings: &'a EncodingTable, width: Width, window: Window) -> Self {
-        let mut this = Self::build(encodings, Some(width.lanes()), window);
+    pub fn subgroup(
+        encodings: &'a EncodingTable,
+        width: Width,
+        (window, float_mode): (Window, Option<u8>),
+    ) -> Self {
+        let mut this = Self::build(encodings, Some(width.lanes()), (window, float_mode));
         this.required_subgroup = Some(width.lanes());
         this
     }
 
     /// Prepares a module: types, the register file, and the observation buffer.
-    fn build(encodings: &'a EncodingTable, lanes: Option<u32>, window: Window) -> Self {
+    fn build(
+        encodings: &'a EncodingTable,
+        lanes: Option<u32>,
+        (window, float_mode): (Window, Option<u8>),
+    ) -> Self {
         let mut builder = Builder::new().with_version(orbistoun_spirv::VERSION_1_3);
 
         let void = builder.id();
@@ -224,7 +237,8 @@ impl<'a> Predicated<'a> {
         // Reserved before the entry point is written: the interface names the input
         // variable, and the entry point is emitted before the variable is declared.
         let lane_input = lanes.is_some().then(|| builder.id());
-        declare_entry_point(&mut builder, main, lane_input, lanes.unwrap_or(1));
+        let entry = (main, lane_input, lanes.unwrap_or(1));
+        declare_entry_point(&mut builder, entry, float_mode);
 
         builder.declare(op::TYPE_VOID, &[void.0]);
         builder.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
@@ -553,6 +567,11 @@ impl Model for Predicated<'_> {
         self.store_register(file, register, value);
     }
 
+    fn write_vector_lane_unmasked(&mut self, register: u32, _lane: u32, value: Id) {
+        let file = self.registers;
+        self.store_register(file, register, value);
+    }
+
     /// One bit of a mask, for *this* invocation's lane.
     ///
     /// Overridden because the caller's lane index belongs to a loop this model does not run:
@@ -804,9 +823,9 @@ pub fn translate_subgroup(
     decode: &Decode,
     encodings: &EncodingTable,
     width: Width,
-    window: Window,
+    (window, float_mode): (Window, Option<u8>),
 ) -> Result<(Vec<u32>, usize, u32), TranslateError> {
-    let mut module = Predicated::subgroup(encodings, width, window);
+    let mut module = Predicated::subgroup(encodings, width, (window, float_mode));
     crate::control::emit(&mut module, decode, encodings)?;
     let required = module.required_subgroup.expect("set by `subgroup`");
     let (words, count) = module.finish()?;
@@ -819,9 +838,9 @@ pub fn translate_subgroup(
 pub fn translate(
     decode: &Decode,
     encodings: &EncodingTable,
-    window: Window,
+    (window, float_mode): (Window, Option<u8>),
 ) -> Result<(Vec<u32>, usize), TranslateError> {
-    let mut module = Predicated::new(encodings, window);
+    let mut module = Predicated::new(encodings, window, float_mode);
     crate::control::emit(&mut module, decode, encodings)?;
     module.finish()
 }

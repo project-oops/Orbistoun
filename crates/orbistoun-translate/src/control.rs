@@ -60,15 +60,49 @@ pub fn emit<M: Model + ?Sized>(
         std::iter::once(0..blocks.len()).collect()
     };
     let mut translated = 0usize;
+    // Whether the segment before was laid out as structure, which leaves the counter at the exit
+    // value or a value of its own rather than at the next segment's first block.
+    let mut structured_before = false;
     for (n, segment) in segments.into_iter().enumerate() {
         // Between two loops every invocation stands at the top level, so the workgroup's barrier
         // is reached by all of them, once each, as the guest's waves reach theirs.
         if n > 0 {
             workgroup_barrier(model);
         }
+        // Structure where the segment's flow nests, the dispatch loop where it does not (D972).
+        let plan = if crate::structured::enabled() {
+            crate::structured::plan(decode, &blocks, segment.clone())?
+        } else {
+            None
+        };
+        if let Some(plan) = plan {
+            translated +=
+                crate::structured::emit(model, decode, (&blocks, &plan, n == 0), exit, &family_of)?;
+            structured_before = true;
+            continue;
+        }
+        if structured_before {
+            start_unless_ended(model, to_u32(segment.start)?, exit);
+        }
+        crate::structured::note_dispatched();
         translated += emit_loop(model, decode, (&blocks, segment, n == 0), exit, &family_of)?;
+        structured_before = false;
     }
     Ok(translated)
+}
+
+/// Sets the counter to `start`, a dispatch loop's first block, unless it holds `exit`: a wave that
+/// ended in a structured segment before runs none of the loop.
+fn start_unless_ended<M: Model + ?Sized>(model: &mut M, start: u32, exit: u32) {
+    let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
+    let (start, end) = (model.constant(start), model.constant(exit));
+    let current = load_counter(model);
+    let b = model.builder();
+    let ended = b.id();
+    b.function(op::IEQUAL, &[bool_type.0, ended.0, current.0, end.0]);
+    let chosen = b.id();
+    b.function(op::SELECT, &[u32_type.0, chosen.0, ended.0, end.0, start.0]);
+    store_counter(model, chosen);
 }
 
 /// The blocks cut into runs that each end at an `s_barrier` - the last run at the program's end -
@@ -214,20 +248,12 @@ fn emit_loop<M: Model + ?Sized>(
         model.builder().function(op::LABEL, &[arm.0]);
         model.enter_block();
         let before = model.instructions();
-        for instruction in &decode.instructions[block.first..block.end] {
-            // The terminating branch emits nothing here; its target is the program-counter
-            // assignment below.
-            if is_terminator(instruction, family_of) {
-                continue;
-            }
-            // An instruction whose lanes each do the same work runs them as one loop, where the
-            // model runs the whole wave in one invocation, rather than each emitted in turn.
-            let looped = model::lane_looped(model, instruction) && model.open_lane_loop();
-            model::instruction(model, instruction)?;
-            if looped {
-                model.close_lane_loop();
-            }
-        }
+        let instructions = decode.instructions[block.first..block.end]
+            .iter()
+            .filter(|instruction| !is_terminator(instruction, family_of));
+        // The terminating branch emits nothing here; its target is the program-counter assignment
+        // below.
+        emit_block(model, instructions)?;
         translated += model.instructions() - before;
 
         let mut next = successor(model, decode, block, blocks, exit)?;
@@ -257,6 +283,49 @@ fn emit_loop<M: Model + ?Sized>(
     // The epilogue goes here, written by the caller.
     model.builder().function(op::LABEL, &[merge.0]);
     Ok(translated)
+}
+
+/// Emits one block's `instructions`, each run of lane work in one loop over the lanes where the
+/// model runs the whole wave in one invocation (D956).
+///
+/// The hardware runs every lane's instruction before any lane's next, and a loop runs each lane's
+/// whole run before the next lane's. The two agree while no lane can see another's work within the
+/// run: registers are each lane's own, but memory and the local share are not. So a run ends
+/// before a store or atomic where it holds any access to them, and before a read where it holds a
+/// store or atomic: one lane's access would otherwise pass another's. It ends before anything not
+/// lane work - a scalar instruction, a compare building a mask, a lane read - and at the block's
+/// end; what emits nothing it runs on past.
+pub(crate) fn emit_block<'a, M: Model + ?Sized>(
+    model: &mut M,
+    instructions: impl Iterator<Item = &'a Instruction>,
+) -> Result<(), TranslateError> {
+    // The open run: whether it reads memory, and whether it writes it.
+    let mut run: Option<(bool, bool)> = None;
+    for instruction in instructions {
+        let place = model::in_run(model, instruction);
+        let ends = match (place, run) {
+            (model::InRun::Nothing, _) | (_, None) => false,
+            (model::InRun::Alone, Some(_)) => true,
+            (model::InRun::Lanes { reads, writes }, Some((held_reads, held_writes))) => {
+                (writes && (held_reads || held_writes)) || (reads && held_writes)
+            }
+        };
+        if ends {
+            model.close_lane_loop();
+            run = None;
+        }
+        if let model::InRun::Lanes { reads, writes } = place {
+            if run.is_none() && model.open_lane_loop() {
+                run = Some((false, false));
+            }
+            run = run.map(|(held_reads, held_writes)| (held_reads || reads, held_writes || writes));
+        }
+        model::instruction(model, instruction)?;
+    }
+    if run.is_some() {
+        model.close_lane_loop();
+    }
+    Ok(())
 }
 
 /// Backward jumps one invocation takes before the loop it is in is cut and reported (D949).
@@ -295,7 +364,8 @@ fn cap_loop<M: Model + ?Sized>(
     let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
     let own = model.constant(index);
     let (zero, one) = (model.constant(0), model.constant(1));
-    let (cap, end) = (model.constant(LOOP_CAP), model.constant(exit));
+    let cap = model.loop_cap();
+    let (cap, end) = (model.constant(cap), model.constant(exit));
     let b = model.builder();
     let backward = b.id();
     b.function(
@@ -327,7 +397,7 @@ fn to_u32(value: usize) -> Result<u32, TranslateError> {
 }
 
 /// Whether this instruction is the one that ends its block.
-fn is_terminator(
+pub(crate) fn is_terminator(
     instruction: &Instruction,
     family_of: &impl Fn(&Instruction) -> Option<String>,
 ) -> bool {
@@ -387,7 +457,7 @@ fn successor<M: Model + ?Sized>(
 }
 
 /// Evaluates what a conditional branch tests.
-fn branch_condition_value<M: Model + ?Sized>(
+pub(crate) fn branch_condition_value<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<Id, TranslateError> {

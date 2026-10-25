@@ -12,14 +12,17 @@
 pub mod blocks;
 mod buffer;
 pub mod control;
+pub mod device_address;
 pub mod draw_buffers;
 pub mod evaluate;
 pub mod lane_exact;
 pub mod model;
 pub mod modifiers;
+pub mod name_only;
 pub mod predicated;
 pub mod quick_lanes;
 pub mod scratch;
+pub mod structured;
 pub mod user_data_reads;
 pub mod wavefront;
 
@@ -353,11 +356,27 @@ pub enum Warning {
         /// would be needed.
         subgroup_would_need: u32,
     },
+    /// The program's `FLOAT_MODE` keeps 32-bit subnormals on input only or on output only, which
+    /// SPIR-V's float controls cannot say: the module keeps or flushes them as its results do
+    /// ([`wavefront::subnormals`]).
+    FloatMode {
+        /// The `FLOAT_MODE` field, as the program set it.
+        float_mode: u8,
+    },
 }
 
 impl core::fmt::Display for Warning {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::FloatMode { float_mode } => write!(
+                f,
+                "FLOAT_MODE {float_mode:#04x} keeps 32-bit subnormals one way only, which a module cannot declare: it {} them",
+                if wavefront::subnormals(*float_mode).0 {
+                    "keeps"
+                } else {
+                    "flushes"
+                }
+            ),
             Self::SlowestFidelity {
                 because,
                 subgroup_would_need,
@@ -661,9 +680,9 @@ fn refused_modifier(decode: &Decode, encodings: &EncodingTable) -> Option<Transl
                 ),
                 detail: concat!(
                     "the instruction carries an SDWA or DPP modifier word, which selects parts ",
-                    "of its operands or other lanes' values; only SDWA on the integer ",
-                    "instructions `model::SDWA_INTEGER` names, and a quad permute of a one- or ",
-                    "two-source vector instruction's first source, are translated"
+                    "of its operands or other lanes' values; SDWA is translated on a compare and ",
+                    "on any one- or two-source vector instruction that has an SDWA form, and DPP16 ",
+                    "and DPP8 on any one- or two-source vector instruction (D979)"
                 ),
             });
         }
@@ -800,7 +819,13 @@ pub fn translate_with_user_data(
     // A fragment module simulates one lane, its pixel, so only a mesh module pays for the whole
     // wavefront in one invocation.
     let whole = staged && stage != wavefront::Stage::Fragment;
-    let warnings = fidelity_warnings((whole, kept_whole, per_lane), asked_for, needed, width);
+    let mut warnings = fidelity_warnings((whole, kept_whole, per_lane), asked_for, needed, width);
+    // A mode keeping subnormals one way only is translated as the closest whole mode.
+    if let Some(float_mode) = user_data.float_mode
+        && !wavefront::subnormals(float_mode).1
+    {
+        warnings.push(Warning::FloatMode { float_mode });
+    }
 
     if decode.desynchronised {
         return Err(TranslateError::UntrustworthyDecode {
@@ -844,7 +869,8 @@ pub fn translate_with_user_data(
             })
         }
         Fidelity::Lane => {
-            let (module, instructions) = predicated::translate(decode, encodings, window)?;
+            let (module, instructions) =
+                predicated::translate(decode, encodings, (window, user_data.float_mode))?;
             Ok(Translated {
                 module,
                 strategy,
@@ -857,8 +883,12 @@ pub fn translate_with_user_data(
             })
         }
         Fidelity::Subgroup => {
-            let (module, instructions, required_subgroup) =
-                predicated::translate_subgroup(decode, encodings, width, window)?;
+            let (module, instructions, required_subgroup) = predicated::translate_subgroup(
+                decode,
+                encodings,
+                width,
+                (window, user_data.float_mode),
+            )?;
             Ok(Translated {
                 module,
                 strategy,
@@ -911,6 +941,7 @@ mod tests {
                     count,
                     block_offset: 16,
                     dx10_clamp: None,
+                    float_mode: None,
                     pixel_inputs: None,
                     input_controls: None,
                     compute: None,
@@ -1142,13 +1173,15 @@ mod tests {
     }
 
     /// A guest dispatch whose program reads a mask whole runs one invocation per lane where its
-    /// lanes can exchange the mask, and says nothing; a group of several waves on a narrower
-    /// subgroup keeps the whole wave and says why (D884). `s_cbranch_vccz +0` reads `vcc` whole.
+    /// lanes can exchange the mask - a group of one wave, or any group where the host's subgroup
+    /// carries the wave or half of it (D973) - and says nothing; a group of several waves on a
+    /// subgroup not known keeps the whole wave and says why (D884). `s_cbranch_vccz +0` reads
+    /// `vcc` whole.
     #[test]
     fn a_dispatch_reading_a_mask_whole_warns_only_where_it_keeps_the_wave() {
         let (table, operands) = tables();
         let decoded = decode(&stream(&[0xBF86_0000, TRIVIAL[0]]), &table, &operands);
-        let dispatch = |threads| {
+        let dispatch = |threads, subgroup| {
             super::translate_with_user_data(
                 &decoded,
                 &table,
@@ -1164,16 +1197,18 @@ mod tests {
                         threads: [threads, 1, 1],
                         ..super::wavefront::ComputeInputs::default()
                     }),
-                    per_invocation: Some(32),
+                    per_invocation: Some(subgroup),
                     ..super::wavefront::UserData::default()
                 },
             )
             .expect("translates")
         };
-        let one_wave = dispatch(64);
-        assert_eq!(one_wave.fidelity, Fidelity::Lane);
-        assert!(one_wave.warnings.is_empty(), "{:?}", one_wave.warnings);
-        let two_waves = dispatch(128);
+        for (threads, subgroup) in [(64, 32), (128, 32), (64, 0)] {
+            let per_lane = dispatch(threads, subgroup);
+            assert_eq!(per_lane.fidelity, Fidelity::Lane, "{threads} on {subgroup}");
+            assert!(per_lane.warnings.is_empty(), "{:?}", per_lane.warnings);
+        }
+        let two_waves = dispatch(128, 0);
         assert_eq!(two_waves.fidelity, Fidelity::Wavefront);
         assert!(
             two_waves
@@ -1551,22 +1586,25 @@ mod tests {
 
     /// A mesh module declares its output counts once, after the program has run, and writes every
     /// output after that: `SPV_EXT_mesh_shader` forbids a path to an output write that does not
-    /// pass `OpSetMeshOutputsEXT`. The program runs as a loop over its blocks, so the allocation
-    /// request and the exports inside it put the declaration on some paths only, which AMD's driver
+    /// pass `OpSetMeshOutputsEXT`. The program's blocks sit inside constructs - a loop over its
+    /// blocks, or its own selections and loops (D972) - so the allocation request and the exports
+    /// inside them put the declaration on some paths only, which AMD's driver
     /// faulted compiling (a null read in `amdvlk64.dll`, MDEM00001) and NVIDIA's ran.
     #[test]
     fn a_mesh_module_declares_its_counts_before_any_output_is_written() {
         use crate::wavefront::{MeshPrimitive, Stage, UserData};
         const END: u32 = 0xBF81_0000;
         // Opcodes and the `Output` storage class, as the format numbers them.
-        let (variable, access_chain, store, loop_merge, label, set_mesh_outputs, output) =
-            (59, 65, 62, 246, 248, 5295, 3);
+        let (variable, access_chain, store, label, set_mesh_outputs, output) =
+            (59, 65, 62, 248, 5295, 3);
+        // `OpLoopMerge` and `OpSelectionMerge`: what opens a construct.
+        let merges = [246, 247];
         let program = [
             // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
             0xbefc_03ff,
             0x0000_1003,
             0xbf90_0009,
-            // s_cbranch_scc0 +1 over an s_nop: a second block, so the program runs as a loop
+            // s_cbranch_scc0 +1 over an s_nop: a second block, so the program sits in a construct
             0xbf84_0001,
             0xbf80_0000,
             // v2, v3, v4 = 0; v12 = 1.0
@@ -1626,20 +1664,25 @@ mod tests {
         let declared = position(&|opcode, _| opcode == set_mesh_outputs);
         let stores =
             position(&|opcode, words| opcode == store && output_pointers.contains(&words[0]));
-        let loops = position(&|opcode, _| opcode == loop_merge);
         assert_eq!(declared.len(), 1, "one declaration of the counts");
         assert!(!stores.is_empty(), "the exports reach the outputs");
+        // Every construct opened before the declaration has closed - its merge block begins -
+        // before it: the declaration runs once, after the program, on every path.
+        let opened: Vec<usize> = (0..declared[0])
+            .filter(|&i| merges.contains(&instructions[i].0))
+            .collect();
         assert!(
-            !loops.is_empty(),
-            "the fixture runs as a loop over its blocks"
+            !opened.is_empty(),
+            "the fixture's second block puts the program inside a construct"
         );
-        // The loop's merge block: everything after it runs once, after the program.
-        let merge = instructions[loops[0]].1[0];
-        let after_loop = position(&|opcode, words| opcode == label && words[0] == merge)[0];
-        assert!(
-            declared[0] > after_loop,
-            "the counts are declared inside the program's loop, on some paths only"
-        );
+        for at in opened {
+            let merge = instructions[at].1[0];
+            let closed = position(&|opcode, words| opcode == label && words[0] == merge)[0];
+            assert!(
+                declared[0] > closed,
+                "the counts are declared inside one of the program's constructs, on some paths only"
+            );
+        }
         assert!(
             stores.iter().all(|&store| store > declared[0]),
             "an output is written before the counts are declared"
@@ -2340,10 +2383,11 @@ mod tests {
         assert!(fragment([(load[0] & !0xf00) | 0x700, load[1]]).is_ok());
     }
 
-    /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an
-    /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` is refused, radeonsi's
+    /// A modifier word is refused by name, before anything is translated, unless its form is one
+    /// translated: a DPP16 `v_mov_b32` whose row control is reserved is refused, radeonsi's
     /// `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not. A float SDWA `v_mul_f32` is
-    /// translated over whole registers, and refused where it selects a byte of one.
+    /// translated over whole registers, and over a byte of one, whose bits it reads as any
+    /// instruction reads its selected part (D979).
     #[test]
     fn a_modifier_word_is_refused_by_name_unless_its_sdwa_form_is_translated() {
         let (table, operands) = tables();
@@ -2355,8 +2399,10 @@ mod tests {
         // A DPP word whose control, 0x100, the instruction set leaves reserved.
         let dpp = outcome([0x7e00_02fa, 0xff01_00ff]).expect_err("DPP refused");
         assert!(dpp.contains("SDWA or DPP"), "{dpp}");
-        let byte = outcome([0x1000_00f9, 0x0006_0600]).expect_err("a byte of a float refused");
-        assert!(byte.contains("selects part of a register"), "{byte}");
+        assert!(
+            outcome([0x1000_00f9, 0x0006_0600]).is_ok(),
+            "a byte of a float's register"
+        );
         assert!(
             outcome([0x1000_00f9, 0x0606_0600]).is_ok(),
             "a whole-register product"

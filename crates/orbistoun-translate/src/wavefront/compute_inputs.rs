@@ -53,7 +53,7 @@ pub struct ComputeInputs {
     pub integer_fetched: u32,
     /// What is added to every thread's x id: zero for a dispatch, and for a streamout pass's wave
     /// of a larger draw the vertex its first lane is, which its `v0` - the vertex id - holds
-    /// (D861).
+    /// (D861). The module reads it from [`FIRST_THREAD_PUSH_WORD`]; the host traces with it.
     #[serde(default)]
     pub first_thread: u32,
     /// The bound buffers, one bit a slot, placed from a sample of a dispatch's waves rather than at
@@ -63,12 +63,35 @@ pub struct ComputeInputs {
     /// preparation that bound the buffers sets it. At most [`MOST_SAMPLED_BUFFERS`] bits.
     #[serde(default)]
     pub sampled_buffers: u32,
+    /// The bound buffers, one bit a slot, whose descriptor the program selects from a table at run
+    /// time and whose table's every record the dispatch's global buffer of pages holds (D966): an
+    /// access through one reads at the guest address the selected descriptor names, through that
+    /// buffer's table, and one it does not hold is an escape. Zero as the stream sets a dispatch up;
+    /// the preparation that bound the buffers sets it.
+    #[serde(default)]
+    pub table_buffers: u64,
     /// The private memory (scratch) one wave holds, in bytes, where `COMPUTE_PGM_RSRC2.SCRATCH_EN`
     /// gives the program scratch: `COMPUTE_TMPRING_SIZE.WAVESIZE` in its 1 KiB units (D954). The
     /// wave's scratch offset then arrives in the scalar register after the workgroup ids
     /// ([`crate::scratch::offset_register`]). Zero for a program without scratch.
     #[serde(default)]
     pub scratch_wave_bytes: u32,
+    /// Whether the dispatch reaches guest memory by device address (D964): its global and flat
+    /// accesses, and the buffer and scalar accesses whose descriptors the host does not resolve,
+    /// translate the guest address through the table the push block names at
+    /// [`crate::device_address::DEVICE_TABLE_PUSH_WORD`]. Set where the host cannot know the
+    /// ranges a dispatch reaches before it runs.
+    #[serde(default)]
+    pub device_addressed: bool,
+    /// `COMPUTE_PGM_RSRC1.FLOAT_MODE`, bits 19:12, where the stream wrote the register: what the
+    /// preparation translates the program's subnormals by, as [`super::UserData::float_mode`].
+    #[serde(default)]
+    pub float_mode: Option<u8>,
+    /// The backward jumps an invocation takes before its loop is cut (D949), where a run asks for
+    /// fewer than [`crate::control::LOOP_CAP`] to see which loop a lost device ran; zero for the
+    /// cap.
+    #[serde(default)]
+    pub loop_cap: u32,
 }
 
 /// Where a dispatch's partial-group shape sits in the push-constant block (D855): the last group's
@@ -80,6 +103,29 @@ pub const PARTIAL_PUSH_WORD: u32 = super::USER_DATA_STAGE_WORDS;
 /// low half of the address the buffer starts at, after the partial-group shape.
 pub const GLOBAL_BASE_PUSH_WORD: u32 = PARTIAL_PUSH_WORD + 6;
 
+/// The bytes of one page of a dispatch's global buffer, which holds only the guest pages its waves'
+/// global accesses reach (D961). Its word 0 is `bits`, the table's size as a power of two; the
+/// table's `1 << bits` slots follow, three words each - a held page's number (its address over the
+/// page size) low half, its high half, and where its words start in the buffer, zero in an empty
+/// slot - and then the pages, whole. A page lies at its slot by [`global_page_slot`] or within
+/// [`GLOBAL_PAGE_PROBES`] slots after it, wrapping.
+pub const GLOBAL_PAGE_BYTES: u32 = 4096;
+
+/// How many slots from its own a held page's lookup searches (D961): the host grows the table until
+/// every page lies within them.
+pub const GLOBAL_PAGE_PROBES: u32 = 2;
+
+/// The slot a page numbered `page` hashes to in a table of `1 << bits` slots (D961): the halves of
+/// its number mixed, by a multiplicative hash's top `bits` bits. The module forms the same.
+#[must_use]
+pub fn global_page_slot(page: u64, bits: u32) -> u32 {
+    let mixed = (page as u32) ^ ((page >> 32) as u32);
+    mixed.wrapping_mul(GLOBAL_PAGE_HASH) >> (32 - bits.clamp(1, 31))
+}
+
+/// The multiplier of [`global_page_slot`]'s hash: the golden ratio's fraction of 2^32.
+pub const GLOBAL_PAGE_HASH: u32 = 0x9e37_79b1;
+
 /// Where the guest bases of a dispatch's buffers placed from a sample sit in the push-constant block
 /// (D951), after the global loads' base: two words for each slot [`ComputeInputs::sampled_buffers`]
 /// names, in slot order - the low half of the address the bound buffer starts at, then its bits
@@ -89,6 +135,14 @@ pub const SAMPLED_BASES_PUSH_WORD: u32 = GLOBAL_BASE_PUSH_WORD + 1;
 /// The most buffers one dispatch binds from a sample (D951): the push-constant words their bases
 /// take, after the user data, the partial-group shape and the global loads' base.
 pub const MOST_SAMPLED_BUFFERS: u32 = 8;
+
+/// Where a streamout pass's wave finds its first vertex in the push-constant block (D861): the word
+/// after the device table's, which `offset_x` adds to each lane's x id. Read rather than compiled
+/// in, so one module serves every wave of every draw of a program.
+pub const FIRST_THREAD_PUSH_WORD: u32 =
+    crate::device_address::DEVICE_TABLE_PUSH_WORD + crate::device_address::DEVICE_TABLE_PUSH_WORDS;
+
+const _: () = assert!(FIRST_THREAD_PUSH_WORD < super::USER_DATA_BLOCK_WORDS);
 
 impl PartialGroups {
     /// The six words a module reads at [`PARTIAL_PUSH_WORD`].
@@ -203,6 +257,9 @@ pub(super) struct DispatchState {
     wave: Option<Id>,
     /// A private word, non-zero once any access has left the memory the module can reach exactly.
     escaped: Id,
+    /// A private word, the highest guest page an access escaped at by device address (D971):
+    /// bits 47:16 of its address, zero while none has.
+    escaped_page: Id,
     /// A private word counting the backward jumps the invocation has taken (D949).
     jumps: Id,
 }
@@ -218,14 +275,15 @@ impl DispatchState {
     ) -> Self {
         let workgroup = super::declare_workgroup_id(b, u32_type);
         let wave = (waves > 1).then(|| super::declare_lane_input(b, u32_type, true));
-        let (escaped, jumps) = (b.id(), b.id());
-        for word in [escaped, jumps] {
+        let (escaped, escaped_page, jumps) = (b.id(), b.id(), b.id());
+        for word in [escaped, escaped_page, jumps] {
             b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE, zero.0]);
         }
         Self {
             workgroup,
             wave,
             escaped,
+            escaped_page,
             jumps,
         }
     }
@@ -308,6 +366,11 @@ impl DispatchState {
             register += 1;
         }
 
+        // Two lanes an invocation (D973): each lane's ids, and the mask by its halves' ballots.
+        if module.holds_two() {
+            Self::seed_halves(module, (id, inputs));
+            return;
+        }
         // One invocation per lane (D880): this lane's ids, and its bit of the mask.
         if let Some(lane) = module.invocation {
             Self::seed_lane(module, (id, inputs), lane);
@@ -339,7 +402,7 @@ impl DispatchState {
                 .take(inputs.thread_id_components as usize)
                 .enumerate()
             {
-                let value = offset_x(module, register, value, inputs.first_thread);
+                let value = offset_x(module, register, value);
                 let pointer = module.lane_pointer(u32::try_from(register).unwrap_or(0), lane);
                 module.builder.function(op::STORE, &[pointer.0, value.0]);
             }
@@ -351,6 +414,67 @@ impl DispatchState {
             (Model::constant(module, low), Model::constant(module, high))
         } else {
             Self::group_mask(module, (id, inputs), &lanes)
+        };
+        module.store_scalar(EXEC_LO, low);
+        module.store_scalar(EXEC_HI, high);
+    }
+
+    /// Seeds both lanes of an invocation that holds two (D973): each lane's thread ids in its own
+    /// registers, and the execution mask - every lane's bits where they are known at translation,
+    /// a group of one wave with no partial groups, and otherwise each half the subgroup's ballot of
+    /// whether that half's lane's thread runs.
+    fn seed_halves(module: &mut Wavefront<'_>, (id, inputs): (Id, ComputeInputs)) {
+        let threads = inputs.group_threads();
+        let known = module.wave_base.is_none() && inputs.partial.is_none();
+        let last = (!known).then(|| Self::last_groups(module, (id, inputs)));
+        let end = (threads % module.lanes != 0).then(|| Model::constant(module, threads));
+        let zero = Model::constant(module, 0);
+        let mut halves = (zero, zero);
+        for half in 0..2 {
+            let Some(lane) = module.own_lane(half) else {
+                return;
+            };
+            let place = match module.wave_base {
+                Some(base) => binary(module, op::IADD, base, lane),
+                None => lane,
+            };
+            let ids = split_place(module, place, inputs.threads);
+            for (register, value) in ids
+                .into_iter()
+                .take(inputs.thread_id_components as usize)
+                .enumerate()
+            {
+                let value = offset_x(module, register, value);
+                let pointer = module.lane_pointer(u32::try_from(register).unwrap_or(0), half);
+                module.builder.function(op::STORE, &[pointer.0, value.0]);
+            }
+            let Some(last) = last.as_ref() else {
+                continue;
+            };
+            halves = match thread_off(module, (last, end), (ids, Some(place))) {
+                None => {
+                    let all = Model::constant(module, u32::MAX);
+                    if half == 0 {
+                        (all, halves.1)
+                    } else {
+                        (halves.0, all)
+                    }
+                }
+                Some(off) => {
+                    let bool_type = module.bool_type;
+                    let runs = module.builder.id();
+                    module
+                        .builder
+                        .function(op::LOGICAL_NOT, &[bool_type.0, runs.0, off.0]);
+                    module.set_lane_bit(halves, half, runs)
+                }
+            };
+        }
+        let (low, high) = if known {
+            let (low, high) = first_threads(threads);
+            (Model::constant(module, low), Model::constant(module, high))
+        } else {
+            halves
         };
         module.store_scalar(EXEC_LO, low);
         module.store_scalar(EXEC_HI, high);
@@ -371,6 +495,9 @@ impl DispatchState {
             .take(inputs.thread_id_components as usize)
             .enumerate()
         {
+            // A streamout wave's lane holds the draw's vertex id, its first lane's plus its own
+            // (D861), as the whole wave's do; the mask below reads the id within the wave.
+            let value = offset_x(module, register, value);
             let pointer = module.lane_pointer(u32::try_from(register).unwrap_or(0), 0);
             module.builder.function(op::STORE, &[pointer.0, value.0]);
         }
@@ -510,9 +637,53 @@ impl DispatchState {
     /// Records an escape: sets the flag when `escaped` holds, for `lane` when it is active, or
     /// unconditionally for the scalar unit.
     pub(super) fn note(self, module: &mut Wavefront<'_>, escaped: Id, lane: Option<u32>) {
-        let condition = match lane {
+        if let Some(condition) = Self::escape_condition(module, escaped, lane) {
+            self.set_flag(module, condition);
+        }
+    }
+
+    /// [`Self::note`], and the escape's guest page kept where it is above the one kept (D971):
+    /// `page` is bits 47:16 of the address the access formed.
+    pub(super) fn note_at(
+        self,
+        module: &mut Wavefront<'_>,
+        escaped: Id,
+        lane: Option<u32>,
+        page: Id,
+    ) {
+        let Some(condition) = Self::escape_condition(module, escaped, lane) else {
+            return;
+        };
+        self.set_flag(module, condition);
+        let (u32_type, bool_type) = (module.u32_type, module.bool_type);
+        let kept = module.builder.id();
+        module
+            .builder
+            .function(op::LOAD, &[u32_type.0, kept.0, self.escaped_page.0]);
+        let higher = module.builder.id();
+        module
+            .builder
+            .function(op::UGREATER_THAN, &[bool_type.0, higher.0, page.0, kept.0]);
+        let taken = module.builder.id();
+        module.builder.function(
+            op::LOGICAL_AND,
+            &[bool_type.0, taken.0, condition.0, higher.0],
+        );
+        let after = module.builder.id();
+        module
+            .builder
+            .function(op::SELECT, &[u32_type.0, after.0, taken.0, page.0, kept.0]);
+        module
+            .builder
+            .function(op::STORE, &[self.escaped_page.0, after.0]);
+    }
+
+    /// When an escape `escaped` counts: for `lane` while it is active, or for the scalar unit
+    /// always; `None` where the lane is known not to run.
+    fn escape_condition(module: &mut Wavefront<'_>, escaped: Id, lane: Option<u32>) -> Option<Id> {
+        Some(match lane {
             Some(lane) => match module.lane_known(lane) {
-                Some(false) => return,
+                Some(false) => return None,
                 Some(true) => escaped,
                 None => {
                     let active = module.lane_active(lane);
@@ -525,7 +696,11 @@ impl DispatchState {
                 }
             },
             None => escaped,
-        };
+        })
+    }
+
+    /// Sets the escape flag where `condition` holds.
+    fn set_flag(self, module: &mut Wavefront<'_>, condition: Id) {
         let u32_type = module.u32_type;
         let one = Model::constant(module, 1);
         let before = module.builder.id();
@@ -564,6 +739,13 @@ impl DispatchState {
             .function(op::BRANCH_CONDITIONAL, &[set.0, store.0, merge.0]);
         module.builder.function(op::LABEL, &[store.0]);
         module.write_observation(zero, orbistoun_spirv::DISPATCH_ESCAPE_WORD, one);
+        // The highest page any invocation escaped at, by an atomic maximum, so invocations that
+        // escaped at different pages leave one whole page, not a mixture (D971).
+        let page = module.builder.id();
+        module
+            .builder
+            .function(op::LOAD, &[u32_type.0, page.0, self.escaped_page.0]);
+        module.max_observation(zero, orbistoun_spirv::DISPATCH_ESCAPE_PAGE_WORD, page);
         module.builder.function(op::BRANCH, &[merge.0]);
         module.builder.function(op::LABEL, &[merge.0]);
     }
@@ -634,17 +816,21 @@ fn thread_off(
     off
 }
 
-/// `left operation right` on words.
-/// A thread's id in `register` as the module stores it: the x id moved by `first_thread`
-/// ([`ComputeInputs::first_thread`]), every other as it is.
-fn offset_x(module: &mut Wavefront<'_>, register: usize, value: Id, first_thread: u32) -> Id {
-    if register != 0 || first_thread == 0 {
+/// A thread's id in `register` as the module stores it: a streamout pass's x id moved by the wave's
+/// first vertex ([`ComputeInputs::first_thread`]), read from the push-constant block at
+/// [`FIRST_THREAD_PUSH_WORD`] so every wave of every draw shares one module (D861); every other as
+/// it is.
+fn offset_x(module: &mut Wavefront<'_>, register: usize, value: Id) -> Id {
+    if register != 0 || !matches!(module.streamout, super::StreamoutRole::Pass) {
         return value;
     }
-    let first = Model::constant(module, first_thread);
-    binary(module, op::IADD, value, first)
+    match module.push_word(FIRST_THREAD_PUSH_WORD) {
+        Some(first) => binary(module, op::IADD, value, first),
+        None => value,
+    }
 }
 
+/// `left operation right` on words.
 fn binary(module: &mut Wavefront<'_>, operation: u16, left: Id, right: Id) -> Id {
     let u32_type = module.u32_type;
     let result = module.builder.id();
@@ -693,6 +879,8 @@ mod tests {
     fn inputs(threads: [u32; 3], components: u32) -> ComputeInputs {
         ComputeInputs {
             workgroup_ids: [true, false, false],
+            table_buffers: 0,
+            loop_cap: 0,
             thread_id_components: components,
             threads,
             unwritten_user_data: 0,
@@ -702,6 +890,8 @@ mod tests {
             first_thread: 0,
             sampled_buffers: 0,
             scratch_wave_bytes: 0,
+            device_addressed: false,
+            float_mode: None,
         }
     }
 

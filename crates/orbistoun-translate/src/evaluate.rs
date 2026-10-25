@@ -894,6 +894,8 @@ fn run_lanes_within(
                 model.join(&join);
             }
         }
+        // Running out of steps is never a stopping point (D951): a run that can follow its loops
+        // but not within its bounds refuses, whatever it has recorded.
         if steps > (program.step_factor * decode.instructions.len()).min(MOST_WAVE_STEPS) {
             return Err(LOOPS_PAST_THE_BOUND.into());
         }
@@ -906,68 +908,127 @@ fn run_lanes_within(
         let before = model.scalars;
         let before_within = model.within;
         if loads.contains(&instruction.offset) {
-            let addresses = model.load_addresses(instruction, lanes).ok_or(UNKNOWN)?;
+            let addresses = model
+                .load_addresses(instruction, (lanes, name.contains("store")))
+                .ok_or(UNKNOWN)?;
             found.push((instruction.offset, addresses));
         }
         model.record_probes(program, instruction.offset);
+        let index = at;
         at += 1;
-        match family {
-            "SOPP" if name == "s_endpgm" => {
-                if !joins.is_empty() {
-                    return Err(ENDS_IN_A_SKIPPED_BLOCK.into());
-                }
-                break;
-            }
-            "SOPP" if branches(name) => {
-                match lane_branch(model, (decode, until), (instruction, name), &mut joins).map_err(
-                    |refusal| refusal.unwrap_or_else(|| causes.branch((instruction.offset, name))),
-                )? {
-                    Flow::Next => {}
-                    Flow::Jump(next) => at = next,
-                    Flow::Done => break,
-                }
-            }
-            // A program-control instruction that stays on the line, and an export, write no
-            // register.
-            "SOPP" | "EXP" => {}
-            "SMEM" => model.scalar_load(instruction, name, read),
-            "SOP1" | "SOP2" | "SOPK" | "SOPC" => {
-                if name.starts_with("s_setpc") || name.starts_with("s_swappc") {
-                    return Err("the program jumps to a computed address (D758)".into());
-                }
-                if model::instruction(model, instruction).is_err() {
-                    model.forget_written(instruction, name);
-                }
-                model.catch_up();
-            }
-            // A vector instruction nothing at a load's address reads is not run: what it writes
-            // stays as it was, which no address depends on.
-            "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" if !needed[at - 1] => {}
-            "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" => {
-                if model::instruction(model, instruction).is_err() {
-                    if name.starts_with("v_writelane") {
-                        model.forget_vector_every_lane(instruction.operands.first(), 4);
-                    } else {
-                        model.forget_vector(instruction.operands.first(), 4);
-                    }
-                    model.forget_vector_writes(instruction, name);
-                }
-                model.catch_up();
-                if name == "v_readfirstlane_b32" {
-                    model.first_lane_alike(instruction);
-                }
-            }
-            // A buffer load each lane forms through its descriptor reads guest memory (D900).
-            _ if model.lanes && name.starts_with("buffer_load_dword") => {
-                model.vector_buffer_load(instruction, written_vectors(name), read);
-            }
-            // Any other access's destination is what memory held, unknown here.
-            _ => model.forget_vector(instruction.operands.first(), written_vectors(name)),
+        match lane_step(
+            model,
+            (decode, until),
+            (instruction, family, name),
+            (needed[index], &mut joins, &mut causes),
+            read,
+        ) {
+            LaneStep::On => {}
+            LaneStep::Jump(next) => at = next,
+            LaneStep::Stop => break,
+            // A loop the run cannot follow ends the run rather than refusing, where an invariant
+            // probe is recorded or can be read where it stops (D962).
+            LaneStep::Refuse(_) if model.invariant_stop(program, index, &joins) => break,
+            LaneStep::Refuse(why) => return Err(why),
         }
         model.bound_written(instruction, (family, name), (&before, &before_within));
         causes.record(model, (instruction, name), &before, lanes);
     }
     Ok(found)
+}
+
+/// Where a lane run's instruction leaves it ([`lane_step`]).
+enum LaneStep {
+    /// On to the next instruction.
+    On,
+    /// On from the instruction at this index.
+    Jump(usize),
+    /// The run is done.
+    Stop,
+    /// The run cannot go on, for this reason - which a run whose probes are loop-invariant may
+    /// take as its stopping point instead (D962).
+    Refuse(LaneRefusal),
+}
+
+/// Runs one instruction of a lane run over `model`: its register effects, and where it leaves the
+/// run. `needed` is whether a vector instruction's result something at a load's address reads; a
+/// branch is followed through `joins`, and `causes` names a register a refused branch reads.
+fn lane_step(
+    model: &mut Concrete<'_>,
+    (decode, until): (&Decode, u32),
+    (instruction, family, name): (&Instruction, &str, &str),
+    (needed, joins, causes): (bool, &mut Vec<Join>, &mut Causes<'_>),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> LaneStep {
+    match family {
+        "SOPP" if name == "s_endpgm" => {
+            if joins.is_empty() {
+                LaneStep::Stop
+            } else {
+                LaneStep::Refuse(ENDS_IN_A_SKIPPED_BLOCK.into())
+            }
+        }
+        "SOPP" if branches(name) => {
+            match lane_branch(model, (decode, until), (instruction, name), joins) {
+                Ok(Flow::Next) => LaneStep::On,
+                Ok(Flow::Jump(next)) => LaneStep::Jump(next),
+                Ok(Flow::Done) => LaneStep::Stop,
+                Err(refusal) => LaneStep::Refuse(
+                    refusal.unwrap_or_else(|| causes.branch((instruction.offset, name))),
+                ),
+            }
+        }
+        // A program-control instruction that stays on the line, and an export, write no register.
+        "SOPP" | "EXP" => LaneStep::On,
+        "SMEM" => {
+            model.scalar_load(instruction, name, read);
+            LaneStep::On
+        }
+        "SOP1" | "SOP2" | "SOPK" | "SOPC" => {
+            if name.starts_with("s_setpc") || name.starts_with("s_swappc") {
+                return LaneStep::Refuse("the program jumps to a computed address (D758)".into());
+            }
+            if model::instruction(model, instruction).is_err() {
+                model.forget_written(instruction, name);
+            }
+            model.catch_up();
+            LaneStep::On
+        }
+        // A vector instruction nothing at a load's address reads is not run: what it writes stays
+        // as it was, which no address depends on.
+        "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" if !needed => LaneStep::On,
+        "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" => {
+            if model::instruction(model, instruction).is_err() {
+                let written = vector_destination_width(name);
+                if name.starts_with("v_writelane") {
+                    model.forget_vector_every_lane(instruction.operands.first(), written);
+                } else {
+                    model.forget_vector(instruction.operands.first(), written);
+                }
+                model.forget_vector_writes(instruction, name);
+            }
+            model.catch_up();
+            if name == "v_readfirstlane_b32" {
+                model.first_lane_alike(instruction);
+            }
+            LaneStep::On
+        }
+        // A buffer load each lane forms through its descriptor reads guest memory (D900).
+        _ if model.lanes && name.starts_with("buffer_load_dword") => {
+            model.vector_buffer_load(instruction, written_vectors(name), read);
+            LaneStep::On
+        }
+        // So does a global load at the address each lane forms.
+        _ if model.lanes && name.starts_with("global_load_dword") => {
+            model.vector_global_load(instruction, written_vectors(name), read);
+            LaneStep::On
+        }
+        // Any other access's destination is what memory held, unknown here.
+        _ => {
+            model.forget_vector(instruction.operands.first(), written_vectors(name));
+            LaneStep::On
+        }
+    }
 }
 
 /// Where a lane run goes on from a branch.
@@ -1043,6 +1104,25 @@ fn lane_branch(
     };
     if !taken {
         return Ok(Flow::Next);
+    }
+    // The `then` block of an `if` the run does not know, ending in a jump past an `else` block: the
+    // `else` block runs from what the way that skipped the `then` block held, and joins this way
+    // where the jump lands. Where that is past the run's end, this way is done and the `else` way
+    // goes on alone.
+    if name == "s_branch"
+        && target > i64::from(instruction.offset)
+        && joins.last().is_some_and(|join| join.target == opened + 1)
+        && let Some(skipped) = joins.pop()
+    {
+        if target <= i64::from(until) {
+            let end = index(target)?;
+            if joins.last().is_some_and(|outer| end > outer.target) {
+                return refuse(LEAVES_A_SKIPPED_BLOCK);
+            }
+            joins.push(model.fork(skipped.opened, end));
+        }
+        model.resume(&skipped);
+        return Ok(Flow::Jump(skipped.target));
     }
     // A jump past the run's end leaves every load behind it: the run is done.
     if target > i64::from(until) {
@@ -1126,6 +1206,20 @@ fn destination_width(name: &str) -> usize {
     } else {
         1
     }
+}
+
+/// How many vector registers a vector ALU instruction the model could not run may have written,
+/// from its destination: a pair for a 64-bit result (`_b64`, `_u64`, `_i64`, `_f64`, and the
+/// double-rate packed `_f16`/`_u16`/`_i16` forms write a pair of 32-bit lanes' worth), one
+/// otherwise. A vector ALU destination is never wider than a pair, so forgetting more would clear a
+/// neighbour the run still knows.
+fn vector_destination_width(name: &str) -> u32 {
+    let wide = ["_b64", "_u64", "_i64", "_f64"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+        && !name.contains("_i32_")
+        && !name.contains("_u32_");
+    if wide { 2 } else { 1 }
 }
 
 /// The step that left a register unknown in a lane run: its offset, its name, and what it read
@@ -1396,6 +1490,127 @@ pub(crate) fn run_end(decode: &Decode, encodings: &EncodingTable, loads: &[u32])
     }
 }
 
+/// What a probed run needs, where it stops, to prove a probe's registers hold at the probe what
+/// they hold there (D962): the program's control flow, and for each probe which instructions can
+/// reach it and which write its registers. Fixed by the program, so found once.
+#[derive(Debug, Clone)]
+struct Invariance {
+    /// Each instruction's successors by index; [`None`] where they cannot be told - no name, or a
+    /// jump to a computed address, or a branch into the middle of an instruction.
+    successors: Vec<Option<Vec<usize>>>,
+    /// For each probe: whether each instruction can reach it, and whether each writes one of its
+    /// registers.
+    probes: Vec<(Vec<bool>, Vec<bool>)>,
+}
+
+impl Invariance {
+    /// The control flow and per-probe facts for `probes` over `decode`; [`None`] where a probe's
+    /// byte starts no instruction.
+    fn new(
+        decode: &Decode,
+        encodings: &EncodingTable,
+        probes: &[(u32, Vec<usize>)],
+    ) -> Option<Self> {
+        let index = |offset: i64| {
+            decode
+                .instructions
+                .binary_search_by_key(&offset, |i| i64::from(i.offset))
+                .ok()
+        };
+        let count = decode.instructions.len();
+        let successors: Vec<Option<Vec<usize>>> = decode
+            .instructions
+            .iter()
+            .enumerate()
+            .map(|(at, instruction)| {
+                let (_, name) = named(encodings, instruction)?;
+                let next = (at + 1 < count).then_some(at + 1);
+                if name == "s_endpgm" {
+                    return Some(Vec::new());
+                }
+                if name.starts_with("s_setpc") || name.starts_with("s_swappc") {
+                    return None;
+                }
+                if !branches(name) {
+                    return Some(next.into_iter().collect());
+                }
+                let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
+                    return None;
+                };
+                let target = index(i64::from(instruction.offset) + 4 + 4 * simm16(*jump))?;
+                Some(if name == "s_branch" {
+                    vec![target]
+                } else {
+                    next.into_iter().chain([target]).collect()
+                })
+            })
+            .collect();
+        let mut predecessors = vec![Vec::new(); count];
+        for (at, next) in successors.iter().enumerate() {
+            for &to in next.iter().flatten() {
+                predecessors[to].push(at);
+            }
+        }
+        let probes = probes
+            .iter()
+            .map(|(at, registers)| {
+                let probe = index(i64::from(*at))?;
+                let mut reaches = vec![false; count];
+                let mut pending = vec![probe];
+                while let Some(at) = pending.pop() {
+                    if !std::mem::replace(&mut reaches[at], true) {
+                        pending.extend(&predecessors[at]);
+                    }
+                }
+                let writes = decode
+                    .instructions
+                    .iter()
+                    .map(|instruction| {
+                        named(encodings, instruction).is_none_or(|(family, name)| {
+                            scalar_writes(instruction, (family, name))
+                                .iter()
+                                .any(|code| registers.contains(code))
+                        })
+                    })
+                    .collect();
+                Some((reaches, writes))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self { successors, probes })
+    }
+
+    /// The instructions reachable from `start`, itself included; [`None`] where one whose
+    /// successors cannot be told is reached.
+    fn reachable(&self, start: usize) -> Option<Vec<bool>> {
+        let mut reached = vec![false; self.successors.len()];
+        let mut pending = vec![start];
+        while let Some(at) = pending.pop() {
+            if at >= reached.len() || std::mem::replace(&mut reached[at], true) {
+                continue;
+            }
+            pending.extend(self.successors[at].as_ref()?);
+        }
+        Some(reached)
+    }
+}
+
+/// Every scalar register code an instruction may write (D962): its explicit destination and carry
+/// ([`scalar_destination_codes`]), and the condition or execution mask a compare, a `v_cmpx`, a
+/// save-exec or a short carry writes without naming it. Over-wide where unsure, so the invariance
+/// proof refuses rather than misses a write.
+fn scalar_writes(instruction: &Instruction, (family, name): (&str, &str)) -> Vec<usize> {
+    let mut codes = scalar_destination_codes(instruction, (family, name));
+    if name.starts_with("v_cmpx") || name.contains("saveexec") {
+        codes.extend([EXEC, EXEC + 1]);
+    } else if family == "VOPC" {
+        codes.extend([VCC, VCC + 1]);
+    }
+    if name.contains("_co_") && name.ends_with("_e32") {
+        codes.extend([VCC, VCC + 1]);
+    }
+    codes
+}
+
 /// A program prepared for lane runs (D758): decoded, with which instructions a run needs and
 /// whether any of them reads one lane from another. All of it is fixed by the program, so it is found
 /// once and serves every draw.
@@ -1418,6 +1633,9 @@ pub struct LaneProgram {
     probes: Vec<(u32, Vec<usize>)>,
     /// How many steps a run takes at most, in multiples of the program's instructions.
     step_factor: usize,
+    /// What a probed run needs to stop rather than refuse where it cannot follow the program
+    /// (D962); [`None`] for a run with no probes, or where a probe's byte starts no instruction.
+    invariance: Option<Invariance>,
 }
 
 impl LaneProgram {
@@ -1436,6 +1654,7 @@ impl LaneProgram {
             quick,
             probes: Vec::new(),
             step_factor: 4,
+            invariance: None,
         }
     }
 
@@ -1467,6 +1686,11 @@ impl LaneProgram {
             })
             .next_back()
             .unwrap_or(last);
+        let invariance = if probes.is_empty() {
+            None
+        } else {
+            Invariance::new(&decode, encodings, probes)
+        };
         Self {
             until,
             loads: Vec::new(),
@@ -1476,6 +1700,7 @@ impl LaneProgram {
             quick: Err(last),
             probes: probes.to_vec(),
             step_factor: PROBE_STEP_FACTOR,
+            invariance,
         }
     }
 
@@ -1590,6 +1815,246 @@ pub fn wave_lane_addresses_within(
     run_lanes_within(&mut model, program, encodings, lanes, (read, steps))
 }
 
+/// One instruction's effect in a concrete wave trace ([`wave_trace`]): the byte it is at, and the
+/// traced lane's vector and the scalar registers after it ran, each [`None`] where unknown.
+#[derive(Debug, Clone)]
+pub struct TracePoint {
+    /// The instruction's byte offset in the program.
+    pub offset: u32,
+    /// The traced lane's vector registers `v0..` after the instruction.
+    pub vectors: Vec<Option<u32>>,
+    /// The scalar registers `s0..` after the instruction.
+    pub scalars: Vec<Option<u32>>,
+    /// Whether the instruction, or one any wave ran before it, is one the host did not model
+    /// concretely - a local-data-share or store form it does not know, or an access whose place is
+    /// unknown - so registers may diverge from the device past this point for that reason rather
+    /// than a translator fault.
+    pub past_unmodelled: bool,
+}
+
+/// A concrete wave trace ([`wave_trace`]).
+#[derive(Debug, Clone)]
+pub struct WaveTrace {
+    /// Each instruction run, in the order it ran.
+    pub points: Vec<TracePoint>,
+    /// Why the run stopped.
+    pub stop: TraceStop,
+    /// What the run's stores wrote, by byte address, each word with the byte of the store that last
+    /// wrote it: [`None`] where it was written with a value the run does not know.
+    pub written: std::collections::BTreeMap<u64, (Option<u32>, u32)>,
+    /// Every modelled lane's vector registers `v0..` at the end, by lane.
+    pub lanes: Vec<Vec<Option<u32>>>,
+}
+
+/// Why a concrete wave trace stopped ([`wave_trace`]).
+#[derive(Debug, Clone)]
+pub enum TraceStop {
+    /// The program ended.
+    Ended,
+    /// A branch on something the host cannot know concretely (a per-lane mask), at this byte: the
+    /// host would have to follow both ways, so a single concrete trace stops here.
+    ForkedAt(u32),
+    /// The run spent its step bound.
+    StepBound,
+    /// An instruction with no name, at this byte.
+    Unnamed(u32),
+}
+
+/// One wave of a group trace ([`wave_trace`]): its registers, where it is, and the blocks a branch
+/// would have it follow both ways, which stop the trace.
+struct WaveRun<'a> {
+    model: Concrete<'a>,
+    at: usize,
+    joins: Vec<Join>,
+    /// Whether it has ended, or the trace stopped in it.
+    done: bool,
+}
+
+/// What a group trace's waves share: the local data share by byte address, the run's stores over
+/// guest memory with the byte of the store that last wrote each word, the steps every wave has
+/// taken, and whether anything unmodelled has run.
+struct GroupShared {
+    local: std::collections::BTreeMap<u32, Option<u32>>,
+    written: std::collections::BTreeMap<u64, (Option<u32>, u32)>,
+    steps: usize,
+    unmodelled: bool,
+}
+
+/// How a wave's run to its next barrier ended.
+enum WaveHalt {
+    /// It ran `s_barrier`, and waits there for the group.
+    Barrier,
+    /// It ended.
+    Ended,
+    /// The trace cannot go on.
+    Stopped(TraceStop),
+}
+
+/// Runs `run` until it has run an `s_barrier` or ends, over what the group shares, recording each
+/// instruction into `points` with the vector registers of `record`'s lane where it is given.
+fn run_to_barrier(
+    run: &mut WaveRun<'_>,
+    (decode, encodings): (&Decode, &EncodingTable),
+    shared: &mut GroupShared,
+    (points, record): (&mut Vec<TracePoint>, Option<(u32, u32, u32)>),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> WaveHalt {
+    let mut causes = Causes::new();
+    loop {
+        let Some(instruction) = decode.instructions.get(run.at) else {
+            return WaveHalt::Ended;
+        };
+        shared.steps += 1;
+        if shared.steps > MOST_WAVE_STEPS {
+            return WaveHalt::Stopped(TraceStop::StepBound);
+        }
+        let Some((family, name)) = named(encodings, instruction) else {
+            return WaveHalt::Stopped(TraceStop::Unnamed(instruction.offset));
+        };
+        run.at += 1;
+        let model = &mut run.model;
+        let step = if name.starts_with("ds_") {
+            if !model.local_step(instruction, name, &mut shared.local) {
+                shared.unmodelled = true;
+                model.forget_vector(instruction.operands.first(), written_vectors(name));
+            }
+            LaneStep::On
+        } else if name.starts_with("buffer_store_dword") {
+            // A store writes no register, so its width is its own: a dword or `dwordx<n>`.
+            let words = name
+                .strip_prefix("buffer_store_dwordx")
+                .map_or(Some(1), |count| count.parse().ok());
+            let stored = words.is_some_and(|words| {
+                model.vector_buffer_store(instruction, words, &mut shared.written)
+            });
+            if !stored {
+                shared.unmodelled = true;
+            }
+            LaneStep::On
+        } else {
+            if name.contains("store") || name.contains("atomic") {
+                shared.unmodelled = true;
+            }
+            // A load reads what the run stored before what memory held. Every instruction's effect
+            // is wanted, so none is skipped as not feeding a load address.
+            let written = &shared.written;
+            let mut overlay = |address: u64| match written.get(&address) {
+                Some((value, _)) => *value,
+                None => read(address),
+            };
+            lane_step(
+                model,
+                (decode, u32::MAX),
+                (instruction, family, name),
+                (true, &mut run.joins, &mut causes),
+                &mut overlay,
+            )
+        };
+        // A single concrete path: a branch that forks (pushes a join to follow a skipped block, or
+        // is refused for a mask the host cannot know) stops the trace.
+        if !run.joins.is_empty() || matches!(step, LaneStep::Refuse(_)) {
+            return WaveHalt::Stopped(TraceStop::ForkedAt(instruction.offset));
+        }
+        if matches!(step, LaneStep::Stop) {
+            return WaveHalt::Ended;
+        }
+        if let Some((vectors, scalars, lane)) = record {
+            points.push(TracePoint {
+                offset: instruction.offset,
+                vectors: (0..vectors).map(|r| run.model.vector(r, lane)).collect(),
+                scalars: (0..scalars)
+                    .map(|r| run.model.scalars.get(r as usize).copied().flatten())
+                    .collect(),
+                past_unmodelled: shared.unmodelled,
+            });
+        }
+        if let LaneStep::Jump(next) = step {
+            run.at = next;
+        }
+        if name == "s_barrier" {
+            return WaveHalt::Barrier;
+        }
+    }
+}
+
+/// Runs a group of `program` concretely, wave by wave, and records the registers of one of its
+/// lanes after each instruction (D758 oracle for a device-vs-host differential). Each wave is a
+/// single straight path: the first branch on a per-lane mask it cannot know stops the trace,
+/// because the host would otherwise explore both ways rather than execute the wave.
+///
+/// `waves` are the group's waves in order. Each runs until it has run an `s_barrier` (or ends),
+/// then the next does, and once every wave still running has reached the barrier they all go on
+/// (D892): the order a barrier's waves meet in. The local data share and the run's stores are the
+/// group's: `ds_write*`, `ds_read*` and the 32-bit atomics run in every lane, in ascending lane
+/// order and wave order, which is exact for a program whose waves touch the share between barriers
+/// only through atomics and their own words - an atomic's slots then go to the waves in their
+/// order, one of the orders the hardware may give. Buffer stores write into the run's copy of
+/// memory, which later loads read before `read`. Anything the run does not model sets
+/// [`TracePoint::past_unmodelled`] from there on.
+///
+/// `vectors` and `scalars` are how many of each register to record, and `lane` the group's thread
+/// whose vector registers each [`TracePoint`] holds: lane `lane % width` of wave `lane / width`.
+pub fn wave_trace(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    user_data: &[u32],
+    (width, waves): (u32, &[WaveEntry]),
+    (vectors, scalars, lane): (u32, u32, u32),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> WaveTrace {
+    let decode = &program.decode;
+    let mut runs: Vec<WaveRun<'_>> = waves
+        .iter()
+        .map(|wave| WaveRun {
+            model: wave_model(program, encodings, user_data, (width, wave)).0,
+            at: 0,
+            joins: Vec::new(),
+            done: false,
+        })
+        .collect();
+    let mut shared = GroupShared {
+        local: std::collections::BTreeMap::new(),
+        written: std::collections::BTreeMap::new(),
+        steps: 0,
+        unmodelled: false,
+    };
+    let traced = (lane / width.max(1)) as usize;
+    let mut trace = Vec::new();
+    let stop = 'group: loop {
+        if runs.iter().all(|run| run.done) {
+            break TraceStop::Ended;
+        }
+        for (index, run) in runs.iter_mut().enumerate().filter(|(_, run)| !run.done) {
+            let record = (index == traced).then_some((vectors, scalars, lane % width.max(1)));
+            match run_to_barrier(
+                run,
+                (decode, encodings),
+                &mut shared,
+                (&mut trace, record),
+                read,
+            ) {
+                WaveHalt::Barrier => {}
+                WaveHalt::Ended => run.done = true,
+                WaveHalt::Stopped(stop) => break 'group stop,
+            }
+        }
+    };
+    let lanes = runs
+        .iter()
+        .flat_map(|run| {
+            (0..run.model.modelled)
+                .map(|lane| (0..vectors).map(|r| run.model.vector(r, lane)).collect())
+        })
+        .collect();
+    let written = shared.written;
+    WaveTrace {
+        points: trace,
+        stop,
+        written,
+        lanes,
+    }
+}
+
 /// The refusal a lane run gives a loop longer than it follows: what a caller with a longer run to
 /// hand ([`long_wave_lane_addresses`]) tries that on.
 pub const LOOPS_PAST_THE_BOUND: &str = concat!(
@@ -1614,16 +2079,21 @@ pub fn quick_lane_addresses(
 /// Found backwards to a fixed point over the whole program, so a writer on either side of a branch,
 /// or round a loop, is kept. Conservatively wide: a vector instruction writing a scalar or a lane
 /// mask is always kept, a vector destination counts as a register pair, and every vector source of
-/// a kept instruction is needed as a pair.
+/// a kept instruction is needed as a pair, as is every vector address of a load whose destination is
+/// needed.
 fn address_slice(decode: &Decode, encodings: &EncodingTable, loads: &[u32]) -> Vec<bool> {
     let pair = |register: u16| [u32::from(register), u32::from(register) + 1];
     let mut needed: std::collections::BTreeSet<u32> = decode
         .instructions
         .iter()
         .filter(|i| loads.contains(&i.offset))
-        .filter_map(|i| match i.operands.get(1) {
-            Some(Operand::Vector(register)) => Some(pair(*register)),
-            _ => None,
+        .filter_map(|i| {
+            // A store's address comes before its data (D961).
+            let store = named(encodings, i).is_some_and(|(_, name)| name.contains("store"));
+            match i.operands.get(usize::from(!store)) {
+                Some(Operand::Vector(register)) => Some(pair(*register)),
+                _ => None,
+            }
         })
         .flatten()
         .collect();
@@ -1634,6 +2104,30 @@ fn address_slice(decode: &Decode, encodings: &EncodingTable, loads: &[u32]) -> V
             let Some((family, name)) = named(encodings, instruction) else {
                 continue;
             };
+            // A load fills its destination from where each lane addresses it, so a needed
+            // destination needs the registers it addresses through: the index a pointer is loaded
+            // at is part of the address the pointer leads to (D883).
+            if [
+                "buffer_load_",
+                "tbuffer_load_",
+                "global_load_",
+                "flat_load_",
+            ]
+            .iter()
+            .any(|load| name.starts_with(load))
+            {
+                if let Some(Operand::Vector(destination)) = instruction.operands.first() {
+                    let first = u32::from(*destination);
+                    if (first..first + written_vectors(name)).any(|r| needed.contains(&r)) {
+                        for operand in instruction.operands.iter().skip(1) {
+                            if let Operand::Vector(source) = operand {
+                                needed.extend(pair(*source));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if !matches!(family, "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC") {
                 continue;
             }
@@ -1915,6 +2409,123 @@ impl VectorFile {
 
 /// The model the prefix runs through: registers that hold numbers, and a builder whose output is
 /// read back and evaluated.
+/// What a local-data-share access does, as a group trace runs it ([`Concrete::local_step`]).
+enum LocalKind {
+    Write,
+    Read,
+    /// A 32-bit atomic, by its name past `ds_` with any `_rtn` taken out: `add_u32`, `max_i32`.
+    Atomic(String),
+}
+
+/// A local-data-share access's operands: its kind, the register it returns into, its address
+/// register, its data registers, the byte offset of each element it reaches, and how many words
+/// each element is.
+struct LocalAccess {
+    kind: LocalKind,
+    destination: Option<u32>,
+    address: u32,
+    data: Vec<u32>,
+    offsets: Vec<u32>,
+    wide: u32,
+}
+
+impl LocalAccess {
+    /// The access `name` makes with `operands`, the `2` forms with their two offsets in elements;
+    /// `None` for a form a group trace does not model.
+    fn of(name: &str, operands: &[Operand]) -> Option<Self> {
+        let vector = |at: usize| match operands.get(at) {
+            Some(Operand::Vector(register)) => Some(u32::from(*register)),
+            _ => None,
+        };
+        let immediate = |at: usize| match operands.get(at) {
+            Some(Operand::Immediate(value)) => u32::try_from(*value).ok(),
+            None => Some(0),
+            _ => None,
+        };
+        let wide = if name.ends_with("b64") { 2 } else { 1 };
+        let unit = 4 * wide;
+        let pair = |first: usize| -> Option<Vec<u32>> {
+            Some(vec![immediate(first)? * unit, immediate(first + 1)? * unit])
+        };
+        let rest = name.strip_prefix("ds_")?;
+        let (kind, destination, address, data, offsets) = if rest.starts_with("write2") {
+            let data = vec![vector(1)?, vector(2)?];
+            (LocalKind::Write, None, vector(0)?, data, pair(3)?)
+        } else if rest.starts_with("write") {
+            let offsets = vec![immediate(2)?];
+            (
+                LocalKind::Write,
+                None,
+                vector(0)?,
+                vec![vector(1)?],
+                offsets,
+            )
+        } else if rest.starts_with("read2") {
+            (LocalKind::Read, vector(0), vector(1)?, Vec::new(), pair(2)?)
+        } else if rest.starts_with("read") {
+            let offsets = vec![immediate(2)?];
+            (LocalKind::Read, vector(0), vector(1)?, Vec::new(), offsets)
+        } else {
+            let op = rest.replace("_rtn", "");
+            local_atomic(&op, 0, 0)?;
+            let returns = rest.contains("_rtn");
+            let first = usize::from(returns);
+            let destination = if returns { Some(vector(0)?) } else { None };
+            let offsets = vec![immediate(first + 2)?];
+            let data = vec![vector(first + 1)?];
+            (
+                LocalKind::Atomic(op),
+                destination,
+                vector(first)?,
+                data,
+                offsets,
+            )
+        };
+        Some(Self {
+            kind,
+            destination,
+            address,
+            data,
+            offsets,
+            wide,
+        })
+    }
+}
+
+/// A 32-bit local-data-share atomic `op` (its name past `ds_`, `_rtn` taken out) over the word's
+/// `old` value and the lane's `value`: the word it leaves; `None` for one a group trace does not
+/// model.
+fn local_atomic(op: &str, old: u32, value: u32) -> Option<u32> {
+    Some(match op {
+        "add_u32" => old.wrapping_add(value),
+        "sub_u32" => old.wrapping_sub(value),
+        "rsub_u32" => value.wrapping_sub(old),
+        "inc_u32" => {
+            if old >= value {
+                0
+            } else {
+                old + 1
+            }
+        }
+        "dec_u32" => {
+            if old == 0 || old > value {
+                value
+            } else {
+                old - 1
+            }
+        }
+        "min_u32" => old.min(value),
+        "max_u32" => old.max(value),
+        "min_i32" => (old as i32).min(value as i32) as u32,
+        "max_i32" => (old as i32).max(value as i32) as u32,
+        "and_b32" => old & value,
+        "or_b32" => old | value,
+        "xor_b32" => old ^ value,
+        "wrxchg_b32" => value,
+        _ => return None,
+    })
+}
+
 struct Concrete<'a> {
     encodings: &'a EncodingTable,
     builder: Builder,
@@ -2170,8 +2781,33 @@ impl<'a> Concrete<'a> {
                     _ => return None,
                 }
             }
+            op::COMPOSITE_CONSTRUCT | op::EXT_INST => {
+                return self.compute_packed(opcode, arguments);
+            }
             _ => return self.compute_float(opcode, arguments),
         })
+    }
+
+    /// The one extended instruction a module's own builder emits that a run reads: GLSL.std.450's
+    /// `PackHalf2x16` (58), which `v_cvt_f16_f32` narrows through, each float of a pair of two
+    /// words to its nearest half, the first low (D979). Any other is unknown.
+    fn compute_packed(&self, opcode: u16, arguments: &[u32]) -> Option<Value> {
+        const PACK_HALF_2X16: u32 = 58;
+        let word = |at: usize| arguments.get(at).and_then(|id| self.number(*id));
+        match opcode {
+            op::COMPOSITE_CONSTRUCT if arguments.len() == 2 => {
+                Some(Value::Pair(word(0)?, word(1)?))
+            }
+            op::EXT_INST if arguments.get(1) == Some(&PACK_HALF_2X16) => {
+                let Value::Pair(low, high) = self.values.get(*arguments.get(2)?)? else {
+                    return None;
+                };
+                Some(Value::Word(
+                    single_to_half(*low) | single_to_half(*high) << 16,
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// The float operations [`Self::compute`] leaves: floats are held as their bits. The host's
@@ -2302,6 +2938,62 @@ impl<'a> Concrete<'a> {
         }
     }
 
+    /// Whether a run that cannot go on at instruction `at` may stop there rather than refuse
+    /// (D962). Its frontier is `at` and the target of each block a way that skipped it still waits
+    /// at (`joins`). Where no instruction on any path from the frontier to a probe writes the
+    /// probe's registers, every later reach of the probe sees what they hold at the frontier: that
+    /// is recorded, for each frontier point the probe is reachable from, beside what earlier
+    /// reaches recorded. False where the control flow from the frontier cannot be told, a
+    /// register is written on such a path, or no reach of any probe is known.
+    fn invariant_stop(&mut self, program: &LaneProgram, at: usize, joins: &[Join]) -> bool {
+        let Some(invariance) = &program.invariance else {
+            return false;
+        };
+        // Each frontier point: where it goes on from, and what it holds.
+        let frontier: Vec<(usize, &Scalars)> = std::iter::once((at, &self.scalars))
+            .chain(joins.iter().map(|join| (join.target, &join.scalars)))
+            .collect();
+        let mut reached = Vec::with_capacity(frontier.len());
+        for &(start, _) in &frontier {
+            let Some(from) = invariance.reachable(start) else {
+                return false;
+            };
+            reached.push(from);
+        }
+        let mut found = Vec::new();
+        for ((probe, registers), (reaches, writes)) in program.probes.iter().zip(&invariance.probes)
+        {
+            let written = reached
+                .iter()
+                .any(|from| (0..from.len()).any(|i| from[i] && reaches[i] && writes[i]));
+            if written {
+                return false;
+            }
+            let Some(index) = program
+                .decode
+                .instructions
+                .iter()
+                .position(|i| i.offset == *probe)
+            else {
+                return false;
+            };
+            for (from, &(_, scalars)) in reached.iter().zip(&frontier) {
+                if from[index] {
+                    let values = registers
+                        .iter()
+                        .map(|&register| scalars.get(register).copied().flatten())
+                        .collect();
+                    found.push((*probe, values));
+                }
+            }
+        }
+        if found.is_empty() && self.probed.is_empty() {
+            return false;
+        }
+        self.probed.extend(found);
+        true
+    }
+
     /// Notes `at` as the last instruction run, and records the registers each probe there names
     /// (D900).
     fn record_probes(&mut self, program: &LaneProgram, at: u32) {
@@ -2326,26 +3018,7 @@ impl<'a> Concrete<'a> {
         words: u32,
         read: &mut dyn FnMut(u64) -> Option<u32>,
     ) {
-        let [
-            Operand::Vector(data),
-            vaddr,
-            Operand::Scalar(resource),
-            soffset,
-        ] = instruction.operands.as_slice()
-        else {
-            self.forget_vector(instruction.operands.first(), words);
-            return;
-        };
-        let resource = usize::from(*resource);
-        let descriptor = [0, 1, 2].map(|word| self.scalars.get(resource + word).copied().flatten());
-        let soffset = match soffset {
-            Operand::Scalar(code) => self.scalars.get(usize::from(*code)).copied().flatten(),
-            Operand::Integer(value) => u32::try_from(*value).ok(),
-            _ => None,
-        };
-        let word = instruction.word;
-        let (immediate, offen, idxen) = (word & 0xFFF, word & 1 << 12 != 0, word & 1 << 13 != 0);
-        let Operand::Vector(vaddr) = vaddr else {
+        let Some(Operand::Vector(data)) = instruction.operands.first() else {
             self.forget_vector(instruction.operands.first(), words);
             return;
         };
@@ -2355,40 +3028,240 @@ impl<'a> Concrete<'a> {
             if runs == Some(false) {
                 continue;
             }
-            let mut next = u32::from(*vaddr);
-            let mut take = |model: &Self, on: bool| {
-                on.then(|| {
-                    let value = model.vector(next, lane);
-                    next += 1;
-                    value
-                })
-            };
-            let index = take(self, idxen);
-            let offset = take(self, offen);
-            let place = match (descriptor, soffset, index.flatten(), offset.flatten()) {
-                ([Some(low), Some(high), Some(records)], Some(soffset), index, voffset)
-                    if index.is_some() == idxen && voffset.is_some() == offen =>
-                {
-                    let base = (u64::from(high & 0xffff) << 32) | u64::from(low);
-                    let stride = u64::from(high >> 16 & 0x3fff);
-                    let index = u64::from(index.unwrap_or(0));
-                    let offset = u64::from(immediate) + u64::from(voffset.unwrap_or(0));
-                    // Records are elements with a stride, bytes without.
-                    let outside = if stride == 0 {
-                        offset + u64::from(soffset) + 4 * u64::from(words) > u64::from(records)
-                    } else {
-                        index >= u64::from(records)
-                    };
-                    Some((base + u64::from(soffset) + offset + index * stride, outside))
-                }
-                _ => None,
-            };
+            let place = self.buffer_lane_place(instruction, lane, words);
             for step in 0..words {
                 let value = match place {
                     Some((_, true)) => Some(0),
                     Some((address, false)) => read(address + 4 * u64::from(step)),
                     None => None,
                 };
+                // A lane that may not run keeps what it held, which the load may replace.
+                let value = value.filter(|&value| {
+                    runs == Some(true) || self.vector(data + step, lane) == Some(value)
+                });
+                self.vectors.insert((data + step, lane), value);
+            }
+        }
+    }
+
+    /// Where a MUBUF access of `words` words places `lane`: its descriptor's base, the scalar
+    /// offset, the instruction's offset and the lane's own - its vector offset where `offen` (bit
+    /// 12) is set, its index times the stride where `idxen` (bit 13) is - and whether that lies
+    /// past the descriptor's records, where a load reads zero and a store writes nothing. `None`
+    /// where the descriptor, an offset or the operands are unknown.
+    fn buffer_lane_place(
+        &self,
+        instruction: &Instruction,
+        lane: u32,
+        words: u32,
+    ) -> Option<(u64, bool)> {
+        let [
+            _,
+            Operand::Vector(vaddr),
+            Operand::Scalar(resource),
+            soffset,
+            ..,
+        ] = instruction.operands.as_slice()
+        else {
+            return None;
+        };
+        let resource = usize::from(*resource);
+        let [low, high, records] =
+            [0, 1, 2].map(|word| self.scalars.get(resource + word).copied().flatten());
+        let soffset = match soffset {
+            Operand::Scalar(code) => self.scalars.get(usize::from(*code)).copied().flatten(),
+            Operand::Integer(value) => u32::try_from(*value).ok(),
+            _ => None,
+        }?;
+        let (low, high, records) = (low?, high?, records?);
+        let word = instruction.word;
+        let (immediate, offen, idxen) = (word & 0xFFF, word & 1 << 12 != 0, word & 1 << 13 != 0);
+        let mut next = u32::from(*vaddr);
+        let mut take = |on: bool| -> Option<Option<u32>> {
+            if !on {
+                return Some(None);
+            }
+            let value = self.vector(next, lane)?;
+            next += 1;
+            Some(Some(value))
+        };
+        let index = take(idxen)?;
+        let voffset = take(offen)?;
+        let base = (u64::from(high & 0xffff) << 32) | u64::from(low);
+        let stride = u64::from(high >> 16 & 0x3fff);
+        let index = u64::from(index.unwrap_or(0));
+        let offset = u64::from(immediate) + u64::from(voffset.unwrap_or(0));
+        // Records are elements with a stride, bytes without.
+        let outside = if stride == 0 {
+            offset + u64::from(soffset) + 4 * u64::from(words) > u64::from(records)
+        } else {
+            index >= u64::from(records)
+        };
+        Some((base + u64::from(soffset) + offset + index * stride, outside))
+    }
+
+    /// A `buffer_store_dword*` in each running lane, into `written`, the run's copy of guest memory
+    /// over what it reads: `words` words from the data registers at the lane's place. A lane that
+    /// may or may not run, or whose place or data is unknown, leaves the words it may write
+    /// unknown (`None`), so a later load there is not taken for what memory held. Each word is kept
+    /// with the byte of the store that wrote it.
+    fn vector_buffer_store(
+        &self,
+        instruction: &Instruction,
+        words: u32,
+        written: &mut std::collections::BTreeMap<u64, (Option<u32>, u32)>,
+    ) -> bool {
+        let Some(Operand::Vector(data)) = instruction.operands.first() else {
+            return false;
+        };
+        let data = u32::from(*data);
+        for lane in 0..self.modelled {
+            let runs = self.lane_runs(lane);
+            if runs == Some(false) {
+                continue;
+            }
+            match self.buffer_lane_place(instruction, lane, words) {
+                Some((_, true)) => {}
+                Some((address, false)) => {
+                    for step in 0..words {
+                        let value = self
+                            .vector(data + step, lane)
+                            .filter(|_| runs == Some(true));
+                        written.insert(address + 4 * u64::from(step), (value, instruction.offset));
+                    }
+                }
+                // Where it lands is unknown: nothing the run reads later can be trusted.
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// A local-data-share access over `local`, the group's share by byte address, as a group trace
+    /// runs it ([`wave_trace`]): each running lane in ascending order, so an atomic returns what
+    /// the lanes below it left. `ds_write*`, `ds_read*` (`2` forms with their two dword offsets)
+    /// and the 32-bit `_rtn` and plain atomics. False for a form this does not model, or where a
+    /// running lane's address is unknown.
+    fn local_step(
+        &mut self,
+        instruction: &Instruction,
+        name: &str,
+        local: &mut std::collections::BTreeMap<u32, Option<u32>>,
+    ) -> bool {
+        let Some(LocalAccess {
+            kind,
+            destination,
+            address,
+            data,
+            offsets,
+            wide,
+        }) = LocalAccess::of(name, &instruction.operands)
+        else {
+            return false;
+        };
+        let pairs = offsets.len() == 2;
+        for lane in 0..self.modelled {
+            let runs = self.lane_runs(lane);
+            if runs == Some(false) {
+                continue;
+            }
+            let Some(base) = self.vector(address, lane) else {
+                return false;
+            };
+            if runs.is_none() {
+                return false;
+            }
+            for (element, offset) in offsets.iter().enumerate() {
+                let at = base.wrapping_add(*offset);
+                let element = element as u32;
+                for word in 0..wide {
+                    let byte = at.wrapping_add(4 * word);
+                    // The share holds whatever an earlier group left: a word no lane wrote is unknown.
+                    let old = local.get(&byte).copied().flatten();
+                    match &kind {
+                        LocalKind::Write => {
+                            let register = data[if pairs { element as usize } else { 0 }] + word;
+                            local.insert(byte, self.vector(register, lane));
+                        }
+                        LocalKind::Read => {
+                            if let Some(destination) = destination {
+                                let register = destination + element * wide + word;
+                                self.vectors.insert((register, lane), old);
+                            }
+                        }
+                        LocalKind::Atomic(op) => {
+                            let value = self.vector(data[0], lane);
+                            let new = old
+                                .zip(value)
+                                .and_then(|(old, value)| local_atomic(op, old, value));
+                            local.insert(byte, new);
+                            if let Some(destination) = destination {
+                                self.vectors.insert((destination, lane), old);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// A `global_load_dword*` in each running lane: `words` words of guest memory from the lane's
+    /// vector address pair, or with a scalar base pair from that pair plus the lane's vector offset,
+    /// and the instruction's offset, as the translator addresses a flat access. Unknown where the
+    /// base, the lane's address or the memory is, or where the address is not word-aligned.
+    fn vector_global_load(
+        &mut self,
+        instruction: &Instruction,
+        words: u32,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) {
+        let [Operand::Vector(data), Operand::Vector(vaddr), base, ..] =
+            instruction.operands.as_slice()
+        else {
+            self.forget_vector(instruction.operands.first(), words);
+            return;
+        };
+        // `Some(base)` with a scalar base pair, its value where known; `None` with none.
+        let base = match base {
+            Operand::Named(name) if name == model::FLAT_NO_BASE => None,
+            Operand::Scalar(register) => {
+                let register = usize::from(*register);
+                let half = |code: usize| self.scalars.get(code).copied().flatten();
+                Some(
+                    half(register)
+                        .zip(half(register + 1))
+                        .map(|(low, high)| (u64::from(high) << 32) | u64::from(low)),
+                )
+            }
+            _ => {
+                self.forget_vector(instruction.operands.first(), words);
+                return;
+            }
+        };
+        let offset = match instruction.operands.get(3) {
+            Some(Operand::Immediate(offset)) => *offset,
+            _ => 0,
+        };
+        let (data, vaddr) = (u32::from(*data), u32::from(*vaddr));
+        for lane in 0..self.modelled {
+            let runs = self.lane_runs(lane);
+            if runs == Some(false) {
+                continue;
+            }
+            let address = match base {
+                Some(base) => base
+                    .zip(self.vector(vaddr, lane))
+                    .map(|(base, offset)| base.wrapping_add(u64::from(offset))),
+                None => self
+                    .vector(vaddr, lane)
+                    .zip(self.vector(vaddr + 1, lane))
+                    .map(|(low, high)| (u64::from(high) << 32) | u64::from(low)),
+            }
+            .map(|address| address.wrapping_add_signed(offset))
+            .filter(|address| address % 4 == 0);
+            for step in 0..words {
+                let value = address.and_then(|address| read(address + 4 * u64::from(step)));
                 // A lane that may not run keeps what it held, which the load may replace.
                 let value = value.filter(|&value| {
                     runs == Some(true) || self.vector(data + step, lane) == Some(value)
@@ -2448,6 +3321,15 @@ impl<'a> Concrete<'a> {
             condition: self.condition,
             vectors: self.vectors.clone(),
         }
+    }
+
+    /// Takes up the way past a block ([`Concrete::fork`]) in place of this one: what an `else`
+    /// block runs from.
+    fn resume(&mut self, join: &Join) {
+        self.scalars = join.scalars;
+        self.within = join.within;
+        self.condition = join.condition;
+        self.vectors = join.vectors.clone();
     }
 
     /// Joins the way past a block ([`Concrete::fork`]) with the way through it, where the block
@@ -2599,9 +3481,14 @@ impl<'a> Concrete<'a> {
 
     /// The full address each active lane below `lanes` forms at a global load with no scalar base:
     /// its vector address pair plus its immediate offset. [`None`] where a mask bit or an active
-    /// lane's address is unknown.
-    fn load_addresses(&self, instruction: &Instruction, lanes: u32) -> Option<Vec<u64>> {
-        let Some(Operand::Vector(pair)) = instruction.operands.get(1) else {
+    /// lane's address is unknown. A `store`'s address pair is its first operand, ahead of its data
+    /// (D961).
+    fn load_addresses(
+        &self,
+        instruction: &Instruction,
+        (lanes, store): (u32, bool),
+    ) -> Option<Vec<u64>> {
+        let Some(Operand::Vector(pair)) = instruction.operands.get(usize::from(!store)) else {
             return None;
         };
         let offset = match instruction.operands.get(3) {
@@ -2971,6 +3858,62 @@ fn float_compare(name: &str) -> Option<fn(f32, f32) -> bool> {
     })
 }
 
+/// The single-precision bits of half `bits`: exactly its value, a subnormal half a normal float, an
+/// infinity or a NaN its own with the payload widened (IEEE 754 binary16 and binary32).
+fn half_to_single(bits: u32) -> u32 {
+    let sign = (bits & 0x8000) << 16;
+    let (exponent, mantissa) = ((bits >> 10) & 0x1f, bits & 0x3ff);
+    match exponent {
+        0 if mantissa == 0 => sign,
+        // A subnormal half is `mantissa * 2^-24`, exact as a float.
+        0 => {
+            sign | (f32::from(u16::try_from(mantissa).unwrap_or_default()) * 2f32.powi(-24))
+                .to_bits()
+        }
+        0x1f => sign | 0x7f80_0000 | mantissa << 13,
+        _ => sign | (exponent + 127 - 15) << 23 | mantissa << 13,
+    }
+}
+
+/// The half nearest single-precision bits `bits`, ties to even: past the largest half an infinity,
+/// below the smallest subnormal a zero, a NaN a quiet NaN (IEEE 754 binary16).
+fn single_to_half(bits: u32) -> u32 {
+    // A float's exponent of 113 is a half's smallest normal one (1 biased), and 143 its first past
+    // the largest (31); the 24-bit significand carries its leading one.
+    const SMALLEST_NORMAL: u32 = 127 - 14;
+    let sign = (bits >> 16) & 0x8000;
+    let (exponent, mantissa) = ((bits >> 23) & 0xff, bits & 0x7f_ffff);
+    if exponent == 0xff {
+        let quiet = if mantissa == 0 {
+            0
+        } else {
+            0x200 | mantissa >> 13
+        };
+        return sign | 0x7c00 | quiet;
+    }
+    if exponent >= SMALLEST_NORMAL + 30 {
+        return sign | 0x7c00;
+    }
+    let significand = mantissa | if exponent == 0 { 0 } else { 0x80_0000 };
+    // How far the significand shifts right to land as the half's: 13 for a normal half, more for
+    // a subnormal one, and past all of it below the smallest subnormal's half.
+    let shift = 13 + SMALLEST_NORMAL.saturating_sub(exponent);
+    if shift > 24 {
+        return sign;
+    }
+    let kept = significand >> shift;
+    let rest = significand & ((1 << shift) - 1);
+    let half = 1 << (shift - 1);
+    let rounded = kept + u32::from(rest > half || (rest == half && kept & 1 == 1));
+    // A normal half's significand carries its leading one into the exponent field, which the
+    // exponent placed below it then completes; a carry out of the significand bumps the exponent.
+    if exponent >= SMALLEST_NORMAL {
+        sign | (((exponent - SMALLEST_NORMAL + 1) << 10) + rounded - 0x400)
+    } else {
+        sign | rounded
+    }
+}
+
 /// The register code of a lane mask's low half, by any spelling of it.
 fn mask_code(name: &str) -> Option<usize> {
     match model::lane_mask_name(name)? {
@@ -2996,6 +3939,18 @@ impl Model for Concrete<'_> {
             FMAX => Some(a.max(b).to_bits()),
             _ => None,
         });
+        self.hold(value)
+    }
+
+    // A half widened and a float narrowed on the host, as the device's `OpFConvert` does: every
+    // half is a float exactly, and a float rounds to the nearest half, ties to even (D979).
+    fn half_to_float_bits(&mut self, field: Id) -> Id {
+        let value = self.word(field).map(|bits| half_to_single(bits & 0xffff));
+        self.hold(value)
+    }
+
+    fn float_bits_to_half(&mut self, bits: Id) -> Id {
+        let value = self.word(bits).map(single_to_half);
         self.hold(value)
     }
 
@@ -3069,6 +4024,14 @@ impl Model for Concrete<'_> {
             Some(true) => self.word(value),
             None => None,
         };
+        self.vectors.insert((register, lane), value);
+    }
+
+    fn write_vector_lane_unmasked(&mut self, register: u32, lane: u32, value: Id) {
+        if !self.lanes {
+            return;
+        }
+        let value = self.word(value);
         self.vectors.insert((register, lane), value);
     }
 
@@ -3159,6 +4122,9 @@ impl Model for Concrete<'_> {
     }
 
     fn write_memory(&mut self, _word_index: Id, _value: Id, _lane: u32) {}
+
+    /// Stores nothing, as [`Self::write_memory`]: a host run reads the snapshot (D753).
+    fn merge_memory(&mut self, _word_index: Id, _parts: (Id, Id), _landed: Id, _lane: u32) {}
 
     fn memory_words(&self) -> u32 {
         0
@@ -4118,6 +5084,194 @@ mod tests {
         encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
     }
 
+    /// A concrete wave trace records lane zero's registers after each instruction and stops at the
+    /// first branch on a per-lane mask it cannot know (D758): `v_add_nc_u32 v1, s0, v0` then
+    /// `v_lshlrev_b32 v2, 1, v1`, with `s0` a user-data word and `v0` lane zero's thread id (0), so
+    /// `v1` is the user-data word and `v2` is it doubled. A compare into the execution mask then
+    /// forks, ending the trace.
+    #[test]
+    fn a_concrete_wave_trace_records_lane_zero_and_stops_at_a_fork() {
+        use super::{LaneProgram, TraceStop, WaveEntry, wave_trace};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let program = [
+            short_form(&encodings, "v_add_nc_u32_e32", 1, 133, 0), // v1 = 5 + v0 (inline 5)
+            short_form(&encodings, "v_lshlrev_b32_e32", 2, 129, 1), // v2 = v1 << 1
+            short_form(&encodings, "v_cmpx_lt_u32_e32", 0, 256, 1), // exec &= (v0 < v1): per lane
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let program = LaneProgram::new(decode, &encodings, &[]);
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: (0..8).map(|t| Some([t, 0, 0])).collect(),
+            components: 1,
+        };
+        let run = wave_trace(
+            &program,
+            &encodings,
+            &[],
+            (32, &[wave]),
+            (3, 1, 0),
+            &mut |_| None,
+        );
+        let trace = &run.points;
+        // The add, the shift and the cmpx run concretely; a cmpx narrows exec per lane but does not
+        // fork, and the program then ends.
+        assert_eq!(trace.len(), 3);
+        assert_eq!(trace[0].offset, 0x0);
+        assert_eq!(trace[0].vectors[1], Some(5), "v1 = 5 + v0 = 5 + 0");
+        assert_eq!(trace[1].vectors[2], Some(10), "v2 = v1 << 1 = 10");
+        assert!(!trace[2].past_unmodelled, "no local share or store");
+        assert!(matches!(run.stop, TraceStop::Ended), "{:?}", run.stop);
+    }
+
+    /// The decoded program for little-endian instruction words.
+    fn trace_program(words: &[u32]) -> (super::LaneProgram, EncodingTable) {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        (super::LaneProgram::new(decode, &encodings, &[]), encodings)
+    }
+
+    /// One wave of eight lanes, each thread id in `v0`.
+    fn eight_lanes() -> super::WaveEntry {
+        super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: (0..8).map(|t| Some([t, 0, 0])).collect(),
+            components: 1,
+        }
+    }
+
+    /// A worklist through the local data share, the shape of a tree pass's: every lane clears a
+    /// counter at byte 0, and after `s_barrier` the odd threads take slots with `ds_add_rtn_u32`
+    /// and write their ids into a worklist at byte 4; after a second barrier every lane reads the
+    /// count and pulls the entry at its own thread index.
+    const WORKLIST: [u32; 19] = [
+        0x7e02_0280, // v_mov_b32 v1, 0
+        0x7e04_0281, // v_mov_b32 v2, 1
+        0xd834_0000,
+        0x0000_0101, // ds_write_b32 v1, v1
+        0xbf8a_0000, // s_barrier
+        0x3606_0081, // v_and_b32 v3, 1, v0
+        0x7daa_0680, // v_cmpx_ne_u32 0, v3
+        0xd880_0000,
+        0x0400_0201, // ds_add_rtn_u32 v4, v1, v2
+        0x340a_0882, // v_lshlrev_b32 v5, 2, v4
+        0xd834_0004,
+        0x0000_0005, // ds_write_b32 v5, v0 offset:4
+        0xbefe_03c1, // s_mov_b32 exec_lo, -1
+        0xbf8a_0000, // s_barrier
+        0xd8d8_0000,
+        0x0600_0001, // ds_read_b32 v6, v1
+        0x340e_0082, // v_lshlrev_b32 v7, 2, v0
+        0xd8d8_0004,
+        0x0800_0007, // ds_read_b32 v8, v7 offset:4
+    ];
+
+    /// [`WORKLIST`] and its end.
+    fn worklist() -> Vec<u32> {
+        let mut words = WORKLIST.to_vec();
+        words.push(0xbf81_0000); // s_endpgm
+        words
+    }
+
+    /// A group of one wave of eight lanes runs [`WORKLIST`]'s share in lane order: the odd lanes
+    /// take slots 0 to 3 in turn, the count is four, and lanes 0 to 3 pull lanes 1, 3, 5 and 7.
+    #[test]
+    fn a_one_wave_trace_enqueues_through_the_share_and_pulls_by_lane() {
+        use super::{TraceStop, wave_trace};
+        let (program, encodings) = trace_program(&worklist());
+        let run = wave_trace(
+            &program,
+            &encodings,
+            &[],
+            (32, &[eight_lanes()]),
+            (9, 1, 0),
+            &mut |_| None,
+        );
+        assert!(matches!(run.stop, TraceStop::Ended), "{:?}", run.stop);
+        assert!(run.points.iter().all(|point| !point.past_unmodelled));
+        let slots: Vec<_> = [1, 3, 5, 7].map(|lane| run.lanes[lane][4]).to_vec();
+        assert_eq!(
+            slots,
+            [0, 1, 2, 3].map(Some),
+            "slots in ascending lane order"
+        );
+        assert!(run.lanes.iter().all(|lane| lane[6] == Some(4)), "the count");
+        let pulled: Vec<_> = (0..4).map(|lane| run.lanes[lane][8]).collect();
+        assert_eq!(pulled, [1, 3, 5, 7].map(Some), "the worklist by lane index");
+        assert_eq!(run.points.last().map(|p| p.vectors[8]), Some(Some(1)));
+    }
+
+    /// A group of two waves of 32 meets at each barrier (D892): both clear the counter before
+    /// either enqueues, both enqueue before either reads, so the count is the group's 32 odd
+    /// threads, wave 0's taking slots 0 to 15 and wave 1's 16 to 31, and thread `t` below 32 pulls
+    /// thread `2t + 1`. A thread at or past the count pulls a word no lane wrote, which the trace
+    /// does not know.
+    #[test]
+    fn a_two_wave_trace_meets_at_its_barriers() {
+        use super::{TraceStop, WaveEntry, wave_trace};
+        let (program, encodings) = trace_program(&worklist());
+        let wave = |first: u32| WaveEntry {
+            group_ids: Vec::new(),
+            threads: (first..first + 32).map(|t| Some([t, 0, 0])).collect(),
+            components: 1,
+        };
+        let run = wave_trace(
+            &program,
+            &encodings,
+            &[],
+            (32, &[wave(0), wave(32)]),
+            (9, 1, 40),
+            &mut |_| None,
+        );
+        assert!(matches!(run.stop, TraceStop::Ended), "{:?}", run.stop);
+        assert_eq!(run.lanes.len(), 64);
+        assert!(
+            run.lanes.iter().all(|lane| lane[6] == Some(32)),
+            "the count"
+        );
+        let pulled: Vec<_> = (0..32).map(|thread| run.lanes[thread][8]).collect();
+        assert_eq!(pulled, (0..32).map(|t| Some(2 * t + 1)).collect::<Vec<_>>());
+        assert_eq!(run.lanes[40][8], None, "past the count");
+        assert!(
+            run.points.iter().all(|point| point.vectors[0] == Some(40)),
+            "the points are thread 40's, lane 8 of wave 1"
+        );
+    }
+
+    /// A buffer store writes the run's copy of memory, so a later load there reads what was stored
+    /// rather than what memory held (here nothing known): each lane stores its id at `4 * id`
+    /// through the descriptor in `s[0:3]` and loads it back.
+    #[test]
+    fn a_trace_reads_back_what_it_stored() {
+        use super::{TraceStop, wave_trace};
+        let (program, encodings) = trace_program(&[
+            0x3402_0082, // v_lshlrev_b32 v1, 2, v0
+            0xe070_1000,
+            0x8000_0001, // buffer_store_dword v0, v1, s[0:3], 0 offen
+            0xe030_1000,
+            0x8000_0201, // buffer_load_dword v2, v1, s[0:3], 0 offen
+            0xbf81_0000,
+        ]);
+        let descriptor = [0x1000, 0, 0x100, 0];
+        let run = wave_trace(
+            &program,
+            &encodings,
+            &descriptor,
+            (32, &[eight_lanes()]),
+            (3, 4, 0),
+            &mut |_| None,
+        );
+        assert!(matches!(run.stop, TraceStop::Ended), "{:?}", run.stop);
+        let loaded: Vec<_> = run.lanes.iter().map(|lane| lane[2]).collect();
+        assert_eq!(loaded, (0..8).map(Some).collect::<Vec<_>>());
+        assert_eq!(run.written.get(&0x101c), Some(&(Some(7), 0x4)));
+    }
+
     /// A compute wave's lanes form their addresses from their thread ids and their group's id, which
     /// the run seeds as the hardware loads them (D883): `v0` the thread id, `s2` the group id after
     /// two words of user data. Lanes past the wave's threads form none.
@@ -4773,6 +5927,89 @@ mod tests {
         assert_eq!(short, 0, "every step left was spent");
     }
 
+    /// A waterfall whose values each lane loaded with `global_load_dword` is probed one pass per
+    /// value, as one whose lanes loaded through a buffer descriptor is: a global load reads guest
+    /// memory at the address each running lane forms, from a vector pair or from a scalar base pair
+    /// plus a vector offset (D900). Grand Theft Auto V's compute programs at `0x74005b87ce00` and
+    /// `0x74005b87e400` narrow the mask their waterfalls start from by words they load so.
+    #[test]
+    fn a_waterfall_over_globally_loaded_values_is_probed_one_per_value() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // v_lshlrev_b32 v2, 2, v0; then the load: from v[2:3] with v2 += s0 and v3 = s1, or from
+        // s[0:1] plus v2. s_waitcnt; s_mov_b32 s5, exec_lo; loop: v_readfirstlane_b32 s4, v1;
+        // v_cmp_eq_u32 vcc_lo, s4, v1; s_and_saveexec_b32 s6, vcc_lo; s_lshl_b32 s7, s4, 4;
+        // s_nop 0; s_andn2_b32 exec_lo, s6, exec_lo; s_cbranch_execnz loop; s_mov_b32 exec_lo, s5;
+        // s_endpgm.
+        let waterfall = [
+            0xbf8c_3f70_u32,
+            0xbe85_037e,
+            0x7e08_0501,
+            0x7d84_0204,
+            0xbe86_3c6a,
+            0x8f07_8404,
+            0xbf80_0000,
+            0x8a7e_7e06,
+            0xbf89_fff9,
+            0xbefe_0305,
+            0xbf81_0000,
+        ];
+        let pair_load = [
+            0x3404_0082_u32,
+            short_form(&encodings, "v_add_nc_u32_e32", 2, 0, 2),
+            short_form(&encodings, "v_mov_b32_e32", 3, 1, 0),
+            // global_load_dword v1, v[2:3], off.
+            0xdc30_8000,
+            0x017d_0002,
+        ];
+        let based_load = [
+            0x3404_0082_u32,
+            // global_load_dword v1, v2, s[0:1].
+            0xdc30_8000,
+            0x0100_0002,
+        ];
+        let values = [5_u32, 5, 9, 5, 2, 9, 2, 2];
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: (0..8).map(|lane| Some([lane, 0, 0])).collect(),
+            components: 1,
+        };
+        for load in [&pair_load[..], &based_load[..]] {
+            let words: Vec<u32> = load.iter().chain(&waterfall).copied().collect();
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let decode = decode_program(&bytes, &encodings, &operands);
+            assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+            let nop = decode
+                .instructions
+                .iter()
+                .find(|i| super::named(&encodings, i).is_some_and(|(_, n)| n == "s_nop"))
+                .expect("the probed access")
+                .offset;
+            let program = super::LaneProgram::with_probes(decode, &encodings, &[(nop, vec![7])]);
+            let probed = super::wave_probes(
+                &program,
+                &encodings,
+                &[0x1000, 0x7f],
+                (32, &wave),
+                &mut |address| {
+                    address
+                        .checked_sub(0x7f_0000_1000)
+                        .and_then(|at| values.get(usize::try_from(at / 4).ok()?).copied())
+                },
+            );
+            assert_eq!(
+                probed.map(|(values, _)| values),
+                Ok(vec![
+                    (nop, vec![Some(0x50)]),
+                    (nop, vec![Some(0x90)]),
+                    (nop, vec![Some(0x20)])
+                ]),
+                "{} words before the waterfall",
+                load.len()
+            );
+        }
+    }
+
     /// A wave that loops without end stops at its own step bound, however many steps the
     /// preparation has left, and never reaches the access (D951): `s_branch` back to itself.
     #[test]
@@ -4803,6 +6040,314 @@ mod tests {
         );
         let spent = usize::MAX - steps;
         assert!(spent <= super::MOST_WAVE_STEPS + 1, "{spent} steps");
+    }
+
+    /// An `if` and `else` on a condition the host cannot know are both followed: the `then` block
+    /// ends in a jump past the `else` block, which runs from where the branch skipped to it, and
+    /// the two ways join where the jump lands. What both set alike is known there, what they set
+    /// apart is not. Where the jump lands past the run's end, the `else` way goes on alone. Grand
+    /// Theft Auto V's scan at `image+0x3e18000` stores through its descriptor in the `else` of a
+    /// test on the partition an atomic counter handed it.
+    #[test]
+    fn an_if_and_else_on_an_unknown_condition_are_both_followed() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_load_dword s4, s[0:1], 0x0, which the host cannot read; s_waitcnt lgkmcnt(0);
+        // s_cmp_gt_u32 s4, 0; s_cbranch_scc0 else; s_mov_b32 s5, 7; s_mov_b32 s6, 4; s_branch end;
+        // else: s_mov_b32 s5, 7; s_mov_b32 s6, 5; end: s_nop 0; s_endpgm.
+        let words = [
+            0xf400_0100_u32,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xbf08_8004,
+            0xbf84_0003,
+            0xbe85_0387,
+            0xbe86_0384,
+            0xbf82_0002,
+            0xbe85_0387,
+            0xbe86_0385,
+            0xbf80_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        let probe = |at: u32, registers: Vec<usize>| {
+            let program =
+                super::LaneProgram::with_probes(decode.clone(), &encodings, &[(at, registers)]);
+            super::wave_probes(&program, &encodings, &[0x100, 0], (64, &wave), &mut |_| {
+                None
+            })
+            .map(|(values, _)| values)
+        };
+        assert_eq!(
+            probe(40, vec![5, 6]),
+            Ok(vec![(40, vec![Some(7), None])]),
+            "joined where the jump lands"
+        );
+        // Probed in the `else` block, the run ends there: the jump lands past it.
+        assert_eq!(
+            probe(32, vec![0]),
+            Ok(vec![(32, vec![Some(0x100)])]),
+            "the `else` way alone"
+        );
+    }
+
+    /// A computed descriptor set before a loop, whose registers the loop never writes, is taken
+    /// from the probe's first reach when the loop that holds the access cannot be followed (D962):
+    /// the descriptor is loop-invariant, so its one value is exact. Grand Theft Auto V's scan at
+    /// `image+0x3e18000` builds `s[0:3]` from `v_readfirstlane` before a data-dependent loop and
+    /// stores through it inside the loop. A register the loop does write keeps refusing.
+    #[test]
+    fn a_loop_invariant_descriptor_is_read_at_its_first_reach() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_load_dwordx4 s[0:3], s[4:5], 0x0 (the descriptor, before the loop);
+        // s_waitcnt lgkmcnt(0); s_mov_b32 s8, 0;
+        // head: s_nop 0 (the probed access, through s[0:3]); s_cmp_eq_u32 s9, 0 (s9 unknown);
+        // s_cbranch_scc0 head (a loop the host cannot decide); s_endpgm.
+        let loop_back = 0xbf84_fffd_u32; // s_cbranch_scc0 -3 words, back to the s_nop.
+        let words = [
+            0xf408_0002_u32,
+            0xfa00_0000, // s_load_dwordx4 s[0:3], s[4:5], 0x0
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xbe88_0380, // s_mov_b32 s8, 0
+            0xbf80_0000, // head: s_nop 0
+            0xbf06_8009, // s_cmp_eq_u32 s9, 0
+            loop_back,
+            0xbf81_0000, // s_endpgm
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let access = decode.instructions[4].offset;
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        // s[4:5] the descriptor's base; the descriptor's four words sit at 0x7000.
+        let user = [0, 0, 0, 0, 0x7000, 0];
+        let descriptor = [0xdead_0000_u32, 0x11, 0x40, 0];
+        let read = |a: u64| -> Option<u32> {
+            a.checked_sub(0x7000)
+                .and_then(|o| descriptor.get(usize::try_from(o / 4).ok()?).copied())
+        };
+        // s[0:3] unwritten in the loop (0x10..0x18): the descriptor is its first reach's, though
+        // the loop on s9 cannot be followed.
+        let program = super::LaneProgram::with_probes(
+            decode.clone(),
+            &encodings,
+            &[(access, vec![0, 1, 2, 3])],
+        );
+        let probed = super::wave_probes(&program, &encodings, &user, (64, &wave), &mut |a| read(a))
+            .expect("the invariant descriptor is read")
+            .0;
+        assert_eq!(
+            probed.first().map(|(_, v)| v.clone()),
+            Some(vec![Some(0xdead_0000), Some(0x11), Some(0x40), Some(0)]),
+            "{probed:?}"
+        );
+        // A register the loop writes is not invariant: the run keeps refusing. Probing s8, which
+        // `s_add_u32 s8, s8, 1` would write in the loop, is refused - here the loop writes s0.
+        let in_loop = [
+            0xf408_0002_u32,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xbf80_0000, // head: s_nop 0 (probe)
+            0x8000_8000, // s_add_u32 s0, s0, 0: writes s0 in the loop
+            0xbf06_8009, // s_cmp_eq_u32 s9, 0
+            0xbf84_fffc, // s_cbranch_scc0 back to head
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = in_loop.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[3].offset;
+        let program =
+            super::LaneProgram::with_probes(decode, &encodings, &[(access, vec![0, 1, 2, 3])]);
+        assert!(
+            super::wave_probes(&program, &encodings, &user, (64, &wave), &mut |a| read(a)).is_err(),
+            "a register the loop writes keeps refusing"
+        );
+    }
+
+    /// A loop-invariant descriptor whose access lies past an inner loop the host cannot follow is
+    /// read where the run stops, inside the loop that holds the access (D962): the registers are
+    /// unwritten there, so they hold at the stop what they hold at the access. Grand Theft Auto V's
+    /// scan at `image+0x3e18000` reaches its access at 0x4e4 only after a retry loop on a loaded
+    /// flag.
+    #[test]
+    fn a_loop_invariant_descriptor_past_an_unfollowable_loop_is_read_where_the_run_stops() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0);
+        // outer: s_nop 0; inner: s_cmp_eq_u32 s9, 0; s_cbranch_scc0 inner (s9 unknown);
+        // s_nop 0 (the access); s_cmp_eq_u32 s10, 0; s_cbranch_scc0 outer; s_endpgm.
+        let words = [
+            0xf408_0002_u32,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xbf80_0000,
+            0xbf06_8009,
+            0xbf84_fffe,
+            0xbf80_0000,
+            0xbf06_800a,
+            0xbf84_fffa,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let access = decode.instructions[5].offset;
+        assert_eq!(access, 24, "the fixture");
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        let user = [0, 0, 0, 0, 0x7000, 0];
+        let descriptor = [0xdead_0000_u32, 0x11, 0x40, 0];
+        let read = |a: u64| -> Option<u32> {
+            a.checked_sub(0x7000)
+                .and_then(|o| descriptor.get(usize::try_from(o / 4).ok()?).copied())
+        };
+        let program =
+            super::LaneProgram::with_probes(decode, &encodings, &[(access, vec![0, 1, 2, 3])]);
+        let probed = super::wave_probes(&program, &encodings, &user, (64, &wave), &mut |a| read(a))
+            .expect("the invariant descriptor is read where the run stops")
+            .0;
+        assert_eq!(
+            probed,
+            vec![(
+                access,
+                vec![Some(0xdead_0000), Some(0x11), Some(0x40), Some(0)]
+            )]
+        );
+    }
+
+    /// An access after a loop the host cannot follow, in no loop itself, takes its descriptor from
+    /// where the run stops when nothing on any path from there to the access writes the
+    /// descriptor's registers (D962); a rebuild of them on that path keeps refusing. Grand Theft
+    /// Auto V's scan at `image+0x3e18000` stores at 0x694, past its look-back loop, through the
+    /// descriptor it built at 0x458, and rebuilds it at 0x6a4 before its store at 0x6b4.
+    #[test]
+    fn a_descriptor_past_an_unfollowable_loop_is_read_where_the_run_stops_unless_rebuilt() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0);
+        // loop: s_cmp_eq_u32 s9, 0; s_cbranch_scc0 loop (s9 unknown);
+        // s_nop 0 (the first access); s_mov_b32 s0, s6 (a rebuild); s_nop 0 (the second); s_endpgm.
+        let words = [
+            0xf408_0002_u32,
+            0xfa00_0000,
+            0xbf8c_c07f,
+            0xbf06_8009,
+            0xbf84_fffe,
+            0xbf80_0000,
+            0xbe80_0306,
+            0xbf80_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let (first, second) = (decode.instructions[4].offset, decode.instructions[6].offset);
+        assert_eq!((first, second), (20, 28), "the fixture");
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        let user = [0, 0, 0, 0, 0x7000, 0, 0x55];
+        let descriptor = [0xdead_0000_u32, 0x11, 0x40, 0];
+        let read = |a: u64| -> Option<u32> {
+            a.checked_sub(0x7000)
+                .and_then(|o| descriptor.get(usize::try_from(o / 4).ok()?).copied())
+        };
+        let probe = |at: u32| {
+            let program = super::LaneProgram::with_probes(
+                decode.clone(),
+                &encodings,
+                &[(at, vec![0, 1, 2, 3])],
+            );
+            super::wave_probes(&program, &encodings, &user, (64, &wave), &mut |a| read(a))
+                .map(|(values, _)| values)
+        };
+        assert_eq!(
+            probe(first),
+            Ok(vec![(
+                first,
+                vec![Some(0xdead_0000), Some(0x11), Some(0x40), Some(0)]
+            )]),
+            "nothing between the stop and the first access writes s[0:3]"
+        );
+        assert!(
+            probe(second).is_err(),
+            "s0 is rebuilt before the second access"
+        );
+    }
+
+    /// A vector instruction the model cannot run forgets only the register pair its destination
+    /// spans, not three past it (D883): a 32-bit ALU op writes one register, and over-forgetting
+    /// clobbered a neighbour a later load's address was built in. The address slice keeps such an op
+    /// where its destination happens to be read elsewhere, so it runs; Grand Theft Auto V's compute
+    /// program at `0x74005b87e400` lost `v18`, a load's address, to a `v_fma_f32 ... clamp` the
+    /// slice kept for its destination's reuse.
+    #[test]
+    fn an_unrun_vector_op_forgets_only_its_destination() {
+        use super::{WaveEntry, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let mov = |dst: u32, src: u32| short_form(&encodings, "v_mov_b32_e32", dst, src, 0);
+        let words = [
+            mov(15, 0),
+            mov(16, 1),
+            mov(17, 2),
+            mov(18, 3),
+            // global_load_dword v9, v[15:16], off.
+            0xdc30_8000,
+            0x097d_000f,
+            // v_fma_f32 v15, 0.5, v15, 0.5 clamp: the model declines the clamp, so the lane run
+            // forgets v15 - and, before the fix, v16, v17 and v18 with it (the real words).
+            0xd54b_800f,
+            0x03c2_1ef0,
+            // global_load_dword v10, v[17:18], off.
+            0xdc30_8000,
+            0x0a7d_0011,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let loads: Vec<u32> = decode
+            .instructions
+            .iter()
+            .filter(|i| i.word >> 26 == 0x37)
+            .map(|i| i.offset)
+            .collect();
+        assert_eq!(loads.len(), 2, "two global loads");
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        // s0..s3 the two addresses' halves.
+        let user = [0x1000, 0x74, 0x2000, 0x75];
+        let found = wave_lane_addresses(&program, &encodings, &user, (64, &wave), &mut |_| None);
+        assert_eq!(
+            found,
+            Ok(vec![
+                (loads[0], vec![0x74_0000_1000]),
+                (loads[1], vec![0x75_0000_2000])
+            ]),
+            "the second load's address survives the fma's forgetting"
+        );
     }
 
     /// Each lane of a GL attribute fetch forms its vertex's address from the draw's table and base
@@ -5409,5 +6954,32 @@ mod tests {
         );
         assert_eq!(super::written_vectors("buffer_atomic_add"), 1);
         assert_eq!(super::written_vectors("buffer_atomic_cmpswap_x2"), 2);
+    }
+
+    /// A half widens exactly and a float narrows to the nearest half, ties to even, as the
+    /// device's conversion does (D979): normals, subnormals, the carry into the exponent, overflow
+    /// to infinity and the NaN.
+    #[test]
+    fn halves_convert_as_ieee_rounds_them() {
+        use super::{half_to_single, single_to_half};
+        let cases: [(f32, u32); 9] = [
+            (1.0, 0x3c00),
+            (-2.5, 0xc100),
+            (65504.0, 0x7bff),
+            (65520.0, 0x7c00),
+            (2f32.powi(-24), 0x0001),
+            (2f32.powi(-25), 0x0000),
+            (3.0 * 2f32.powi(-25), 0x0002),
+            (1.0 + 2f32.powi(-11), 0x3c00),
+            (1.0 + 3.0 * 2f32.powi(-11), 0x3c02),
+        ];
+        for (value, half) in cases {
+            assert_eq!(single_to_half(value.to_bits()), half, "{value}");
+        }
+        for half in [0x3c00, 0xc100, 0x7bff, 0x0001, 0x03ff, 0x8000, 0x7c00] {
+            assert_eq!(single_to_half(half_to_single(half)), half, "{half:#06x}");
+        }
+        assert_eq!(half_to_single(0x0001), 2f32.powi(-24).to_bits());
+        assert!(f32::from_bits(half_to_single(single_to_half(f32::NAN.to_bits()))).is_nan());
     }
 }

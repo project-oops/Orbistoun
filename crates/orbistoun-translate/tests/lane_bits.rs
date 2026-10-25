@@ -372,13 +372,9 @@ fn a_backward_permute_reads_the_lane_its_address_names() {
     program.extend(permute(6, 2, 0));
     program.push(encoded("s_waitcnt", 0));
     program.extend(results());
-    // One invocation per lane holds only its own registers, so it refuses the permute by name and
-    // the dispatch takes the whole wave (D880).
-    let refused = module(&program, true).expect_err("refused one invocation per lane");
-    assert!(refused.to_string().contains("another lane"), "{refused}");
-    {
-        let model = "whole wave";
-        let done = run(&program, false);
+    // Run per lane, each lane's source is the subgroup's shuffle of the half it lies in (D973).
+    for (model, per_lane) in [("whole wave", false), ("per lane", true)] {
+        let done = run(&program, per_lane);
         assert_results(&done.memory, model, |lane| {
             let half = lane & 32;
             [
@@ -527,5 +523,37 @@ fn the_lowest_set_bit_and_the_narrow_saving_masks_compute_as_published() {
                 if (16..32).contains(&lane) { 0 } else { 2 },
             ]
         });
+    }
+}
+
+/// `s_nand_b32` (AMD's published RDNA 2 instruction set, SOP2: `D = ~(S0 & S1)`, the condition
+/// code whether the result is non-zero), as Grand Theft Auto V's full-screen compute pass at
+/// `0x74005b809c00` combines two masks at `0x8e4`.
+///
+/// - `v4 = ~(0x0f0f_00ff & 0xf0)`, `0xffff_ff0f`, plus the condition code (1).
+/// - `v5 = ~(-1 & -1)`, zero, plus the condition code (0).
+#[test]
+fn the_scalar_nand_computes_as_published() {
+    if !device_or_skip("the scalar nand") {
+        return;
+    }
+    let mut program = cleared();
+    program.extend([
+        s_mov(15, LITERAL),
+        0x0f0f_00ff,
+        sop2("s_nand_b32", 16, 15, LITERAL),
+        0xf0,
+        sop2("s_cselect_b32", 17, inline(1), inline(0)),
+        sop2("s_add_u32", 16, 16, 17),
+        vop1("v_mov_b32_e32", 4, 16),
+        sop2("s_nand_b32", 16, negative(1), negative(1)),
+        sop2("s_cselect_b32", 17, inline(1), inline(0)),
+        sop2("s_add_u32", 16, 16, 17),
+        vop1("v_mov_b32_e32", 5, 16),
+    ]);
+    program.extend(results());
+    for (model, per_lane) in MODELS {
+        let done = run(&program, per_lane);
+        assert_results(&done.memory, model, |_| [0xffff_ff10, 0, 0, 0]);
     }
 }

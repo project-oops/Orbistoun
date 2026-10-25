@@ -118,10 +118,13 @@ fn written_words(name: &str) -> u32 {
     }
 }
 
-/// Refuses a program that writes the register its wave's scratch offset arrives in: its buffer
-/// accesses through that register would then add something other than the offset the module reads
-/// as zero. A register is taken as written wherever an instruction's destination - its first
-/// operand, or the carry-out after it - spans it.
+/// Refuses a program that writes the register its wave's scratch offset arrives in and has buffer
+/// accesses that add it: those would then add something other than the offset the module reads as
+/// zero. A program that reaches scratch only through the flat encoding's scratch segment may use
+/// the register for anything once it has read it - Grand Theft Auto V's ray traversal passes copy
+/// it into `FLAT_SCRATCH` and load a descriptor over it (guest-observed, D964). A register is taken
+/// as written wherever an instruction's destination - its first operand, or the carry-out after it
+/// - spans it.
 ///
 /// # Errors
 ///
@@ -131,6 +134,13 @@ pub fn check(
     encodings: &EncodingTable,
     register: u32,
 ) -> Result<(), TranslateError> {
+    let adds_it = decode.instructions.iter().any(|instruction| {
+        named(encodings, instruction)
+            .is_some_and(|(family, name)| adds_wave_offset(family, name, instruction, register))
+    });
+    if !adds_it {
+        return Ok(());
+    }
     for instruction in &decode.instructions {
         let Some((family, name)) = named(encodings, instruction) else {
             continue;
@@ -215,8 +225,8 @@ fn refuse(instruction: &Instruction, detail: &'static str) -> TranslateError {
 
 /// The lane id an access adds: the invocation's lane where each is one (D760), the module's loop's
 /// where one is open over the lanes, else the per-lane loop's.
-fn lane_id<M: Model + ?Sized>(model: &mut M, lane: u32) -> Id {
-    match model.lane_index().or(model.looped_lane()) {
+pub(crate) fn lane_id<M: Model + ?Sized>(model: &mut M, lane: u32) -> Id {
+    match model.lane_number(lane).or(model.looped_lane()) {
         Some(lane) => lane,
         None => model.constant(lane),
     }
@@ -348,8 +358,12 @@ fn buffer_width(instruction: &Instruction, name: &str) -> Result<(bool, Width), 
 
 /// The scratch descriptor's fields in the four registers from `resource`, the wave's own: its
 /// stride (word 1 bits 29:16), whether it swizzles (31), its index stride's power of two (word 3
-/// bits 22:21, plus three) and whether it adds the lane id (23) (`gfx10-rsrc.json`).
-fn descriptor_fields<M: Model + ?Sized>(model: &mut M, resource: u32) -> (Id, Id, Id, Id) {
+/// bits 22:21, plus three) and whether it adds the lane id (23) (`gfx10-rsrc.json`). A descriptor
+/// the program computes is read so too, as a device-addressed access places it (D967).
+pub(crate) fn descriptor_fields<M: Model + ?Sized>(
+    model: &mut M,
+    resource: u32,
+) -> (Id, Id, Id, Id) {
     let second_word = model.read_scalar(resource + 1);
     let fourth_word = model.read_scalar(resource + 3);
     let field = |model: &mut M, value: Id, shift: u32, mask: u32| {
@@ -371,7 +385,7 @@ fn descriptor_fields<M: Model + ?Sized>(model: &mut M, resource: u32) -> (Id, Id
 
 /// A swizzled buffer address's part past the scalar offset, for `index` and `offset`, with the
 /// descriptor's stride and its index stride's power of two.
-fn swizzled_place<M: Model + ?Sized>(
+pub(crate) fn swizzled_place<M: Model + ?Sized>(
     model: &mut M,
     (index, offset): (Id, Id),
     (stride, stride_shift): (Id, Id),
@@ -504,6 +518,94 @@ fn flat<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `HW_REG_FLAT_SCR_LO` and `HW_REG_FLAT_SCR_HI`, the hardware register ids `s_setreg_b32` names
+/// in bits 5:0 of its immediate (AMD's published RDNA instruction set, `S_SETREG`): the halves of
+/// the flat scratch base.
+const FLAT_SCRATCH_REGISTERS: [u32; 2] = [20, 21];
+
+/// `HW_REG_MODE`, the hardware register id of the wave's float mode - rounding and denormals -
+/// as `operands-hwreg.out` records it.
+const MODE_REGISTER: u32 = 1;
+
+/// `s_setreg_b32` of the flat scratch base, its low or high half: where the wave's scratch lies in
+/// guest memory, which the hardware adds to a lane's private address. The module holds scratch as
+/// a private array instead, which no address reaches (this module's account), so setting the base
+/// changes nothing it reads. Grand Theft Auto V's ray traversal passes set it from their scratch
+/// offset at entry (guest-observed, D964). Any other hardware register is refused.
+///
+/// # Errors
+///
+/// An `s_setreg_b32` of another register, or in a module whose dispatch gives it no scratch.
+pub(crate) fn set_flat_scratch<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let register = instruction.word & 0x3f;
+    if register == MODE_REGISTER {
+        return Err(refuse(
+            instruction,
+            "an s_setreg of the mode register, whose float mode a module compiles in from its dispatch's (D965)",
+        ));
+    }
+    if !FLAT_SCRATCH_REGISTERS.contains(&register) {
+        return Err(refuse(
+            instruction,
+            "an s_setreg of a hardware register other than the flat scratch base or the mode",
+        ));
+    }
+    if model.scratch().is_none() {
+        return Err(refuse(
+            instruction,
+            "the flat scratch base set in a module whose dispatch gives it no scratch (D954)",
+        ));
+    }
+    model.count();
+    Ok(())
+}
+
+/// The word at byte `offset` of `lane`'s own private memory, as a flat access through the private
+/// aperture names it (D964): laid out as a scratch-segment access's address is, the low two bits
+/// dropped. Where `routed` holds, `stored` - when given - is written there; elsewhere the word is
+/// left alone. Answers what the word held, zero where `routed` does not hold or the module's scratch
+/// does not hold the word, which is then an escape. A module with no scratch holds no word.
+pub(crate) fn private_word<M: Model + ?Sized>(
+    model: &mut M,
+    (offset, routed): (Id, Id),
+    stored: Option<Id>,
+    lane: u32,
+) -> Id {
+    let zero = model.constant(0);
+    if model.scratch().is_none() {
+        model.note_escape(routed, Some(lane));
+        return zero;
+    }
+    let lanes = model.lanes().max(1);
+    let lane_bits = model.constant(lanes.trailing_zeros());
+    let id = lane_id(model, lane);
+    let aligned = model.constant(!3);
+    let offset = model.binary(op::BITWISE_AND, offset, aligned);
+    let at = swizzled_place(model, (id, offset), (zero, lane_bits));
+    let two = model.constant(2);
+    let word = model.binary(op::SHIFT_RIGHT_LOGICAL, at, two);
+    let Some((index, held)) = model.scratch_place(word, lane) else {
+        model.note_escape(routed, Some(lane));
+        return zero;
+    };
+    let valid = model.both(routed, held);
+    let unheld = logical_not(model, held);
+    let escaped = model.both(routed, unheld);
+    model.note_escape(escaped, Some(lane));
+    let index = model.select(valid, index, zero);
+    let Some(held_word) = model.read_scratch(index) else {
+        return zero;
+    };
+    if let Some(value) = stored {
+        let kept = model.select(valid, value, held_word);
+        let _ = model.write_scratch(index, kept, lane);
+    }
+    model.select(valid, held_word, zero)
 }
 
 /// Moves one element of `width` at byte `at` of the wave's scratch for `lane`: stores `moved`, or

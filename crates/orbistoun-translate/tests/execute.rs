@@ -10,6 +10,7 @@ use orbistoun_gpu_vulkan::{Availability, dispatch, probe};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_spirv::op;
 use orbistoun_translate::predicated::MEMORY_WORDS as MEMORY_WORDS_U32;
+use orbistoun_translate::structured::with_shape;
 use orbistoun_translate::{Fidelity, Strategy, Width, translate};
 
 /// Guest-memory words a translated module sees.
@@ -1381,6 +1382,101 @@ fn the_models_agree_about_memory() {
     let (wave_regs, wave_mem) = run_memory(Fidelity::Wavefront, &program);
     assert_eq!(lane_mem, wave_mem, "memory differs");
     assert_eq!(lane_regs, wave_regs, "registers differ");
+}
+
+/// A wider global store lands at its address plus its byte offset, as a one-word store does: the
+/// two- and four-word stores' offsets were absent from the operand table until a probe carried
+/// one, so each wrote its words at the address alone (AMD's published RDNA instruction set: the
+/// flat encoding's offset in bits 11:0).
+#[test]
+fn a_wider_global_store_adds_its_offset() {
+    if !device_or_skip("a_wider_global_store_adds_its_offset") {
+        return;
+    }
+    // v0 = 0, the address; v[4:7] the words; x2 at offset 32 and x4 at offset 64.
+    let mut program = vec![v_mov_inline(0, 0), v_mov_inline(1, 0)];
+    for (register, value) in [(4, 0x1111_1111), (5, 0x2222_2222), (6, 0x3333_3333)] {
+        program.extend(v_mov_literal(register, value));
+    }
+    program.extend(v_mov_literal(7, 0x4444_4444));
+    for (name, offset) in [("global_store_dwordx2", 32), ("global_store_dwordx4", 64)] {
+        program.extend([head(name) | offset, (4 << 8) | (FLAT_NO_BASE_CODE << 16)]);
+    }
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(memory[8..10], [0x1111_1111, 0x2222_2222], "two words at 32");
+    assert_eq!(
+        memory[16..20],
+        [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444],
+        "four words at 64"
+    );
+    assert!(memory[..8].iter().all(|&word| word == 0), "nothing at 0");
+}
+
+/// Neighbouring lanes' byte and half stores into one word each keep the others' bytes (D977): each
+/// lane stores its byte `0x80 + lane` at byte `lane`, so four lanes fill each word from 0; its half
+/// `0xbe00 + lane` at byte `64 + 2 * lane`, two lanes a word from 16; and every lane the half
+/// `0xcafe` at byte `0xc3`, its low byte the last of word 48 and its high byte the first of 49.
+/// The whole wave in one invocation; lanes each an invocation of their own, storing at once, are
+/// the dispatch tests' (`dispatch_buffers.rs`, `direct_memory.rs`), this harness running one lane
+/// at that fidelity.
+#[test]
+fn neighbouring_lanes_store_bytes_and_halves_into_one_word() {
+    if !device_or_skip("neighbouring_lanes_store_bytes_and_halves_into_one_word") {
+        return;
+    }
+    // `vD = vS + literal`, the literal source code 255.
+    let add = |dst: u32, src: u32, literal: u32| {
+        [
+            head("v_add_nc_u32_e32") | (dst << 17) | (src << 9) | 255,
+            literal,
+        ]
+    };
+    // A sub-word store `name vAddr, vData, off`, its address pair's high half v(addr + 1) zero.
+    let store = |name: &str, vaddr: u32, vdata: u32| {
+        [head(name), vaddr | (vdata << 8) | (FLAT_NO_BASE_CODE << 16)]
+    };
+    let mut program: Vec<u32> = lane_index_into(0).to_vec();
+    program.extend(add(1, 0, 0));
+    program.push(v_mov_inline(2, 0));
+    program.extend(add(3, 0, 0x80));
+    program.extend(store("global_store_byte", 1, 3));
+    // v4 = 2 * lane + 64, v5 = 0, v6 = 0xbe00 + lane.
+    program.push(v_int_op("v_lshlrev_b32_e32", 4, 128 + 1, 0));
+    program.extend(add(4, 4, 64));
+    program.push(v_mov_inline(5, 0));
+    program.extend(add(6, 0, 0xbe00));
+    program.extend(store("global_store_short", 4, 6));
+    program.extend(v_mov_literal(7, 0xc3));
+    program.push(v_mov_inline(8, 0));
+    program.extend(v_mov_literal(9, 0xcafe));
+    program.extend(store("global_store_short", 7, 9));
+    program.push(s_endpgm());
+    for fidelity in [Fidelity::Wavefront] {
+        let (_, memory) = run_memory(fidelity, &program);
+        for word in 0..16u32 {
+            let byte = |n: u32| (0x80 + 4 * word + n) << (8 * n);
+            let wanted = byte(0) | byte(1) | byte(2) | byte(3);
+            assert_eq!(
+                memory[word as usize], wanted,
+                "{fidelity}: bytes in word {word}"
+            );
+        }
+        for word in 0..32u32 {
+            let wanted = (0xbe00 + 2 * word) | (0xbe00 + 2 * word + 1) << 16;
+            assert_eq!(
+                memory[16 + word as usize],
+                wanted,
+                "{fidelity}: halves in word {word}"
+            );
+        }
+        assert_eq!(memory[48], 0xfe00_0000, "{fidelity}: the half's low byte");
+        assert_eq!(
+            memory[49], 0xca,
+            "{fidelity}: its high byte, in the next word"
+        );
+        assert_eq!(memory[50], 0, "{fidelity}: nothing past it");
+    }
 }
 
 /// `s_mov_b64 s[dst:dst+1], <source code>`.
@@ -4165,6 +4261,48 @@ fn a_thirty_two_lane_compare_leaves_vcc_hi() {
     assert_eq!(scalar(&registers, 2), 37, "vcc_hi is left as it was");
 }
 
+/// A loop each lane leaves on its own, counting its trips in a wave-uniform scalar: the shape of
+/// the depth walk in Grand Theft Auto V's tree-rotation program at `0x3dc8900` in its image. The
+/// mask is saved in `vcc_lo`, `v_cmpx_ne_u32_e32` drops each lane whose chain has ended, `vcc_hi`
+/// counts the wave's trips, and each lane keeps the count it last saw in `v2` - its depth. Lane
+/// `n`'s chain halves `n` to zero, so lane 3 leaves after two trips, the wave after five (lane 31),
+/// and the restored mask is the one saved.
+#[test]
+fn a_loop_lanes_leave_one_by_one_counts_in_a_wave_scalar() {
+    if !device_or_skip("a_loop_lanes_leave_one_by_one_counts_in_a_wave_scalar") {
+        return;
+    }
+    let program = [
+        0xbeeb_0380, // s_mov_b32 vcc_hi, 0
+        0xbeea_037e, // s_mov_b32 vcc_lo, exec_lo
+        0xd765_0001,
+        0x0001_00c1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+        0x7e04_026b, // v_mov_b32 v2, vcc_hi
+        0x7daa_0280, // v_cmpx_ne_u32 0, v1
+        0xbf88_0003, // s_cbranch_execz 3
+        0x2c02_0281, // v_lshrrev_b32 v1, 1, v1
+        0x816b_816b, // s_add_i32 vcc_hi, vcc_hi, 1
+        0xbf82_fffa, // s_branch -6
+        0xbefe_036a, // s_mov_b32 exec_lo, vcc_lo
+        0xd760_0007,
+        0x0001_0702, // v_readlane_b32 s7, v2, 3
+        0xbe84_037e, // s_mov_b32 s4, exec_lo
+        0xbe85_036a, // s_mov_b32 s5, vcc_lo
+        0xbe86_036b, // s_mov_b32 s6, vcc_hi
+        s_endpgm(),
+    ];
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(scalar(&registers, 6), 5, "the wave made five trips");
+    assert_eq!(scalar(&registers, 7), 2, "lane 3 left after two");
+    assert_eq!(vector(&registers, 2), 0, "lane 0 never entered");
+    assert_eq!(
+        scalar(&registers, 4),
+        scalar(&registers, 5),
+        "the mask restored is the one saved"
+    );
+    assert_ne!(scalar(&registers, 4), 0, "and some lane runs");
+}
+
 /// A 32-lane shader narrows its mask with `s_and_b32 exec_lo`.
 #[test]
 fn a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic() {
@@ -5870,16 +6008,25 @@ fn the_dispatch_loop_costs_a_measurable_amount_on_a_single_block_shader() {
     // total.
     let bytes: Vec<u8> = [s_endpgm()].iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode(&bytes, table, &operands);
-    let module = translate(&decoded, table, Strategy::default())
+    let module_as = |structured: bool| {
+        with_shape(structured, || {
+            translate(&decoded, table, Strategy::default())
+        })
         .expect("translates")
-        .module;
-    let has = |opcode: u16| module.iter().any(|word| (*word & 0xFFFF) as u16 == opcode);
+        .module
+    };
+    let has =
+        |module: &[u32], opcode: u16| module.iter().any(|word| (*word & 0xFFFF) as u16 == opcode);
+    let dispatched = module_as(false);
     assert!(
-        has(op::LOOP_MERGE) && has(op::SWITCH),
-        concat!(
-            "a single-block shader still goes through the dispatch loop. If that has changed, ",
-            "it is a deliberate second emission path and D110 needs to say so"
-        )
+        has(&dispatched, op::LOOP_MERGE) && has(&dispatched, op::SWITCH),
+        "the dispatch loop runs a single block as an arm of its switch"
+    );
+    // Laid out as structure (D972), the block is the body: no switch, and no loop around it.
+    let structured = module_as(true);
+    assert!(
+        !has(&structured, op::SWITCH) && !has(&structured, op::LOOP_MERGE),
+        "a single-block shader laid out as structure is its block and nothing around it"
     );
 }
 
@@ -6506,6 +6653,40 @@ fn a_value_written_to_the_local_share_can_be_read_back() {
     );
 }
 
+/// `ds_write_addtid_b32` stores each lane's word at the offset plus `m0` plus four bytes a lane, and
+/// `ds_read_addtid_b32` reads it back: lane `n`'s word, written at offset 8 with `m0` 16, is the
+/// word an ordinary read finds at byte `24 + 4n`, as Grand Theft Auto V's program at
+/// 0x74005b858800 keeps a word a lane.
+#[test]
+fn a_lane_addressed_local_share_word_lies_at_the_lane_s_place() {
+    if !device_or_skip("a_lane_addressed_local_share_word_lies_at_the_lane_s_place") {
+        return;
+    }
+    let mut program: Vec<u32> = lane_index_into(0).to_vec();
+    program.extend(v_mov_literal(3, 1000));
+    program.push(v_int_op("v_add_nc_u32_e32", 1, vgpr_code(3), 0));
+    program.push(head("s_movk_i32") | (124 << 16) | 16);
+    // ds_write_addtid_b32 v1 offset:8: the data register at bit 8 of the second word.
+    program.extend([head("ds_write_addtid_b32") | 8, 1 << 8]);
+    program.push(s_waitcnt());
+    program.push(v_mov_inline(1, 0));
+    // ds_read_addtid_b32 v1 offset:8: the destination at bit 24.
+    program.extend([head("ds_read_addtid_b32") | 8, 1 << 24]);
+    program.push(s_waitcnt());
+    // v6 = 4n; v8 = 24 + 4n; v7 = the word an ordinary read finds there, stored at word n.
+    program.push(v_int_op("v_lshlrev_b32_e32", 6, 128 + 2, 0));
+    program.push(v_int_op("v_add_nc_u32_e32", 8, 128 + 24, 6));
+    program.extend(ds_read(7, 8, 0));
+    program.push(s_waitcnt());
+    program.extend(global_store(6, 7));
+    program.push(s_endpgm());
+    let (registers, memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 1), 1000, "lane 0 read its own word back");
+    for lane in 0..64usize {
+        assert_eq!(memory[lane], 1000 + lane as u32, "lane {lane}: {memory:?}");
+    }
+}
+
 /// The local-share instruction offset is applied.
 #[test]
 fn the_local_share_offset_is_not_ignored() {
@@ -6834,6 +7015,59 @@ fn a_sixty_four_bit_right_shift_crosses_the_halves() {
             (expected as u32, (expected >> 32) as u32),
             "shift {shift}"
         );
+    }
+}
+
+/// `v_lshlrev_b64`: a register pair shifted left by the low six bits of the first source, through
+/// all three ranges - zero, below thirty-two, and thirty-two and above - as Grand Theft Auto V's
+/// program at 0x74005b858800 scales a 64-bit index.
+#[test]
+fn a_sixty_four_bit_left_shift_crosses_the_halves() {
+    if !device_or_skip("a_sixty_four_bit_left_shift_crosses_the_halves") {
+        return;
+    }
+    let value: u64 = 0x8765_4321_0fed_cba9;
+    for shift in [0_u32, 4, 31, 32, 40, 63, 64 + 8] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(2, value as u32));
+        program.extend(v_mov_literal(3, (value >> 32) as u32));
+        program.extend(v_mov_literal(4, shift));
+        program.extend(vop3("v_lshlrev_b64", 0, [260, 258, 0], 0, 0));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        let expected = value << (shift & 63);
+        assert_eq!(
+            (vector(&registers, 0), vector(&registers, 1)),
+            (expected as u32, (expected >> 32) as u32),
+            "shift {shift}"
+        );
+    }
+}
+
+/// `v_cmpx_lt_i16_e32 v0, v1` narrows the execution mask to the lanes whose index is below the low
+/// sixteen bits of `v1` as a signed integer: 0x0001_0004 keeps lanes 0 to 3, its high half ignored,
+/// and 0x0000_fffe - minus two - keeps none, where an unsigned reading would keep all.
+#[test]
+fn a_sixteen_bit_cmpx_less_than_narrows_the_execution_mask() {
+    if !device_or_skip("a_sixteen_bit_cmpx_less_than_narrows_the_execution_mask") {
+        return;
+    }
+    for (threshold, last) in [(0x0001_0004u32, Some(3usize)), (0x0000_fffe, None)] {
+        let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+        mask_program.extend(v_mov_literal(1, threshold));
+        mask_program.push(head("v_cmpx_lt_i16_e32") | (1 << 9) | vgpr_code(0));
+        let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+        for lane in 0..64usize {
+            let expected = if last.is_some_and(|last| lane <= last) {
+                lane as u32
+            } else {
+                0
+            };
+            assert_eq!(
+                memory[lane], expected,
+                "{threshold:#x}, lane {lane}: {memory:?}"
+            );
+        }
     }
 }
 
@@ -7813,6 +8047,105 @@ fn a_packed_add_or_subtract_wraps_each_half() {
     let registers = run(&program);
     assert_eq!(vector(&registers, 2), 0xfffe_0002, "2 low, -2 wrapped high");
     assert_eq!(vector(&registers, 5), 0x0000_0001, "both halves wrapped");
+}
+
+/// `v_pk_add_i16` and `v_pk_sub_i16` wrap each half as their unsigned forms do: 0x7fff + 1 is
+/// 0x8000, the sign's change no saturation, and 0x8000 - 1 low, 2 - 3 high.
+#[test]
+fn a_signed_packed_add_or_subtract_wraps_each_half() {
+    if !device_or_skip("a_signed_packed_add_or_subtract_wraps_each_half") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0001_7fff));
+    program.extend(v_mov_literal(1, 0x0002_0001));
+    program.extend(vop3p("v_pk_add_i16", 2, [VGPR_0, VGPR_0 + 1, 0], 0, 0b011));
+    program.extend(v_mov_literal(3, 0x0002_8000));
+    program.extend(v_mov_literal(4, 0x0003_0001));
+    program.extend(vop3p(
+        "v_pk_sub_i16",
+        5,
+        [VGPR_0 + 3, VGPR_0 + 4, 0],
+        0,
+        0b011,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0x0003_8000, "wrapped, not saturated");
+    assert_eq!(vector(&registers, 5), 0xffff_7fff, "-1 high, 0x7fff low");
+}
+
+/// `v_med3_u32` takes the unsigned median of three: of 5, 9 and 0xffff_fff0 it is 9 - read as signed,
+/// the last would be least and 5 the median - and of 20, 9 and 0xffff_fff0 it is 20.
+#[test]
+fn an_unsigned_median_of_three_orders_unsigned() {
+    if !device_or_skip("an_unsigned_median_of_three_orders_unsigned") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 5));
+    program.extend(v_mov_literal(2, 9));
+    program.extend(v_mov_literal(3, 0xffff_fff0));
+    program.extend(v_mov_literal(4, 20));
+    program.extend(vop3(
+        "v_med3_u32",
+        0,
+        [VGPR_0 + 1, VGPR_0 + 2, VGPR_0 + 3],
+        0,
+        0,
+    ));
+    program.extend(vop3(
+        "v_med3_u32",
+        5,
+        [VGPR_0 + 4, VGPR_0 + 2, VGPR_0 + 3],
+        0,
+        0,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 0), 9);
+    assert_eq!(vector(&registers, 5), 20);
+}
+
+/// `v_cmp_ne_u64_e64` and `v_cmp_eq_u64_e64` compare both halves of two pairs: (1, 2) and (1, 3)
+/// differ in the high half alone, so lane zero's bit is set for not-equal and clear for equal.
+#[test]
+fn a_sixty_four_bit_compare_reads_both_halves() {
+    if !device_or_skip("a_sixty_four_bit_compare_reads_both_halves") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(2, 1));
+    program.extend(v_mov_literal(3, 2));
+    program.extend(v_mov_literal(4, 1));
+    program.extend(v_mov_literal(5, 3));
+    // Into s[0:1], s[2:3] and s[4:5]: the scalar registers a run reads back.
+    program.extend(vop3(
+        "v_cmp_ne_u64_e64",
+        0,
+        [VGPR_0 + 2, VGPR_0 + 4, 0],
+        0,
+        0,
+    ));
+    program.extend(vop3(
+        "v_cmp_eq_u64_e64",
+        2,
+        [VGPR_0 + 2, VGPR_0 + 4, 0],
+        0,
+        0,
+    ));
+    program.extend(vop3(
+        "v_cmp_eq_u64_e64",
+        4,
+        [VGPR_0 + 2, VGPR_0 + 2, 0],
+        0,
+        0,
+    ));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 0) & 1, 1, "lane zero's pairs differ");
+    assert_eq!(scalar(&registers, 2) & 1, 0, "so they are not equal");
+    assert_eq!(scalar(&registers, 4) & 1, 1, "a pair equals itself");
 }
 
 /// `v_min3_i16` takes the signed least of three halves and writes the half its destination select
@@ -9210,6 +9543,40 @@ fn the_sixty_four_bit_scalar_logic_and_extract_compute_as_published() {
     );
 }
 
+/// `s_subb_u32` subtracts the condition code's borrow and sets it to its own: 5 - 7 borrows, then
+/// 5 - 5 - 1 wraps to 0xffff_ffff and borrows again, and 9 - 2 - 1 is 6 with none.
+/// `s_bitreplicate_b64_b32` doubles each bit of a word across a pair, as Grand Theft Auto V's
+/// program at 0x74005b858800 builds a mask from 0x0fc0_0040.
+#[test]
+fn the_scalar_borrow_and_bit_replication_compute_as_published() {
+    if !device_or_skip("the_scalar_borrow_and_bit_replication_compute_as_published") {
+        return;
+    }
+    let mut program = vec![
+        sop2("s_sub_u32", 0, 128 + 5, 128 + 7),     // borrows
+        sop2("s_subb_u32", 1, 128 + 5, 128 + 5),    // 0 - 1: wraps and borrows
+        sop2("s_cselect_b32", 2, 128 + 9, 128 + 4), // borrow set: 9
+        sop2("s_subb_u32", 3, 128 + 9, 128 + 2),    // 9 - 2 - 1 = 6, no borrow
+        sop2("s_cselect_b32", 4, 128 + 9, 128 + 4), // borrow clear: 4
+    ];
+    program.extend(s_mov_literal(5, 0x0fc0_0040));
+    program.push(sop1("s_bitreplicate_b64_b32", 6, 5));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 1), u32::MAX);
+    assert_eq!(scalar(&registers, 2), 9, "the borrow out");
+    assert_eq!(scalar(&registers, 3), 6);
+    assert_eq!(scalar(&registers, 4), 4, "no borrow");
+    let replicated: u64 = (0..32)
+        .filter(|bit| 0x0fc0_0040_u32 >> bit & 1 != 0)
+        .map(|bit| 3_u64 << (2 * bit))
+        .sum();
+    assert_eq!(
+        (scalar(&registers, 6), scalar(&registers, 7)),
+        (replicated as u32, (replicated >> 32) as u32)
+    );
+}
+
 /// The 32-bit scalar arithmetic: a logical right shift, an unsigned add whose condition code is
 /// the carry, a select on it, a bit test, and a pair's population count.
 #[test]
@@ -9240,6 +9607,29 @@ fn the_scalar_shift_add_select_test_and_count_compute_as_published() {
         scalar(&registers, 7),
         64,
         "every bit of an inline -1 across a pair"
+    );
+}
+
+/// `s_bcnt1_i32_b64` may count into `vcc_lo`, scalar register 106, as Grand Theft Auto V's compute
+/// program at `0x3e1f700` in its image does (`s_bcnt1_i32_b64 vcc_lo, s12`): the count lands in the
+/// condition mask's low half and reads back as a scalar.
+#[test]
+fn a_bit_count_may_land_in_vcc_lo() {
+    if !device_or_skip("a_bit_count_may_land_in_vcc_lo") {
+        return;
+    }
+    let minus_one = 193;
+    let vcc_lo = 106;
+    let program = vec![
+        sop1("s_bcnt1_i32_b64", vcc_lo, minus_one), // 64 bits set across the pair
+        sop1("s_mov_b32", 1, vcc_lo),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(
+        scalar(&registers, 1),
+        64,
+        "the count, read back from vcc_lo"
     );
 }
 
@@ -9309,6 +9699,28 @@ fn fract_is_what_lies_above_the_floor() {
     let registers = run(&program);
     assert_eq!(vector(&registers, 1), 0.75f32.to_bits(), "2.75 above 2");
     assert_eq!(vector(&registers, 3), 0.75f32.to_bits(), "-2.25 above -3");
+}
+
+/// `v_ceil_f32` rounds toward positive infinity (`V_CEIL_F32`): -2.5 up to -2, 2.5 up to 3, and a
+/// whole number stays itself. Grand Theft Auto V's full-screen pass at 0x74005b86f800 was refused
+/// for want of it.
+#[test]
+fn ceil_rounds_up() {
+    if !device_or_skip("ceil_rounds_up") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, (-2.5f32).to_bits()));
+    program.push(vop1_vv("v_ceil_f32_e32", 1, 0));
+    program.extend(v_mov_literal(2, 2.5f32.to_bits()));
+    program.push(vop1_vv("v_ceil_f32_e32", 3, 2));
+    program.extend(v_mov_literal(4, 7.0f32.to_bits()));
+    program.push(vop1_vv("v_ceil_f32_e32", 5, 4));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), (-2.0f32).to_bits(), "-2.5 up to -2");
+    assert_eq!(vector(&registers, 3), 3.0f32.to_bits(), "2.5 up to 3");
+    assert_eq!(vector(&registers, 5), 7.0f32.to_bits(), "7 stays 7");
 }
 
 /// `v_rndne_f32` rounds a tie to the even integer, `v_bfrev_b32` reverses the bits, and the integer

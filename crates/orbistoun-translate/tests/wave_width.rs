@@ -212,6 +212,228 @@ fn a_whole_wave_s_module_does_not_grow_with_its_width() {
     );
 }
 
+/// The most module words one word of a traced global access may add, a wave in one invocation: its
+/// page lookup (D961) is emitted once, inside the lane loop. Emitted lane by lane, each took over
+/// twenty thousand, and Grand Theft Auto V's program at `image+0x3cf9d00` grew to 2,073,596 words,
+/// past five minutes in the driver's compiler.
+const WORDS_A_GLOBAL_WORD: usize = 1200;
+
+/// `times` global loads and as many global stores of a dword, each at `s[0:1]` plus four times the
+/// lane, traced through the dispatch's global buffer of pages (D961).
+fn global_program(times: usize) -> Vec<u32> {
+    let flat = |name: &str, fields: u32, second: u32| [encoded(name, fields | (2 << 14)), second];
+    let mut program = vec![
+        vop2("v_lshlrev_b32_e32", 1, inline(2), 0),
+        vop2("v_add_nc_u32_e32", 1, 0, 1),
+        vop2("v_mov_b32_e32", 2, 1, 0),
+    ];
+    for _ in 0..times {
+        // global_load_dword v3, v[1:2], off; global_store_dword v[1:2], v3, off.
+        program.extend(flat("global_load_dword", 0, 1 | 0x7d << 16 | 3 << 24));
+        program.extend(flat("global_store_dword", 0, 1 | 3 << 8 | 0x7d << 16));
+    }
+    program.push(encoded("s_endpgm", 0));
+    program
+}
+
+/// A whole wave's traced global access grows its module by a bounded size, the same in waves of 64
+/// as of 32: its page lookup is not emitted once for every lane.
+#[test]
+fn a_global_access_does_not_grow_with_the_width() {
+    let module = |times: usize, width: Width| dispatch_words(&global_program(times), width, 4);
+    let (one, nine) = (module(1, Width::Wave64), module(9, Width::Wave64));
+    let narrow = module(9, Width::Wave32);
+    let each = (nine - one) / 16;
+    println!(
+        "{one} words with one load and store, {nine} with nine, {narrow} in waves of 32: {each} a global word"
+    );
+    assert!(
+        each <= WORDS_A_GLOBAL_WORD,
+        "{each} words a global access's word, more than {WORDS_A_GLOBAL_WORD}"
+    );
+    assert!(
+        nine * 4 <= narrow * 5,
+        "a wave of 64 lanes takes {nine} words, one of 32 {narrow}: the module grows with the lanes"
+    );
+}
+
+/// How many words `program` translates to, a dispatch of one group of sixty-four threads in waves
+/// of `width`, the whole wave in one invocation, with `count` user-data words and its buffers bound
+/// on their own (D746).
+fn dispatch_words(program: &[u32], width: Width, count: u32) -> usize {
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
+    translate_with_user_data(
+        &decoded,
+        &encodings,
+        width,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count,
+            compute: Some(ComputeInputs {
+                thread_id_components: 1,
+                threads: [64, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            draw_buffers: true,
+            ..UserData::default()
+        },
+    )
+    .expect("the program translates")
+    .0
+    .len()
+}
+
+/// The most module words one image access may add, a wave in one invocation: its fetch, sample or
+/// store is emitted once, inside the lane loop. Emitted lane by lane, Grand Theft Auto V's
+/// full-screen pass at `0x74005b86f800`, 38 image loads among 1,956 instructions, grew to 756,758
+/// words, past five minutes in the driver's compiler.
+const WORDS_AN_IMAGE_ACCESS: usize = 1500;
+
+/// `times` rounds of an image load and a sample at level zero through the descriptor in user data
+/// words 16-23 and the sampler in 8-11, and a store of four components through the one in 24-31,
+/// each at the lane's `v[0:1]`.
+fn image_program(times: usize) -> Vec<u32> {
+    let image = |name: &str, fields: u32, second: u32| [encoded(name, fields), second];
+    let mut program = Vec::new();
+    for _ in 0..times {
+        // image_load v4, v[0:1], s[16:23] dmask:0x1 dim:SQ_RSRC_IMG_2D.
+        program.extend(image("image_load", 1 << 8 | 1 << 3, 4 << 8 | 4 << 16));
+        // image_sample_lz v5, v[0:1], s[16:23], s[8:11] dmask:0x1 dim:SQ_RSRC_IMG_2D.
+        program.extend(image(
+            "image_sample_lz",
+            1 << 8 | 1 << 3,
+            5 << 8 | 4 << 16 | 2 << 21,
+        ));
+        // image_store v[4:7], v[0:1], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D.
+        program.extend(image("image_store", 0xf << 8 | 1 << 3, 4 << 8 | 6 << 16));
+    }
+    program.push(encoded("s_endpgm", 0));
+    program
+}
+
+/// A whole wave's image access grows its module by a bounded size, the same in waves of 64 as of
+/// 32: its fetch, sample or store is not emitted once for every lane.
+#[test]
+fn an_image_access_does_not_grow_with_the_width() {
+    let module = |times: usize, width: Width| dispatch_words(&image_program(times), width, 32);
+    let (one, nine) = (module(1, Width::Wave64), module(9, Width::Wave64));
+    let narrow = module(9, Width::Wave32);
+    let each = (nine - one) / 24;
+    println!(
+        "{one} words with one round, {nine} with nine, {narrow} in waves of 32: {each} an access"
+    );
+    assert!(
+        each <= WORDS_AN_IMAGE_ACCESS,
+        "{each} words an image access, more than {WORDS_AN_IMAGE_ACCESS}"
+    );
+    assert!(
+        nine * 4 <= narrow * 5,
+        "a wave of 64 lanes takes {nine} words, one of 32 {narrow}: the module grows with the lanes"
+    );
+}
+
+/// How many loops `module` declares: its `OpLoopMerge`s.
+fn loops(module: &[u32]) -> usize {
+    let mut count = 0;
+    let mut at = 5;
+    while at < module.len() {
+        let (words, opcode) = (module[at] >> 16, module[at] & 0xffff);
+        if u16::try_from(opcode).is_ok_and(|opcode| opcode == orbistoun_spirv::op::LOOP_MERGE) {
+            count += 1;
+        }
+        at += usize::try_from(words.max(1)).expect("fits");
+    }
+    count
+}
+
+/// A straight run of lane work is one loop over the lanes, not one a guest instruction (D956):
+/// forty vector instructions, with the waits and hints between them that emit nothing, are the
+/// program's dispatch loop and one lane loop. Grand Theft Auto V's full-screen pass at
+/// `0x74005b86f800`, 1,637 lane loops, held the driver's compiler for 529 s.
+#[test]
+fn a_straight_run_of_lane_work_is_one_loop() {
+    let mut program = vec![vop2("v_lshlrev_b32_e32", 9, inline(2), 0)];
+    for round in 0..13 {
+        program.extend([
+            vop2("v_add_nc_u32_e32", 4, inline(round), 0),
+            encoded("s_waitcnt", 0x3f70),
+            vop2("v_mul_u32_u24_e32", 5, vgpr(4), 4),
+            vop2("v_xor_b32_e32", 6, vgpr(5), 4),
+            encoded("s_nop", 0),
+        ]);
+    }
+    program.push(encoded("s_endpgm", 0));
+    let (module, instructions) = module(&program, Width::Wave64, false);
+    let loops = loops(&module);
+    println!(
+        "{instructions} instructions, {loops} loops, {} words",
+        module.len()
+    );
+    assert!(
+        loops <= 2,
+        "{loops} loops for one straight run of lane work"
+    );
+}
+
+/// A run of lane work that reads memory after a store, or stores after a read, is cut there: the
+/// hardware runs every lane's instruction before any lane's next, and a loop over the lanes would
+/// let one lane's access pass another's (D956). Each lane reads the word the lane before it stores,
+/// then stores its own, then reads the word the lane after it stored; every load sees memory as
+/// the instructions before it left it, in either model.
+#[test]
+fn memory_order_between_lanes_is_the_instructions_order() {
+    if !device_or_skip("memory order between lanes is the instructions' order") {
+        return;
+    }
+    let word_of = |register: u32| vop2("v_lshlrev_b32_e32", register, inline(2), register);
+    let mut program = vec![
+        vop2("v_lshlrev_b32_e32", 9, inline(2), 0),
+        vop2("v_add_nc_u32_e32", 4, inline(3), 0),
+        // v10: the word of the lane before, lane 0's the last lane's.
+        vop2("v_add_nc_u32_e32", 10, inline(63), 0),
+        vop2("v_and_b32_e32", 10, inline(63), 10),
+        word_of(10),
+        // v11: the word of the lane after, the last lane's lane 0's.
+        vop2("v_add_nc_u32_e32", 11, inline(1), 0),
+        vop2("v_and_b32_e32", 11, inline(63), 11),
+        word_of(11),
+        // v12 and v13: words 64 and 128 past the lane's own, where the reads are kept.
+        vop2("v_add_nc_u32_e32", 12, inline(64), 0),
+        word_of(12),
+        vop2("v_add_nc_u32_e32", 13, inline(64), 0),
+        vop2("v_add_nc_u32_e32", 13, inline(64), 13),
+        word_of(13),
+    ];
+    program.extend(buffer("buffer_load_dword", 5, 10));
+    program.extend(buffer("buffer_store_dword", 4, 9));
+    program.extend(buffer("buffer_load_dword", 6, 11));
+    program.extend(buffer("buffer_store_dword", 5, 12));
+    program.extend(buffer("buffer_store_dword", 6, 13));
+    program.push(encoded("s_endpgm", 0));
+    for (model, per_lane) in MODELS {
+        let done = run(&program, per_lane);
+        for lane in 0..64_u32 {
+            let word = |at: u32| done.memory[at as usize];
+            assert_eq!(word(lane), lane + 3, "{model}: lane {lane}'s store");
+            assert_eq!(
+                word(64 + lane),
+                BEFORE,
+                "{model}: lane {lane} read before any lane stored"
+            );
+            assert_eq!(
+                word(128 + lane),
+                (lane + 1) % 64 + 3,
+                "{model}: lane {lane} read after every lane stored"
+            );
+        }
+    }
+}
+
 /// A lane loop asks the driver not to unroll it (D956): unrolled, its 64 passes are the module that
 /// grew with the lanes again, inside the driver's compiler. Grand Theft Auto V's program at
 /// `image+0x5b764200`, 60,000 words with 133 lane loops, held the driver's compiler for minutes.

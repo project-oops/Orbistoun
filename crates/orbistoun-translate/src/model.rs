@@ -11,6 +11,9 @@ use crate::TranslateError;
 use crate::modifiers::Modifiers;
 
 pub(crate) mod bvh;
+mod device;
+mod running_format;
+pub(crate) mod sdwa;
 
 /// Every instruction the translator understands, by name (D139).
 ///
@@ -49,6 +52,8 @@ pub const SUPPORTED: &[&str] = &[
     "tbuffer_store_format_xyzw",
     "ds_read_b32",
     "ds_write_b32",
+    "ds_read_addtid_b32",
+    "ds_write_addtid_b32",
     "ds_write2_b32",
     "ds_read2_b32",
     "ds_write2_b64",
@@ -123,7 +128,12 @@ pub const SUPPORTED: &[&str] = &[
     "global_load_dwordx4",
     "global_store_dword",
     "global_store_dwordx2",
+    "global_store_dwordx3",
     "global_store_dwordx4",
+    "global_store_byte",
+    "global_store_short",
+    "buffer_store_byte",
+    "buffer_store_short",
     "s_add_i32",
     "s_addk_i32",
     "s_and_b32",
@@ -147,13 +157,16 @@ pub const SUPPORTED: &[&str] = &[
     "s_orn2_b64",
     "s_nand_b64",
     "s_not_b64",
+    "s_bitreplicate_b64_b32",
     "s_lshr_b32",
     "s_add_u32",
     "s_addc_u32",
+    "s_subb_u32",
     "s_cselect_b32",
     "s_bitcmp1_b32",
     "s_bitcmp0_b32",
     "s_nor_b32",
+    "s_nand_b32",
     "s_trap",
     "v_not_b32_e32",
     "v_not_b32_e64",
@@ -205,6 +218,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_ff1_i32_b64",
     "v_rndne_f32_e32",
     "v_floor_f32_e32",
+    "v_ceil_f32_e32",
     "v_fract_f32_e32",
     "v_trunc_f32_e32",
     "v_bfrev_b32_e32",
@@ -232,6 +246,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmpx_ge_u32_e32",
     "v_cmp_gt_u32_e32",
     "v_cmp_gt_u32_e64",
+    "v_cmp_eq_u64_e64",
+    "v_cmp_ne_u64_e64",
     "v_cvt_f32_ubyte0_e32",
     "v_cvt_f32_ubyte1_e32",
     "v_cvt_f32_ubyte2_e32",
@@ -289,6 +305,8 @@ pub const SUPPORTED: &[&str] = &[
     "s_sendmsg",
     "s_mov_b64",
     "s_movk_i32",
+    "s_setreg_b32",
+    "s_setreg_imm32_b32",
     "s_inst_prefetch",
     "s_mulk_i32",
     "s_mul_i32",
@@ -359,6 +377,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_i32_e64",
     "v_bfi_b32",
     "v_cmpx_le_i16_e32",
+    "v_cmpx_lt_i16_e32",
     "v_cmpx_le_i32_e32",
     "v_cmpx_neq_f32_e32",
     "v_cndmask_b32_e32",
@@ -407,6 +426,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_max3_f32",
     "v_min3_f32",
     "v_med3_f32",
+    "v_med3_u32",
     "v_cubeid_f32",
     "v_cubesc_f32",
     "v_cubetc_f32",
@@ -434,6 +454,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_pk_lshlrev_b16",
     "v_pk_sub_u16",
     "v_pk_add_u16",
+    "v_pk_sub_i16",
+    "v_pk_add_i16",
     "v_pk_add_f16",
     "v_pk_mul_f16",
     "v_pk_fma_f16",
@@ -455,6 +477,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_neq_f16_e32",
     "v_min3_i16",
     "v_lshrrev_b64",
+    "v_lshlrev_b64",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
     "v_mbcnt_lo_u32_b32",
@@ -887,6 +910,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             // the count to whether the new mask or the count is non-zero.
             | "s_add_u32"
             | "s_addc_u32"
+            | "s_subb_u32"
             | "s_lshl1_add_u32"
             | "s_lshl2_add_u32"
             | "s_lshl3_add_u32"
@@ -894,6 +918,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_bitcmp1_b32"
             | "s_bitcmp0_b32"
             | "s_nor_b32"
+            | "s_nand_b32"
             | "s_and_saveexec_b64"
             | "s_andn1_saveexec_b64"
             | "s_orn2_saveexec_b64"
@@ -1054,6 +1079,12 @@ pub trait Model {
     /// Control has reached the start of a guest block, which more than one place may branch to, so
     /// anything inferred from the preceding instructions is dropped.
     fn enter_block(&mut self) {}
+
+    /// The translation begins the guest instruction at byte `offset`: what follows belongs to it,
+    /// for a model that records instruction by instruction what it did (D970).
+    fn begin_instruction(&mut self, offset: u32) {
+        let _ = offset;
+    }
 
     /// A constant of the given value, declared once however often it is used.
     fn constant(&mut self, value: u32) -> Id;
@@ -1236,6 +1267,11 @@ pub trait Model {
     /// wavefront every write is a select against the mask.
     fn write_vector_lane(&mut self, register: u32, lane: u32, value: Id);
 
+    /// Writes one lane of a vector register whether the lane runs or not, as `v_writelane_b32`
+    /// does (D978). The caller selects which lanes take a new value; this write ignores the
+    /// execution mask.
+    fn write_vector_lane_unmasked(&mut self, register: u32, lane: u32, value: Id);
+
     /// Writes a scalar register. Never masked: the scalar unit runs regardless of which lanes are
     /// active.
     fn write_scalar(&mut self, register: u32, value: Id);
@@ -1364,6 +1400,13 @@ pub trait Model {
         None
     }
 
+    /// Whether a global load's draw buffer holds only the guest pages its waves read, behind a
+    /// table of where each page starts ([`crate::wavefront::GLOBAL_PAGE_BYTES`]), rather than one
+    /// range from its base: a dispatch's does. `false` in a model whose global loads read a range.
+    fn global_pages(&self) -> bool {
+        false
+    }
+
     /// Whether the draw buffer at `slot` was placed from a sample of a dispatch's waves (D951): it
     /// starts at a guest base of its own, not at the descriptor's, and an access through it the
     /// buffer does not hold is an escape. `false` in a model that places none so.
@@ -1376,6 +1419,16 @@ pub trait Model {
     /// 47:32; `None` for one that starts at its descriptor's base, or where the model carries no
     /// such bases.
     fn sampled_buffer_base(&mut self, slot: u32) -> Option<(Id, Id)> {
+        let _ = slot;
+        None
+    }
+
+    /// The slot of the buffer of pages holding every record of the table the draw buffer at `slot`
+    /// selects its descriptor from at run time (D966): an access through it reads, at the guest
+    /// address the selected record's descriptor names, through
+    /// [`crate::wavefront::GLOBAL_PAGE_BYTES`]' table. `None` for a slot bound any other way, and
+    /// in a model that binds no table.
+    fn table_pages(&self, slot: u32) -> Option<u32> {
         let _ = slot;
         None
     }
@@ -1438,6 +1491,20 @@ pub trait Model {
         Err(TranslateError::Unsupported {
             offset: 0,
             detail: "a buffer atomic in a model that binds no buffers (D919)",
+        })
+    }
+
+    /// A pointer to word `word_index` of the draw buffer at `slot`, and whether the buffer holds it:
+    /// what a part store merges into itself, a word at a time (D977).
+    ///
+    /// # Errors
+    ///
+    /// In a model that binds no draw buffers.
+    fn draw_buffer_word(&mut self, slot: u32, word_index: Id) -> Result<(Id, Id), TranslateError> {
+        let _ = (slot, word_index);
+        Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "a byte or half store through a buffer in a model that binds none (D977)",
         })
     }
 
@@ -1504,6 +1571,15 @@ pub trait Model {
         None
     }
 
+    /// The wave's lane `lane` is at run time, `lane` a lane the per-lane loops name, where an
+    /// invocation's lanes are known only at run time: its one lane where each invocation is one
+    /// (D760), either of its two where it holds two (D973). `None` where the loops name the lane
+    /// itself.
+    fn lane_number(&mut self, lane: u32) -> Option<Id> {
+        let _ = lane;
+        self.lane_index()
+    }
+
     /// After a local-data-share access: where each invocation is one lane (D760), what one lane
     /// wrote is made visible to every other before any goes on, as the wave's own program order
     /// does. Nothing where one invocation is the whole wave.
@@ -1539,6 +1615,25 @@ pub trait Model {
     /// Required, because whether an inactive lane's store is suppressed is what distinguishes the
     /// models.
     fn write_memory(&mut self, word_index: Id, value: Id, lane: u32);
+
+    /// Merges into word `word_index` of guest memory where `lane` runs and `landed` holds (D977):
+    /// keeps the bits `keep` has set, then sets `set`'s, each one indivisible step, so another
+    /// lane's or another wave's store to the word's other bytes is kept, as the hardware's
+    /// byte-granular write keeps it.
+    fn merge_memory(&mut self, word_index: Id, (keep, set): (Id, Id), landed: Id, lane: u32) {
+        let (element_ptr, buffer) = (self.memory_element_ptr(), self.memory_buffer());
+        let member = self.constant(0);
+        let b = self.builder();
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[element_ptr.0, pointer.0, buffer.0, member.0, word_index.0],
+        );
+        let merge = open_if_active(self, lane, Some(landed));
+        let gave_up = merge_bits(self, pointer, (keep, set));
+        self.note_escape(gave_up, Some(lane));
+        close_if_active(self, merge);
+    }
 
     /// Turns a byte address into a word index, inside the window.
     ///
@@ -1649,11 +1744,42 @@ pub trait Model {
     /// records nothing.
     fn note_escape(&mut self, _escaped: Id, _lane: Option<u32>) {}
 
+    /// [`Self::note_escape`] for an access at a guest address, naming its page: `page` is bits
+    /// 47:16 of the address (D971). A model that names no page records the escape alone.
+    fn note_escape_at(&mut self, escaped: Id, lane: Option<u32>, _page: Id) {
+        self.note_escape(escaped, lane);
+    }
+
+    /// Whether this module reaches guest memory by device address (D964): its global and flat
+    /// accesses, and the buffer and scalar accesses no bound buffer serves, through
+    /// [`Self::device_table`]. `false` in a model that maps no guest memory into the device.
+    fn device_addressed(&self) -> bool {
+        false
+    }
+
+    /// The table a device-addressed module translates guest addresses through, loaded where it is
+    /// asked for (D964); `None` in a model that is not device-addressed.
+    fn device_table(&mut self) -> Option<crate::device_address::DeviceTable> {
+        None
+    }
+
+    /// The helper function a device-addressed module looks guest addresses up through (D969), and
+    /// whether its body is already written: the first asker is answered `false` and writes it. A
+    /// model with none answers `None`, and each lookup is written where it is made.
+    fn device_lookup_function(&mut self) -> Option<(Id, bool)> {
+        None
+    }
+
     /// A private word counting the backward jumps this invocation has taken, where the model cuts a
     /// loop that runs past [`crate::control::LOOP_CAP`] and reports the cut (D949); `None` where it
     /// has no way to report one, and then no loop is cut.
     fn loop_budget(&mut self) -> Option<Id> {
         None
+    }
+
+    /// The backward jumps past which [`Self::loop_budget`] cuts a loop (D949).
+    fn loop_cap(&self) -> u32 {
+        crate::control::LOOP_CAP
     }
 
     /// Records that the loop closed by the backward branch at byte offset `branch` was cut, when
@@ -3219,6 +3345,49 @@ pub const LANE_LOOPED: &[&str] = &[
     "buffer_store_dwordx2",
     "buffer_store_dwordx3",
     "buffer_store_dwordx4",
+    // A part store's compare-and-swap loop once, not once a lane (D977): unrolled over a wave's
+    // lanes, a driver's compiler did not finish the module.
+    "buffer_store_byte",
+    "buffer_store_short",
+    // A global access's page lookup (D961) once, not once a lane.
+    "global_load_dword",
+    "global_load_dwordx2",
+    "global_load_dwordx3",
+    "global_load_dwordx4",
+    "global_load_ubyte",
+    "global_load_sbyte",
+    "global_load_ushort",
+    "global_load_sshort",
+    "global_store_dword",
+    "global_store_dwordx2",
+    "global_store_dwordx3",
+    "global_store_dwordx4",
+    "global_store_byte",
+    "global_store_short",
+    // An image access's fetch, sample or store once, not once a lane, and a buffer access that
+    // converts by its descriptor's format the same.
+    "image_load",
+    "image_load_mip",
+    "image_store",
+    "image_store_mip",
+    "image_sample_lz",
+    "image_sample_lz_o",
+    "image_sample_l",
+    "image_sample_d",
+    "image_sample_c_lz",
+    "image_gather4_lz",
+    // A ray's node read and test once, not once a lane: it reads memory and writes only its lane's
+    // result registers.
+    "image_bvh_intersect_ray",
+    "image_bvh64_intersect_ray",
+    "buffer_load_format_x",
+    "buffer_load_format_xy",
+    "buffer_load_format_xyz",
+    "buffer_load_format_xyzw",
+    "buffer_store_format_x",
+    "buffer_store_format_xy",
+    "buffer_store_format_xyz",
+    "buffer_store_format_xyzw",
     "ds_read_b32",
     "ds_write_b32",
     "ds_read2_b32",
@@ -3287,6 +3456,7 @@ pub const LANE_LOOPED: &[&str] = &[
     "v_sqrt_f32_e32",
     "v_rsq_f32_e32",
     "v_floor_f32_e32",
+    "v_ceil_f32_e32",
     "v_fract_f32_e32",
     "v_trunc_f32_e32",
     "v_rndne_f32_e32",
@@ -3334,8 +3504,8 @@ pub const LANE_LOOPED: &[&str] = &[
 ];
 
 /// Whether `instruction` is one of [`LANE_LOOPED`] and on the local share rather than the global:
-/// in its plain encoding, or in an SDWA form whose translation is the same one pass - an integer, a
-/// float or a one-source float form, not a compare, a carry or a half.
+/// in its plain encoding, or in an SDWA form, which reads and writes only its own lane and so is
+/// one pass over a lane (D979) - unless it is a compare or writes a carry, which build a lane mask.
 pub fn lane_looped<M: Model + ?Sized>(model: &mut M, instruction: &Instruction) -> bool {
     let Ok(name) = resolve(model, instruction) else {
         return false;
@@ -3347,15 +3517,81 @@ pub fn lane_looped<M: Model + ?Sized>(model: &mut M, instruction: &Instruction) 
         return false;
     }
     if sdwa_word(model.encodings(), instruction).is_some() {
-        return !name.starts_with("v_cmp")
-            && !SDWA_HALF.contains(&name)
-            && !SDWA_CARRY.contains(&name)
-            && (SDWA_INTEGER.contains(&name)
-                || sdwa_float_long_form(name).is_some()
-                || SDWA_FLOAT_UNARY.contains(&name)
-                || LANE_LOOPED.contains(&name));
+        let family = family_of(model.encodings(), instruction);
+        return sdwa::refusal(&family, name).is_none() && !writes_a_carry(name);
     }
     LANE_LOOPED.contains(&name)
+}
+
+/// The name of `instruction`'s encoding family, empty where it has none.
+fn family_of(encodings: &EncodingTable, instruction: &Instruction) -> String {
+    instruction
+        .encoding
+        .and_then(|index| encodings.encodings().get(usize::from(index)))
+        .map_or_else(String::new, |family| family.name.clone())
+}
+
+/// Whether a short-form vector instruction writes a carry or borrow into a lane mask (the `_co_`
+/// arithmetic), besides its vector result.
+fn writes_a_carry(name: &str) -> bool {
+    name.contains("_co_")
+}
+
+/// How an instruction takes part in a run of lane work fused into one loop over the lanes (D956).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InRun {
+    /// It emits nothing, and a run goes on past it.
+    Nothing,
+    /// One of [`LANE_LOOPED`], which joins a run: whether it reads memory or the local share, and
+    /// whether it stores to them or updates them.
+    Lanes {
+        /// It loads, samples or gathers.
+        reads: bool,
+        /// It stores, or runs an atomic.
+        writes: bool,
+    },
+    /// Anything else, which ends a run before it.
+    Alone,
+}
+
+/// The instructions [`instruction`] emits nothing for, which a fused run goes on past.
+const EMITS_NOTHING: &[&str] = &[
+    "s_waitcnt",
+    "s_waitcnt_vscnt",
+    "s_waitcnt_depctr",
+    "s_clause",
+    "s_nop",
+    "v_nop",
+    "s_inst_prefetch",
+    "s_setprio",
+];
+
+/// How `instruction` takes part in a fused run of lane work ([`InRun`]).
+pub fn in_run<M: Model + ?Sized>(model: &mut M, instruction: &Instruction) -> InRun {
+    let Ok(name) = resolve(model, instruction) else {
+        return InRun::Alone;
+    };
+    if EMITS_NOTHING.contains(&name.as_str()) {
+        return InRun::Nothing;
+    }
+    if !lane_looped(model, instruction) {
+        return InRun::Alone;
+    }
+    let writes = name.contains("store")
+        || name.contains("atomic")
+        || ["ds_write", "ds_add", "ds_min", "ds_max"]
+            .iter()
+            .any(|update| name.starts_with(update));
+    let reads = [
+        "load",
+        "image_sample",
+        "image_gather",
+        "ds_read",
+        "_intersect_ray",
+    ]
+    .iter()
+    .any(|read| name.contains(read));
+    InRun::Lanes { reads, writes }
 }
 
 /// Translates one instruction into whichever model it is handed.
@@ -3366,6 +3602,7 @@ pub fn instruction<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
+    model.begin_instruction(instruction.offset);
     let name = resolve(model, instruction)?;
     // A rewrite of a table descriptor's type alone keeps the image it names (D895).
     if model.rewrites_only_an_image_type(instruction.offset) {
@@ -3388,38 +3625,24 @@ pub fn instruction<M: Model + ?Sized>(
     }
     let name = name.as_str();
 
-    // A DPP16 form: the instruction with its first source read from another lane of its row.
-    // Admitted only as `dpp_translated` describes, before translation began.
-    if let Some(word) = dpp_word(model.encodings(), instruction) {
-        return dpp_form(model, instruction, (name, word));
+    // A DPP16 or DPP8 form: the instruction with its first source read from another lane of its
+    // row or group of eight. Admitted only as `dpp_translated` describes, before translation began.
+    if let Some((marker, form)) = dpp_word(model.encodings(), instruction) {
+        return dpp_form(model, instruction, (name, marker, form));
     }
 
     // An SDWA form: the same operation over selected parts of its sources, placed into part of
-    // its destination. Admitted only for `SDWA_INTEGER` and `SDWA_FLOAT`, before translation began.
+    // its destination (D979). A compare writes a lane mask rather than a register, so takes its
+    // own path; every one- and two-source instruction takes the one shared path.
     if let Some(word) = sdwa_word(model.encodings(), instruction) {
-        if SDWA_HALF.contains(&name) {
-            return sdwa_half(model, instruction, name, word);
-        }
         if name.starts_with("v_cmp_") && name.ends_with("_f16_e32") {
             return half_compare(model, instruction, name, Some(word));
-        }
-        if let Some(long) = sdwa_float_long_form(name) {
-            return sdwa_float(model, instruction, long, word);
-        }
-        if SDWA_FLOAT_UNARY.contains(&name) {
-            return sdwa_float_unary(model, instruction, name, word);
         }
         if sdwa_compare_admitted(name) {
             return sdwa_compare(model, instruction, name, word);
         }
-        if SDWA_CARRY.contains(&name) {
-            return sdwa_carry(model, instruction, name, word);
-        }
-        if !SDWA_INTEGER.contains(&name) && plain_sdwa_one_source(word) {
-            let plain = plain_short_form(model, instruction, word)?;
-            return self::instruction(model, &plain);
-        }
-        return sdwa_integer(model, instruction, name, word);
+        let family = family_of(model.encodings(), instruction);
+        return sdwa::sdwa_form(model, instruction, (&family, name), word);
     }
 
     match name {
@@ -3511,6 +3734,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // The complement of a mask: `s_not_b64 exec, exec` enters the other side of a branch.
         "s_not_b64" => scalar_not_64(model, instruction),
         "s_not_b32" => scalar_not_32(model, instruction),
+        "s_bitreplicate_b64_b32" => bit_replicate(model, instruction),
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" | "s_bitcmp0_b32" => {
@@ -3534,7 +3758,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         | "s_xor_b32" | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32"
         | "s_lshr_b32" | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
         | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" | "s_min_i32" | "s_max_i32"
-        | "s_min_u32" | "s_max_u32" | "s_sub_u32" | "s_nor_b32" => {
+        | "s_min_u32" | "s_max_u32" | "s_sub_u32" | "s_nor_b32" | "s_nand_b32" | "s_subb_u32" => {
             scalar_integer(model, instruction, name)
         }
 
@@ -3549,6 +3773,9 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_movk_i32" | "s_cmpk_eq_i32" | "s_cmpk_lg_i32" | "s_cmpk_gt_i32" | "s_cmpk_ge_i32"
         | "s_cmpk_lt_i32" | "s_cmpk_le_i32" | "s_addk_i32" | "s_mulk_i32" => {
             scalar_immediate(model, instruction, name)
+        }
+        "s_setreg_b32" | "s_setreg_imm32_b32" => {
+            crate::scratch::set_flat_scratch(model, instruction)
         }
 
         // The scalar compares, which write the condition code the `scc` branches read and have no
@@ -3595,14 +3822,18 @@ fn vector_instruction<M: Model + ?Sized>(
             compare(model, instruction, name)
         }
 
+        // A 64-bit equality, of two register pairs.
+        "v_cmp_eq_u64_e64" | "v_cmp_ne_u64_e64" => compare_long_64(model, instruction, name),
         // The long-form compare, into a register pair or a named mask.
         _ if name.ends_with("_e64") && compare_op(name).is_some() => {
             compare_long(model, instruction, name)
         }
-        "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_lt_f32_e32"
-        | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_f32_e32" | "v_cmpx_eq_i32_e32"
-        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" | "v_cmpx_lt_u32_e32"
-        | "v_cmpx_eq_u32_e32" | "v_cmpx_ne_u32_e32" => compare_into_exec(model, instruction, name),
+        "v_cmpx_le_i16_e32" | "v_cmpx_lt_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32"
+        | "v_cmpx_lt_f32_e32" | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_f32_e32"
+        | "v_cmpx_eq_i32_e32" | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32"
+        | "v_cmpx_lt_u32_e32" | "v_cmpx_eq_u32_e32" | "v_cmpx_ne_u32_e32" => {
+            compare_into_exec(model, instruction, name)
+        }
         // The rest of the family, its ordering read off its name as a compare into `vcc`'s is.
         _ if name.starts_with("v_cmpx_")
             && name.ends_with("_e32")
@@ -3623,6 +3854,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_bfi_b32" => bitfield_insert(model, instruction),
         _ if LONG_FORMS.contains(&name) => integer_long_form(model, instruction, name),
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
+        "v_med3_u32" => unsigned_median_of_three(model, instruction),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
         "v_readfirstlane_b32" => read_first_lane(model, instruction),
@@ -3634,7 +3866,9 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_pack_b32_f16" => pack_half_words(model, instruction),
         "v_pk_mad_u16" => packed_multiply_add(model, instruction),
         "v_pk_lshlrev_b16" => packed_shift_left(model, instruction),
-        "v_pk_sub_u16" | "v_pk_add_u16" => packed_add_or_subtract(model, instruction, name),
+        "v_pk_sub_u16" | "v_pk_add_u16" | "v_pk_sub_i16" | "v_pk_add_i16" => {
+            packed_add_or_subtract(model, instruction, name)
+        }
         name if is_sixteen_bit(name) => sixteen_bit(model, instruction, name),
         "v_min3_i16" => half_minimum_of_three(model, instruction),
 
@@ -3654,6 +3888,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // Integer shifts in the long form: a shift-then-add, and a 64-bit shift of a register pair.
         "v_lshl_add_u32" | "v_add3_u32" | "v_add_lshl_u32" => shift_add(model, instruction, name),
         "v_lshrrev_b64" => shift_right_64(model, instruction),
+        "v_lshlrev_b64" => shift_left_64(model, instruction),
         "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32" => {
             carry_arithmetic(model, instruction, name)
         }
@@ -3703,7 +3938,9 @@ fn vector_instruction<M: Model + ?Sized>(
         // cos, base-2 exp and base-2 log.
         "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
         | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32"
-        | "v_fract_f32_e32" | "v_trunc_f32_e32" => float_unary(model, instruction, name),
+        | "v_ceil_f32_e32" | "v_fract_f32_e32" | "v_trunc_f32_e32" => {
+            float_unary(model, instruction, name)
+        }
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
         "v_not_b32_e32" | "v_not_b32_e64" => bitwise_not(model, instruction, name),
         "v_ffbh_u32_e32" => leading_zeros(model, instruction),
@@ -3731,6 +3968,19 @@ fn memory_or_dropped_store<M: Model + ?Sized>(
     if crate::scratch::access(model, instruction, name)? {
         return Ok(());
     }
+    // A device-addressed dispatch reaches what no bound buffer serves by device address (D964).
+    if device::access(model, instruction, name)? {
+        return Ok(());
+    }
+    // A lane's own word of the local share, at a place its lane decides; one naming the global
+    // share is refused with the other global-share accesses.
+    if matches!(name, "ds_write_addtid_b32" | "ds_read_addtid_b32")
+        && instruction.word & DS_GDS == 0
+    {
+        local_share_addtid(model, instruction, name)?;
+        model.after_local_access();
+        return Ok(());
+    }
     memory_instruction(model, instruction, name)
 }
 
@@ -3744,8 +3994,12 @@ fn memory_instruction<M: Model + ?Sized>(
     // module's window so far; any other access to guest memory is refused there rather than left
     // to fold into it.
     // An image descriptor a dispatch loads from its table names the image the host binds from that
-    // table, so the load reads no memory here; its registers are then only an image's name.
+    // table, by the load reaching the image instruction. Where the tracer bound the table's words
+    // as a buffer, the load reads them through it too, so the registers hold the guest's words
+    // whatever the program reads them as, on every path (D970). A load with no buffer reads no
+    // memory here; its registers are then only an image's name.
     if matches!(name, "s_load_dwordx8" | "s_load_dwordx16")
+        && model.draw_buffer_slot(instruction).is_none()
         && let Some(Operand::Scalar(first)) = instruction.operands.first()
         && model.load_descriptor_opaquely(u32::from(*first), access_words(name))
     {
@@ -3800,10 +4054,9 @@ fn memory_instruction<M: Model + ?Sized>(
         | "global_load_ubyte"
         | "global_load_sbyte"
         | "global_load_ushort"
-        | "global_load_sshort"
-        | "global_store_dword"
-        | "global_store_dwordx2"
-        | "global_store_dwordx4" => memory(model, instruction, name),
+        | "global_load_sshort" => memory(model, instruction, name),
+        // The global stores, words and parts of one (D977), which `flat_memory` names.
+        name if name.starts_with("global_store_") => memory(model, instruction, name),
 
         // Untyped buffer access at any width: `buffer_memory` reads the width from the name and
         // refuses one it does not know. `tbuffer_` does not start with `buffer_`, so the families
@@ -3912,7 +4165,7 @@ fn mask_bit_count<M: Model + ?Sized>(
         };
 
         // One invocation per lane (D760): the bits below this lane, at run time.
-        let below = match model.lane_index() {
+        let below = match model.lane_number(lane) {
             Some(index) => lanes_below(model, index, high_half),
             None => model.constant(below),
         };
@@ -4045,6 +4298,8 @@ fn unary_float_extended(name: &str) -> Option<(u32, bool)> {
         "v_floor_f32_e32" | "v_fract_f32_e32" => (GLSL_FLOOR, false),
         // Round toward zero (`V_TRUNC_F32`).
         "v_trunc_f32_e32" => (GLSL_TRUNC, false),
+        // Round toward positive infinity (`V_CEIL_F32`).
+        "v_ceil_f32_e32" => (GLSL_CEIL, false),
         _ => return None,
     })
 }
@@ -4057,6 +4312,9 @@ const GLSL_ROUND_EVEN: u32 = 2;
 
 /// GLSL.std.450 instruction number for `Floor`: the largest integer not above the operand.
 const GLSL_FLOOR: u32 = 8;
+
+/// GLSL.std.450 instruction number for `Ceil`: the smallest integer not below the operand.
+const GLSL_CEIL: u32 = 9;
 
 /// `v_bfrev_b32 d, s`: `s`'s bits reversed, per lane (`V_BFREV_B32`).
 fn bit_reverse<M: Model + ?Sized>(
@@ -4099,14 +4357,54 @@ fn reciprocal<M: Model + ?Sized>(
             detail: "v_rcp_f32 destination is not a vector register",
         });
     };
-    let one = model.constant(ONE_F32);
     for lane in running_lanes(model) {
         let value = model.read_source(instruction, source, lane)?;
-        let quotient = model.f32_binary(op::FDIV, one, value);
+        let quotient = reciprocal_f32(model, value);
         model.write_vector_lane(u32::from(*register), lane, quotient);
     }
     model.count();
     Ok(())
+}
+
+/// `1 / value` over every float, for `v_rcp_f32`'s forms.
+///
+/// SPIR-V's `OpFDiv` is only accurate for divisors between 2^-126 and 2^126 (the Vulkan
+/// specification's precision table); outside that range a driver may answer anything, and the two
+/// wavefront models were seen to get different answers for one subnormal divisor. A divisor
+/// outside the range is scaled into it by 2^64 or 2^-64, which is exact, and the quotient scaled
+/// back. A divisor that is zero once scaled - zero, or a subnormal the float mode flushes - gives
+/// an infinity of its sign, and an infinite one a zero of its sign, as the hardware's reciprocal.
+pub(crate) fn reciprocal_f32<M: Model + ?Sized>(model: &mut M, value: Id) -> Id {
+    let magnitude_mask = model.constant(0x7fff_ffff);
+    let sign_mask = model.constant(0x8000_0000);
+    let magnitude = model.binary(op::BITWISE_AND, value, magnitude_mask);
+    let sign = model.binary(op::BITWISE_AND, value, sign_mask);
+    // Subnormal: a magnitude of 1 to 0x007f_ffff. Large: above 2^126 and finite. Each is one
+    // unsigned compare of the magnitude less the range's start.
+    let one_bit = model.constant(1);
+    let past_zero = model.binary(op::ISUB, magnitude, one_bit);
+    let subnormal_span = model.constant(0x007f_ffff);
+    let subnormal = model.compare(op::ULESS_THAN, past_zero, subnormal_span);
+    let large_start = model.constant(0x7e80_0001);
+    let past_large = model.binary(op::ISUB, magnitude, large_start);
+    let large_span = model.constant(0x7f80_0000 - 0x7e80_0001);
+    let large = model.compare(op::ULESS_THAN, past_large, large_span);
+    let one = model.constant(ONE_F32);
+    let up = model.constant(0x5f80_0000);
+    let down = model.constant(0x1f80_0000);
+    let scale = model.select(large, down, one);
+    let scale = model.select(subnormal, up, scale);
+    let scaled = model.f32_binary_uncontracted(op::FMUL, value, scale);
+    let quotient = model.f32_binary_uncontracted(op::FDIV, one, scaled);
+    let quotient = model.f32_binary_uncontracted(op::FMUL, quotient, scale);
+    let infinity = model.constant(0x7f80_0000);
+    let zero = model.constant(0);
+    let scaled_magnitude = model.binary(op::BITWISE_AND, scaled, magnitude_mask);
+    let zero_divisor = model.compare(op::IEQUAL, scaled_magnitude, zero);
+    let infinite_divisor = model.compare(op::IEQUAL, magnitude, infinity);
+    let signed_infinity = model.binary(op::BITWISE_OR, sign, infinity);
+    let quotient = model.select(infinite_divisor, sign, quotient);
+    model.select(zero_divisor, signed_infinity, quotient)
 }
 
 /// `v_not_b32 d, s`: `~s`, per lane (`V_NOT_B32`, AMD's published RDNA 2 instruction set, VOP1), in
@@ -4301,17 +4599,37 @@ fn permute_across_rows<M: Model + ?Sized>(
     let high = model.read_source(instruction, select_high, 0)?;
     let nibble = model.constant(0xf);
     for lane in running_lanes(model) {
-        let within = lane % 16;
-        let (word, shift) = if within < 8 {
-            (low, within * 4)
+        let (word, shift, row) = if let Some(index) = model.lane_number(lane) {
+            // An invocation's lane known at run time (D760, D973): the same fields of it.
+            let (fifteen, seven, eight, four) = (
+                model.constant(15),
+                model.constant(7),
+                model.constant(8),
+                model.constant(4),
+            );
+            let within = model.binary(op::BITWISE_AND, index, fifteen);
+            let upper = model.compare(op::UGREATER_THAN_EQUAL, within, eight);
+            let word = model.select(upper, high, low);
+            let place = model.binary(op::BITWISE_AND, within, seven);
+            let shift = model.binary(op::IMUL, place, four);
+            // The other row of sixteen in this half: this lane's with bit four flipped, less its
+            // place in the row.
+            let sixteen = model.constant(16);
+            let flipped = model.binary(op::BITWISE_XOR, index, sixteen);
+            let row = model.binary(op::ISUB, flipped, within);
+            (word, shift, row)
         } else {
-            (high, (within - 8) * 4)
+            let within = lane % 16;
+            let (word, shift) = if within < 8 {
+                (low, within * 4)
+            } else {
+                (high, (within - 8) * 4)
+            };
+            let other_row = (lane & !31) + (((lane >> 4) & 1) ^ 1) * 16;
+            (word, model.constant(shift), model.constant(other_row))
         };
-        let shift = model.constant(shift);
         let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
         let chosen = model.binary(op::BITWISE_AND, shifted, nibble);
-        let other_row = (lane & !31) + (((lane >> 4) & 1) ^ 1) * 16;
-        let row = model.constant(other_row);
         let from = model.add(row, chosen);
         let value = model.read_vector_at(source, from).ok_or_else(|| {
             refuse("a permutation across rows in a model that holds one lane alone")
@@ -4400,6 +4718,25 @@ fn scalar_add_with_carry<M: Model + ?Sized>(
     let result = model.add(sum, carry_in);
     let first = model.compare(op::ULESS_THAN, sum, left);
     let second = model.compare(op::ULESS_THAN, result, sum);
+    (result, Some(model.either(first, second)))
+}
+
+/// `S_SUBB_U32`: `left` less `right` less the condition code's borrow in, and the borrow out of
+/// either subtraction, which becomes the condition code (AMD's published RDNA 2 instruction set,
+/// SOP2): the mirror of [`scalar_add_with_carry`].
+fn scalar_subtract_with_borrow<M: Model + ?Sized>(
+    model: &mut M,
+    left: Id,
+    right: Id,
+) -> (Id, Option<Id>) {
+    let borrow_in = crate::control::read_condition_code(model, true);
+    let one = model.constant(1);
+    let zero = model.constant(0);
+    let borrow_in = model.select(borrow_in, one, zero);
+    let difference = model.binary(op::ISUB, left, right);
+    let result = model.binary(op::ISUB, difference, borrow_in);
+    let first = model.compare(op::ULESS_THAN, left, right);
+    let second = model.compare(op::ULESS_THAN, difference, borrow_in);
     (result, Some(model.either(first, second)))
 }
 
@@ -5641,6 +5978,28 @@ fn write_mask_high<M: Model + ?Sized>(
     model.write_lane_mask(mask, low, value)
 }
 
+/// Writes a 32-bit scalar result to `destination`: a scalar register, or a lane mask's half named as
+/// one - `vcc_lo` and `vcc_hi` are scalar registers 106 and 107, `exec_lo` and `exec_hi` 126 and 127
+/// (AMD's RDNA2 instruction set, section 3.2) - written as that half with the other kept.
+fn write_scalar_or_mask_half<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    destination: &Operand,
+    value: Id,
+) -> Result<(), TranslateError> {
+    if let Some(mask) = mask_destination(destination) {
+        return write_mask_low(model, mask, value);
+    }
+    if let Operand::Named(name) = destination
+        && let Some(mask) = lane_mask_high_name(name)
+    {
+        return write_mask_high(model, mask, value);
+    }
+    let register = scalar_destination(instruction, destination)?;
+    model.write_scalar(register, value);
+    Ok(())
+}
+
 /// The lane mask an operand names, if it names one.
 fn mask_destination(operand: &Operand) -> Option<&'static str> {
     match operand {
@@ -5742,10 +6101,7 @@ fn combine<M: Model + ?Sized>(
         ("v_cvt_u32_f32_e64", [value]) => Ok(float_to_unsigned_saturated(model, *value)),
         // The reciprocal ACO takes of a cube coordinate's major axis, `|ma|` through the long
         // form's absolute value: an exact division, as the short form's.
-        ("v_rcp_f32_e64", [value]) => {
-            let one = model.constant(ONE_F32);
-            Ok(model.f32_binary(op::FDIV, one, *value))
-        }
+        ("v_rcp_f32_e64", [value]) => Ok(reciprocal_f32(model, *value)),
         // `x - floor(x)`, as the short form computes it.
         ("v_fract_f32_e64", [value]) => {
             let floor = model.f32_ext_unary(GLSL_FLOOR, *value);
@@ -5866,7 +6222,9 @@ fn scalar_integer<M: Model + ?Sized>(
             (result, Some(model.is_not_zero(result)))
         }
         // `S_ANDN2_B32`, `S_ORN2_B32` and `S_NOR_B32`, and the condition code.
-        "s_andn2_b32" | "s_orn2_b32" | "s_nor_b32" => negated_logic(model, name, left, right),
+        "s_andn2_b32" | "s_orn2_b32" | "s_nor_b32" | "s_nand_b32" => {
+            negated_logic(model, name, left, right)
+        }
         // `S_LSHL_B32`: `D = S0 << S1[4:0]`, the condition code whether the result is non-zero.
         "s_lshl_b32" => {
             let five = model.constant(31);
@@ -5900,6 +6258,7 @@ fn scalar_integer<M: Model + ?Sized>(
             (result, Some(model.compare(op::ULESS_THAN, result, left)))
         }
         "s_addc_u32" => scalar_add_with_carry(model, left, right),
+        "s_subb_u32" => scalar_subtract_with_borrow(model, left, right),
         "s_lshl1_add_u32" => shift_and_add(model, (left, 1), right),
         "s_lshl2_add_u32" => shift_and_add(model, (left, 2), right),
         "s_lshl3_add_u32" => shift_and_add(model, (left, 3), right),
@@ -5957,8 +6316,8 @@ fn difference_or_minimum<M: Model + ?Sized>(
     (model.select(first, left, right), Some(first))
 }
 
-/// `s_andn2_b32`, `s_orn2_b32` and `s_nor_b32`: `S0 & ~S1`, `S0 | ~S1` and `~(S0 | S1)`, with the
-/// condition code whether the result is non-zero.
+/// `s_andn2_b32`, `s_orn2_b32`, `s_nor_b32` and `s_nand_b32`: `S0 & ~S1`, `S0 | ~S1`,
+/// `~(S0 | S1)` and `~(S0 & S1)`, with the condition code whether the result is non-zero.
 fn negated_logic<M: Model + ?Sized>(
     model: &mut M,
     name: &str,
@@ -5969,6 +6328,10 @@ fn negated_logic<M: Model + ?Sized>(
         // `S_NOR_B32`: `D = ~(S0 | S1)` (AMD's published RDNA 2 instruction set, SOP2).
         let either = model.binary(op::BITWISE_OR, left, right);
         model.not(either)
+    } else if name == "s_nand_b32" {
+        // `S_NAND_B32`: `D = ~(S0 & S1)` (AMD's published RDNA 2 instruction set, SOP2).
+        let both = model.binary(op::BITWISE_AND, left, right);
+        model.not(both)
     } else {
         let inverted = model.not(right);
         let spirv = if name == "s_andn2_b32" {
@@ -6284,6 +6647,7 @@ fn compare_into_exec<M: Model + ?Sized>(
         // Not less than: true for a NaN, as `v_cmp_nlt_f32` is.
         "v_cmpx_nlt_f32_e32" => (op::FUNORD_GREATER_THAN_EQUAL, 0),
         "v_cmpx_le_i16_e32" => (op::SLESS_THAN_EQUAL, 1),
+        "v_cmpx_lt_i16_e32" => (op::SLESS_THAN, 1),
         "v_cmpx_eq_i32_e32" => (op::IEQUAL, 2),
         "v_cmpx_le_i32_e32" => (op::SLESS_THAN_EQUAL, 2),
         "v_cmpx_gt_u32_e32" => (op::UGREATER_THAN, 2),
@@ -7014,13 +7378,12 @@ fn scalar_bit_count_64<M: Model + ?Sized>(
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let (destination, source) = two_operands(instruction)?;
-    let register = scalar_destination(instruction, destination)?;
     let (low, high) = sixty_four_bit_source(model, instruction, source)?;
     let low = model.bit_count(low);
     let high = model.bit_count(high);
     let count = model.add(low, high);
     let non_zero = model.is_not_zero(count);
-    model.write_scalar(register, count);
+    write_scalar_or_mask_half(model, instruction, destination, count)?;
     model.set_condition_code(non_zero);
     model.count();
     Ok(())
@@ -7233,6 +7596,56 @@ fn local_share<M: Model + ?Sized>(
 
 /// `ds_read_b32`.
 const DS_READ: &str = "ds_read_b32";
+
+/// `ds_write_addtid_b32 data offset:n` and `ds_read_addtid_b32 d offset:n`: a lane's own word of the
+/// local share, at the offset plus `M0[15:0]` plus four bytes for each lane below it in the wave
+/// (AMD's published RDNA 2 instruction set, DS). The write stores the data register; the read loads
+/// the destination. The address names no register.
+fn local_share_addtid<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [data @ Operand::Vector(register), Operand::Immediate(offset)] =
+        instruction.operands.as_slice()
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a lane-addressed local-share access is not a register and an offset",
+        });
+    };
+    let offset = u32::try_from(*offset).map_err(|_| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "a negative local-data-share offset",
+    })?;
+    let register = u32::from(*register);
+    let reading = name == "ds_read_addtid_b32";
+    let m0 = model.read_m0();
+    let low_half = model.constant(0xffff);
+    let base = model.binary(op::BITWISE_AND, m0, low_half);
+    let offset = model.constant(offset);
+    let base = model.add(base, offset);
+    let four = model.constant(4);
+    for lane in running_lanes(model) {
+        // The lane in the wave: the invocation's own where each is one lane (D760).
+        let id = match model.lane_number(lane) {
+            Some(id) => id,
+            None => model.constant(lane),
+        };
+        let step = model.binary(op::IMUL, id, four);
+        let byte_address = model.add(base, step);
+        let index = model.local_word_index(byte_address);
+        if reading {
+            let value = model.read_local(index)?;
+            model.write_vector_lane(register, lane, value);
+        } else {
+            let value = model.read_source(instruction, data, lane)?;
+            model.write_local(index, value, lane)?;
+        }
+    }
+    model.count();
+    Ok(())
+}
 
 /// `ds_read_b96 d, address offset`: `words` consecutive words from the address plus the byte
 /// offset into `d` and the registers after it (AMD's published RDNA instruction set,
@@ -7617,7 +8030,7 @@ fn local_share_merge<M: Model + ?Sized>(
         let within = model.binary(op::BITWISE_AND, byte_address, three);
         let shift = model.binary(op::IMUL, within, eight);
         // One invocation per lane (D760): a write merges indivisibly, keeping other lanes' bytes.
-        if name != "ds_read_u8" && model.lane_index().is_some() {
+        if name != "ds_read_u8" && model.lane_number(lane).is_some() {
             let data = model.read_source(instruction, destination, lane)?;
             let (keep, set) = if name == "ds_write_b8" {
                 let data = model.binary(op::BITWISE_AND, data, byte);
@@ -7759,12 +8172,22 @@ fn scalar_buffer_load<M: Model + ?Sized>(
             None => past,
         };
         let outside = model.either(past, refused);
-        // Through a bound draw buffer the word is the offset's, from the buffer's start (D733).
-        let loaded = if let Some(slot) = slot {
+        // Through a table selected at run time, the word is at the guest address the record's
+        // descriptor names, in the buffer of the table's pages (D966).
+        let paged = slot.and_then(|slot| model.table_pages(slot));
+        let loaded = if let Some(pages) = paged {
+            let address = model.add(resource.base, at);
+            let place = (pages, resource.base, resource.high);
+            read_table_word(model, place, address, (outside, None))?
+        } else if let Some(slot) = slot {
+            // Through a bound draw buffer the word is the offset's, from the buffer's start (D733).
             let at = scalar_sampled_word(model, sampled, at, outside);
             let two = model.constant(2);
             let index = model.binary(op::SHIFT_RIGHT_LOGICAL, at, two);
             model.read_draw_buffer(slot, index)?
+        } else if model.device_addressed() {
+            // Unbound, a device-addressed dispatch reads the descriptor's guest bytes (D964).
+            device::read_from_base(model, (resource.base, resource.high), at, outside)?
         } else {
             let address = model.add(resource.base, at);
             let index = model.word_index(address);
@@ -7910,6 +8333,23 @@ fn buffer_reach<M: Model + ?Sized>(
             offset: instruction.offset,
             detail: "a typed store through a bound buffer, which is not written back (D746)",
         });
+    }
+    // A record of a table selected at run time is read where its own descriptor says, through the
+    // buffer of the table's pages (D966), which only loads read: nothing is written back from it.
+    if model.table_pages(slot).is_some() {
+        if !loading {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a store through a descriptor selected from a table at run time, whose records are bound only to be read (D966)",
+            });
+        }
+        if !model.exact_memory() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a descriptor selected from a table at run time in a module that cannot check an access against the records bound (D966)",
+            });
+        }
+        return Ok((Some(slot), resource, None));
     }
     if model.sampled_buffer(slot) {
         let sampled = sampled_place(model, instruction, slot, (resource.base, resource.high))?;
@@ -8088,59 +8528,324 @@ fn store_reached<M: Model + ?Sized>(
     Ok(())
 }
 
-/// Reads the word at `address`: through the window, or at `address / 4` of the draw buffer at
-/// `slot`, the low two bits dropped as the window's word index drops them.
-fn read_reached<M: Model + ?Sized>(
-    model: &mut M,
-    slot: Option<u32>,
-    address: Id,
-) -> Result<Id, TranslateError> {
-    let Some(slot) = slot else {
-        return Ok(read_guarded(model, address));
-    };
-    let two = model.constant(2);
-    let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
-    model.read_draw_buffer(slot, index)
+/// The most rounds a part store's compare-and-swap takes before it gives up (D977). A round fails
+/// only where another invocation changed the word between this one's read and its swap, so each
+/// round some contender lands; a word still contended after this many is a device that is not
+/// progressing, and the store is reported as an escape rather than spun on.
+pub(crate) const MERGE_ROUNDS: u32 = 1024;
+
+/// `OpLoopMerge`'s `DontUnroll`.
+const DONT_UNROLL: u32 = 0x2;
+
+/// Replaces the bits of the guest word at `pointer` that `keep` clears with `set`'s, as one
+/// indivisible step (D977): the word is read, merged and swapped in where it still holds what was
+/// read, and read again and retried where another invocation changed it meanwhile, up to
+/// [`MERGE_ROUNDS`]. Answers whether it gave up. The caller is inside the block that runs only where
+/// the store lands.
+fn merge_bits<M: Model + ?Sized>(model: &mut M, pointer: Id, (keep, set): (Id, Id)) -> Id {
+    let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
+    let (device, relaxed, zero, one, rounds) = (
+        model.constant(orbistoun_spirv::scope::DEVICE),
+        model.constant(0),
+        model.constant(0),
+        model.constant(1),
+        model.constant(MERGE_ROUNDS),
+    );
+    let b = model.builder();
+    let [initial, entry, header, body, next, merge] = [(); 6].map(|()| b.id());
+    let [expected, round, seen, after] = [(); 4].map(|()| b.id());
+    b.function(
+        op::LOAD,
+        &[
+            u32_type.0,
+            initial.0,
+            pointer.0,
+            orbistoun_spirv::MEMORY_ALIGNED | orbistoun_spirv::MEMORY_VOLATILE,
+            4,
+        ],
+    );
+    b.function(op::BRANCH, &[entry.0]);
+    b.function(op::LABEL, &[entry.0]);
+    b.function(op::BRANCH, &[header.0]);
+    b.function(op::LABEL, &[header.0]);
+    b.function(
+        op::PHI,
+        &[u32_type.0, expected.0, initial.0, entry.0, seen.0, next.0],
+    );
+    b.function(
+        op::PHI,
+        &[u32_type.0, round.0, zero.0, entry.0, after.0, next.0],
+    );
+    b.function(op::LOOP_MERGE, &[merge.0, next.0, DONT_UNROLL]);
+    b.function(op::BRANCH, &[body.0]);
+    b.function(op::LABEL, &[body.0]);
+    let kept = model.binary(op::BITWISE_AND, expected, keep);
+    let desired = model.binary(op::BITWISE_OR, kept, set);
+    let b = model.builder();
+    b.function(
+        op::ATOMIC_COMPARE_EXCHANGE,
+        &[
+            u32_type.0, seen.0, pointer.0, device.0, relaxed.0, relaxed.0, desired.0, expected.0,
+        ],
+    );
+    b.function(op::IADD, &[u32_type.0, after.0, round.0, one.0]);
+    let landed = model.compare(op::IEQUAL, seen, expected);
+    let spent = model.compare(op::UGREATER_THAN_EQUAL, after, rounds);
+    let stop = model.either(landed, spent);
+    let b = model.builder();
+    b.function(op::BRANCH, &[next.0]);
+    b.function(op::LABEL, &[next.0]);
+    b.function(op::BRANCH_CONDITIONAL, &[stop.0, merge.0, header.0]);
+    b.function(op::LABEL, &[merge.0]);
+    let gave_up = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, gave_up.0, landed.0]);
+    gave_up
 }
 
-/// A packed element's words from `base`: through the window, or from a draw buffer at the
-/// element's own byte, which need not be a word's first.
-fn read_element<M: Model + ?Sized>(
+/// What a store of `value`'s low `bits` bits at byte `address` does to the word holding that byte
+/// and to the next (D977): for each, the bits to keep and the bits to set; and whether it reaches
+/// the next word at all, as a half at a word's last byte does.
+pub(crate) fn sub_word_parts<M: Model + ?Sized>(
+    model: &mut M,
+    (address, value): (Id, Id),
+    bits: u32,
+) -> ([(Id, Id); 2], Id) {
+    let (three, eight, one, thirty_one) = (
+        model.constant(3),
+        model.constant(8),
+        model.constant(1),
+        model.constant(31),
+    );
+    let (field, all) = (model.constant((1u32 << bits) - 1), model.constant(u32::MAX));
+    let byte = model.binary(op::BITWISE_AND, address, three);
+    let shift = model.binary(op::IMUL, byte, eight);
+    let data = model.binary(op::BITWISE_AND, value, field);
+    // The next word's part is what shifts past bit 31: `x >> (32 - shift)`, as two shifts so a
+    // shift of zero moves nothing there.
+    let rest = model.binary(op::ISUB, thirty_one, shift);
+    let mut parts = [(all, all); 2];
+    for (part, low) in parts.iter_mut().zip([true, false]) {
+        let [mask, set] = [field, data].map(|bits| {
+            if low {
+                model.binary(op::SHIFT_LEFT_LOGICAL, bits, shift)
+            } else {
+                let halved = model.binary(op::SHIFT_RIGHT_LOGICAL, bits, one);
+                model.binary(op::SHIFT_RIGHT_LOGICAL, halved, rest)
+            }
+        });
+        *part = (model.binary(op::BITWISE_XOR, mask, all), set);
+    }
+    let spans = model.compare(op::INOT_EQUAL, parts[1].0, all);
+    (parts, spans)
+}
+
+/// Stores `value`'s low `bytes` bytes at `address` in `lane` unless `outside` (D977): through the
+/// window, or the draw buffer at `slot`, merged into the word holding the first byte and, where it
+/// reaches it, the next - each a part of a word other lanes may be storing the rest of.
+fn store_narrow<M: Model + ?Sized>(
     model: &mut M,
     slot: Option<u32>,
+    (address, outside): (Id, Id),
+    (value, bytes): (Id, u32),
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let (parts, spans) = sub_word_parts(model, (address, value), 8 * bytes);
+    let bool_type = model.bool_type();
+    let b = model.builder();
+    let landed = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, landed.0, outside.0]);
+    let aligned = model.constant(!3);
+    let first = model.binary(op::BITWISE_AND, address, aligned);
+    for (word, (keep, set)) in [0u32, 1].into_iter().zip(parts) {
+        let step = model.constant(word * 4);
+        let at = model.add(first, step);
+        let lands = if word == 0 {
+            landed
+        } else {
+            model.both(landed, spans)
+        };
+        match slot {
+            None => {
+                let inside = model.address_within_window(at);
+                let lands = model.both(lands, inside);
+                let index = model.word_index(at);
+                model.merge_memory(index, (keep, set), lands, lane);
+            }
+            Some(slot) => {
+                let two = model.constant(2);
+                let index = model.binary(op::SHIFT_RIGHT_LOGICAL, at, two);
+                merge_draw_buffer(model, slot, (index, (keep, set)), lands, lane)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What an untyped store writes at `address`: a word ([`store_reached`]), or the `narrow` bytes
+/// fewer than one, merged into their word ([`store_narrow`], D977).
+fn store_access<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<u32>,
+    reached: (Id, Id),
+    (value, narrow): (Id, Option<u32>),
+    lane: u32,
+) -> Result<(), TranslateError> {
+    match narrow {
+        Some(bytes) => store_narrow(model, slot, reached, (value, bytes), lane),
+        None => store_reached(model, slot, reached, value, lane),
+    }
+}
+
+/// [`Model::merge_memory`] on word `index` of the draw buffer at `slot` (D977): the word swapped in
+/// whole where `lane` runs, `landed` holds and the buffer holds it ([`merge_bits`]).
+fn merge_draw_buffer<M: Model + ?Sized>(
+    model: &mut M,
+    slot: u32,
+    (index, parts): (Id, (Id, Id)),
+    landed: Id,
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let (pointer, inside) = model.draw_buffer_word(slot, index)?;
+    let lands = model.both(landed, inside);
+    let merge = open_if_active(model, lane, Some(lands));
+    let gave_up = merge_bits(model, pointer, parts);
+    model.note_escape(gave_up, Some(lane));
+    close_if_active(model, merge);
+    Ok(())
+}
+
+/// Where a buffer access's words are read, past the window: a bound buffer, from the access's byte
+/// in it (D733), or the buffer of pages holding every record of a table selected at run time, at the
+/// guest address the selected record names (D966).
+#[derive(Clone, Copy)]
+enum Reach {
+    /// The draw buffer at the slot.
+    Bound(u32),
+    /// The buffer of pages at `pages`, read at addresses formed from the selected descriptor's base:
+    /// `from` its low half, `high` its bits 47:32.
+    Pages { pages: u32, from: Id, high: Id },
+}
+
+/// Where the access through the draw buffer `slot`, with the descriptor `resource` it read, reads
+/// its words: `None` through the window.
+fn reach_of<M: Model + ?Sized>(
+    model: &M,
+    slot: Option<u32>,
+    resource: &BufferResource,
+) -> Option<Reach> {
+    let slot = slot?;
+    Some(match model.table_pages(slot) {
+        Some(pages) => Reach::Pages {
+            pages,
+            from: resource.base,
+            high: resource.high,
+        },
+        None => Reach::Bound(slot),
+    })
+}
+
+/// The word at the guest `address` in the buffer of a table's pages (D966), placed by
+/// `(pages, from, high)`: its high half is `high`, carried where `address` wrapped below `from`,
+/// the base it was formed from. A word the buffer does not hold reads zero, and where the access's
+/// bounds admit it (not `outside`) it is an escape, for `lane` or the scalar unit.
+fn read_table_word<M: Model + ?Sized>(
+    model: &mut M,
+    (pages, from, high): (u32, Id, Id),
+    address: Id,
+    (outside, lane): (Id, Option<u32>),
+) -> Result<Id, TranslateError> {
+    let high = carried(model, (from, address), high);
+    let (value, unheld) = global_page_word(model, pages, (address, high))?;
+    if model.exact_memory() {
+        let bool_type = model.bool_type();
+        let b = model.builder();
+        let admitted = b.id();
+        b.function(op::LOGICAL_NOT, &[bool_type.0, admitted.0, outside.0]);
+        let escaped = model.both(admitted, unheld);
+        model.note_escape(escaped, lane);
+    }
+    Ok(value)
+}
+
+/// Reads the word at `address`: through the window, or at `address / 4` of the draw buffer at
+/// `slot`, the low two bits dropped as the window's word index drops them, or at the guest address
+/// in a table's pages (D966), checked against `outside` in `lane`.
+fn read_reached<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<Reach>,
+    address: Id,
+    checked: (Id, Option<u32>),
+) -> Result<Id, TranslateError> {
+    match slot {
+        None => Ok(read_guarded(model, address)),
+        Some(Reach::Bound(slot)) => {
+            let two = model.constant(2);
+            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+            model.read_draw_buffer(slot, index)
+        }
+        Some(Reach::Pages { pages, from, high }) => {
+            read_table_word(model, (pages, from, high), address, checked)
+        }
+    }
+}
+
+/// A packed element's words from `base`: through the window, or from a draw buffer or a table's
+/// pages at the element's own byte, which need not be a word's first.
+fn read_element<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<Reach>,
     base: Id,
-    words: u32,
+    (words, checked): (u32, (Id, Option<u32>)),
 ) -> Result<Vec<Id>, TranslateError> {
     let mut packed = Vec::with_capacity(words as usize);
     for word in 0..words {
         let step = model.constant(word * 4);
         let address = model.add(base, step);
         packed.push(match slot {
-            Some(slot) => read_draw_buffer_bytes(model, slot, address)?,
+            Some(reach) => read_draw_buffer_bytes(model, reach, address, checked)?,
             None => read_guarded(model, address),
         });
     }
     Ok(packed)
 }
 
-/// The four bytes of the draw buffer at `slot` from byte `address`, as a little-endian word: the
-/// word holding the first byte shifted down, with the next word's low bytes above it.
+/// The four bytes of the draw buffer or table's pages `reach` from byte `address`, as a
+/// little-endian word: the word holding the first byte shifted down, with the next word's low bytes
+/// above it.
 fn read_draw_buffer_bytes<M: Model + ?Sized>(
     model: &mut M,
-    slot: u32,
+    reach: Reach,
     address: Id,
+    checked: (Id, Option<u32>),
 ) -> Result<Id, TranslateError> {
-    let (two, three, one, eight, thirty_two) = (
+    let (two, three, one, four, eight, thirty_two) = (
         model.constant(2),
         model.constant(3),
         model.constant(1),
+        model.constant(4),
         model.constant(8),
         model.constant(32),
     );
-    let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
-    let low = model.read_draw_buffer(slot, index)?;
-    let next = model.add(index, one);
-    let high = model.read_draw_buffer(slot, next)?;
+    let (low, high) = match reach {
+        Reach::Bound(slot) => {
+            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+            let low = model.read_draw_buffer(slot, index)?;
+            let next = model.add(index, one);
+            (low, model.read_draw_buffer(slot, next)?)
+        }
+        Reach::Pages { pages, from, high } => {
+            let place = (pages, from, high);
+            let low = read_table_word(model, place, address, checked)?;
+            let next = model.add(address, four);
+            // An aligned word takes nothing of the next, which need not be held.
+            let (outside, lane) = checked;
+            let byte = model.binary(op::BITWISE_AND, address, three);
+            let zero = model.constant(0);
+            let aligned = model.compare(op::IEQUAL, byte, zero);
+            let unneeded = model.either(outside, aligned);
+            (low, read_table_word(model, place, next, (unneeded, lane))?)
+        }
+    };
     let byte = model.binary(op::BITWISE_AND, address, three);
     let shift = model.binary(op::IMUL, byte, eight);
     let down = model.binary(op::SHIFT_RIGHT_LOGICAL, low, shift);
@@ -8170,12 +8875,29 @@ fn buffer_out_of_bounds<M: Model + ?Sized>(
     index: Id,
     payload_bytes: u32,
 ) -> Id {
+    let payload = model.constant(payload_bytes);
+    buffer_out_of_bounds_placed(model, resource, flags, (offset, offset), index, payload)
+}
+
+/// [`buffer_out_of_bounds`] for a payload the module reads as it runs - a format load's element,
+/// whose format its descriptor names (D967) - and an access placed apart from its offset: mode 3
+/// checks `place + payload` against the records, where `place` is a swizzled access's byte (Mesa
+/// `src/amd/common/ac_descriptors.c:824-833`, `OOB_SELECT` 3 on GFX10: "if SWIZZLE_ENABLE:
+/// swizzle_address >= NUM_RECORDS") and its offset otherwise. Modes 0 and 1 check the offset and
+/// index as given.
+fn buffer_out_of_bounds_placed<M: Model + ?Sized>(
+    model: &mut M,
+    resource: &BufferResource,
+    flags: Id,
+    (offset, place): (Id, Id),
+    index: Id,
+    payload: Id,
+) -> Id {
     let zero = model.constant(0);
     let two = model.constant(2);
     // The selector is two bits wide.
     let three = model.constant(3);
     let twenty_eight = model.constant(28);
-    let payload = model.constant(payload_bytes);
 
     let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, flags, twenty_eight);
     let mode = model.binary(op::BITWISE_AND, shifted, three);
@@ -8183,7 +8905,7 @@ fn buffer_out_of_bounds<M: Model + ?Sized>(
     let index_past = model.compare(op::UGREATER_THAN_EQUAL, index, resource.records);
     let offset_past_stride = model.compare(op::UGREATER_THAN_EQUAL, offset, resource.stride);
     let no_records = model.compare(op::IEQUAL, resource.records, zero);
-    let reach = model.add(offset, payload);
+    let reach = model.add(place, payload);
     let reach_past = model.compare(op::UGREATER_THAN, reach, resource.records);
 
     let structured = model.either(index_past, offset_past_stride);
@@ -8408,6 +9130,7 @@ fn format_buffer_load<M: Model + ?Sized>(
     }
     let resource = read_buffer_resource(model, resource_base);
     let (slot, addressed, sampled) = buffer_reach(model, instruction, (true, false), resource)?;
+    let reach = reach_of(model, slot, &resource);
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
     let element_bytes = total_bits.div_ceil(8);
@@ -8437,7 +9160,7 @@ fn format_buffer_load<M: Model + ?Sized>(
         );
         let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, element_bytes);
         note_sampled_escape(model, sampled, (base, element_bytes), outside, Some(lane));
-        let fetched = read_element(model, slot, base, element_words)?;
+        let fetched = read_element(model, reach, base, (element_words, (outside, Some(lane))))?;
         let values = element_components(model, format, &fetched, outside);
         for (channel, &select) in selects.iter().take(channels as usize).enumerate() {
             let value = match select {
@@ -8616,28 +9339,106 @@ fn packed_component<M: Model + ?Sized>(
     width: u32,
     kind: orbistoun_shader::ComponentKind,
 ) -> Id {
+    let field = packed_integer_component(model, packed, bit, width, signed_kind(kind));
+    convert_field(model, field, FieldWidth::Fixed(width), kind)
+}
+
+/// Whether a component of `kind` is read sign-extended from its field.
+fn signed_kind(kind: orbistoun_shader::ComponentKind) -> bool {
+    use orbistoun_shader::ComponentKind;
+    matches!(
+        kind,
+        ComponentKind::Sint | ComponentKind::Snorm | ComponentKind::Sscaled
+    )
+}
+
+/// How wide a component's field is: known when the module is translated, or read from the
+/// descriptor as the module runs (D967), when it is under thirty-two bits for every kind but a
+/// whole-word one, whose field is the word.
+#[derive(Clone, Copy)]
+enum FieldWidth {
+    Fixed(u32),
+    Running(Id),
+}
+
+/// `2^bits - 1` for the width `bits` less `less`, for the normalised kinds' maxima.
+fn field_maximum<M: Model + ?Sized>(model: &mut M, width: FieldWidth, less: u32) -> Id {
+    match width {
+        FieldWidth::Fixed(width) => model.constant((1u32 << (width - less)) - 1),
+        FieldWidth::Running(width) => {
+            let (one, less) = (model.constant(1), model.constant(less));
+            let bits = model.binary(op::ISUB, width, less);
+            let thirty_one = model.constant(31);
+            let bits = model.binary(op::BITWISE_AND, bits, thirty_one);
+            let power = model.binary(op::SHIFT_LEFT_LOGICAL, one, bits);
+            model.binary(op::ISUB, power, one)
+        }
+    }
+}
+
+/// `GLSL.std.450` `Fma`'s instruction number: `a * b + c` rounded once.
+const GLSL_FMA: u32 = 50;
+
+/// A normalised component's field over its maximum, as float bits. A maximum compiled in is a
+/// constant the driver divides by exactly; one read as the module runs (D967) it divides by
+/// through a reciprocal, a unit in the last place off - 255 over 255 came back just under 1.0 - so
+/// the quotient is refined once by its remainder, fused (`q + (a - q * b) / b`), which rounds it
+/// correctly for the fields' integers.
+fn normalised<M: Model + ?Sized>(
+    model: &mut M,
+    (field, maximum): (Id, Id),
+    width: FieldWidth,
+) -> Id {
+    let quotient = model.f32_binary(op::FDIV, field, maximum);
+    if matches!(width, FieldWidth::Fixed(_)) {
+        return quotient;
+    }
+    let (u32_type, f32_type, set) = (model.u32_type(), model.f32_type(), model.glsl_set());
+    let (one, zero) = (model.constant(1.0f32.to_bits()), model.constant(0));
+    let reciprocal = model.f32_binary(op::FDIV, one, maximum);
+    let negated = model.f32_binary(op::FSUB, zero, quotient);
+    let [a, b, q, y, negated] =
+        [field, maximum, quotient, reciprocal, negated].map(|bits| model.as_float(bits));
+    let builder = model.builder();
+    let remainder = builder.ext_inst(f32_type, set, GLSL_FMA, &[negated, b, a]);
+    let refined = builder.ext_inst(f32_type, set, GLSL_FMA, &[remainder, y, q]);
+    let bits = builder.id();
+    builder.function(op::BITCAST, &[u32_type.0, bits.0, refined.0]);
+    bits
+}
+
+/// What the register holds for a component's `field` - zero-extended, or sign-extended for the
+/// signed kinds ([`signed_kind`]) - of `width` bits: the integer for the integer kinds, or a
+/// float's bits for the converting ones. One conversion for a format the module is translated for
+/// and one the descriptor names as it runs (D967).
+///
+/// The kinds handled are exactly those [`packed_buffer_memory`] admits, so the `unreachable!`
+/// guards a case that cannot arise.
+fn convert_field<M: Model + ?Sized>(
+    model: &mut M,
+    field: Id,
+    width: FieldWidth,
+    kind: orbistoun_shader::ComponentKind,
+) -> Id {
     use orbistoun_shader::ComponentKind;
     match kind {
-        ComponentKind::Uint => packed_integer_component(model, packed, bit, width, false),
-        ComponentKind::Sint => packed_integer_component(model, packed, bit, width, true),
+        ComponentKind::Uint | ComponentKind::Sint => field,
         // A UNORM component is its unsigned field over the field's maximum, in 0.0..=1.0. The
         // maximum is converted from the integer domain the same way the field is.
         ComponentKind::Unorm => {
-            let field = packed_integer_component(model, packed, bit, width, false);
             let field_f = model.unsigned_to_float_bits(field);
-            let maximum = model.constant((1u32 << width) - 1);
+            let maximum = field_maximum(model, width, 0);
             let maximum_f = model.unsigned_to_float_bits(maximum);
-            model.f32_binary(op::FDIV, field_f, maximum_f)
+            normalised(model, (field_f, maximum_f), width)
         }
         // A SNORM component is its signed field over 2^(width-1) - 1, in -1.0..=1.0. The
         // most-negative code lands just past -1.0 (-128/127 for a byte) and the reference pins it
         // at -1.0, so the low end is clamped by selecting between the two bit patterns.
         ComponentKind::Snorm => {
-            let field = packed_integer_component(model, packed, bit, width, true);
             let field_f = model.signed_to_float_bits(field);
-            let maximum = model.constant((1u32 << (width - 1)) - 1);
+            let maximum = field_maximum(model, width, 1);
             let maximum_f = model.unsigned_to_float_bits(maximum);
-            let normalized = model.f32_binary(op::FDIV, field_f, maximum_f);
+            let normalized = normalised(model, (field_f, maximum_f), width);
             let minus_one = model.constant((-1.0f32).to_bits());
             let value_f = model.as_float(normalized);
             let low_f = model.as_float(minus_one);
@@ -8646,26 +9447,29 @@ fn packed_component<M: Model + ?Sized>(
         }
         // USCALED and SSCALED are UNORM and SNORM without the division: the field's value as a
         // float, so an eight-bit 255 is 255.0. No range, so no clamp.
-        ComponentKind::Uscaled => {
-            let field = packed_integer_component(model, packed, bit, width, false);
-            model.unsigned_to_float_bits(field)
-        }
-        ComponentKind::Sscaled => {
-            let field = packed_integer_component(model, packed, bit, width, true);
-            model.signed_to_float_bits(field)
-        }
+        ComponentKind::Uscaled => model.unsigned_to_float_bits(field),
+        ComponentKind::Sscaled => model.signed_to_float_bits(field),
         // A float, by one of two routes: at width 16 an IEEE half widened by `FConvert`; at 11 and
-        // 10 bits (formats like `10_11_11`) a sign-less packed float built by hand.
-        ComponentKind::Float => {
-            let field = packed_integer_component(model, packed, bit, width, false);
-            if width == 16 {
-                model.half_to_float_bits(field)
-            } else {
-                model.narrow_float_to_float_bits(field, width)
+        // 10 bits (formats like `10_11_11`) a sign-less packed float built by hand. A width read as
+        // the module runs takes whichever its width names, and a whole word as it is.
+        ComponentKind::Float => match width {
+            FieldWidth::Fixed(16) => model.half_to_float_bits(field),
+            FieldWidth::Fixed(width) => model.narrow_float_to_float_bits(field, width),
+            FieldWidth::Running(width) => {
+                let half = model.half_to_float_bits(field);
+                let eleven = model.narrow_float_to_float_bits(field, 11);
+                let ten = model.narrow_float_to_float_bits(field, 10);
+                let mut value = field;
+                for (bits, converted) in [(10, ten), (11, eleven), (16, half)] {
+                    let bits = model.constant(bits);
+                    let is = model.compare(op::IEQUAL, width, bits);
+                    value = model.select(is, converted, value);
+                }
+                value
             }
-        }
+        },
         // sRGB is a transfer curve rather than a scale; `packed_buffer_memory` refuses it before a
-        // lane is emitted.
+        // lane is emitted, and a format the descriptor names is not converted (D967).
         ComponentKind::Srgb => {
             unreachable!(
                 "packed_buffer_memory admits only the integer, normalised, scaled and half kinds"
@@ -8787,6 +9591,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
 
     let resource = read_buffer_resource(model, resource_base);
     let (slot, addressed, sampled) = buffer_reach(model, instruction, (loading, false), resource)?;
+    let reach = reach_of(model, slot, &resource);
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -8840,7 +9645,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
         // `MEASURED_10_11_11` in `tests/execute.rs` pins this: in `10_11_11`, `x` is an eleven-bit
         // channel at bit 0.
         if loading {
-            let packed = read_element(model, slot, base, element_words)?;
+            let packed = read_element(model, reach, base, (element_words, (outside, Some(lane))))?;
             let mut bit = 0u32;
             for (component, &width) in format.widths.iter().rev().enumerate() {
                 let register_component = register
@@ -8922,6 +9727,12 @@ fn buffer_memory<M: Model + ?Sized>(
     // A sixteen-bit load reads its half word zero-extended into one register.
     if name == "buffer_load_ushort" {
         return buffer_access(model, instruction, true, (1, Some(2)));
+    }
+    // A byte or half store merges into the word holding it (D977).
+    match name {
+        "buffer_store_byte" => return buffer_access(model, instruction, false, (1, Some(1))),
+        "buffer_store_short" => return buffer_access(model, instruction, false, (1, Some(2))),
+        _ => {}
     }
     let components = match name.rsplit_once("dword") {
         Some((_, "")) => 1,
@@ -9168,6 +9979,7 @@ fn buffer_access<M: Model + ?Sized>(
 
     let resource = read_buffer_resource(model, resource_base);
     let (slot, addressed, sampled) = buffer_reach(model, instruction, (loading, true), resource)?;
+    let reach = reach_of(model, slot, &resource);
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -9234,16 +10046,13 @@ fn buffer_access<M: Model + ?Sized>(
 
             if loading {
                 // Out of range reads zero, as the reference states.
-                let value = match narrow {
-                    Some(bytes) => read_narrow(model, slot, address, bytes)?,
-                    None => read_reached(model, slot, address)?,
-                };
+                let value = read_access(model, reach, address, (narrow, (outside, Some(lane))))?;
                 let kept = pick(model, outside, zero, value);
                 model.write_vector_lane(register, lane, kept);
             } else {
                 let source = step_operand(data, component)?;
                 let value = model.read_source(instruction, &source, lane)?;
-                store_reached(model, slot, (address, outside), value, lane)?;
+                store_access(model, slot, (address, outside), (value, narrow), lane)?;
             }
         }
     }
@@ -9251,15 +10060,29 @@ fn buffer_access<M: Model + ?Sized>(
     Ok(())
 }
 
+/// What an untyped load reads at `address`: a word, or the `narrow` bytes fewer than one,
+/// zero-extended, checked as [`read_reached`] checks it.
+fn read_access<M: Model + ?Sized>(
+    model: &mut M,
+    reach: Option<Reach>,
+    address: Id,
+    (narrow, checked): (Option<u32>, (Id, Option<u32>)),
+) -> Result<Id, TranslateError> {
+    match narrow {
+        Some(bytes) => read_narrow(model, reach, address, (bytes, checked)),
+        None => read_reached(model, reach, address, checked),
+    }
+}
+
 /// The `bytes` at byte `address`, fewer than a word, zero-extended: through the window, or from the
 /// draw buffer at `slot` at the access's own byte.
 fn read_narrow<M: Model + ?Sized>(
     model: &mut M,
-    slot: Option<u32>,
+    slot: Option<Reach>,
     address: Id,
-    bytes: u32,
+    (bytes, checked): (u32, (Id, Option<u32>)),
 ) -> Result<Id, TranslateError> {
-    let element = read_element(model, slot, address, 1)?;
+    let element = read_element(model, slot, address, (1, checked))?;
     let mask = model.constant((1_u32 << (8 * bytes)) - 1);
     Ok(model.binary(op::BITWISE_AND, element[0], mask))
 }
@@ -9303,206 +10126,12 @@ fn no_integer_modifiers(instruction: &Instruction, sources: usize) -> Result<(),
 }
 
 /// The SDWA marker a short vector instruction's first source reads (`aco_assembler.cpp:1185`).
-const SDWA_MARKER: u32 = 249;
-
-/// The integer short-form instructions translated in their SDWA form: the operation is the same
-/// over the selected parts, and none of them has the float modifiers SDWA also carries.
-pub const SDWA_INTEGER: &[&str] = &[
-    "v_mov_b32_e32",
-    "v_cndmask_b32_e32",
-    "v_add_nc_u32_e32",
-    "v_lshlrev_b32_e32",
-    "v_lshrrev_b32_e32",
-    "v_ashrrev_i32_e32",
-    "v_or_b32_e32",
-    "v_xor_b32_e32",
-    "v_and_b32_e32",
-];
-
-/// The sixteen-bit float short forms translated in their SDWA form (`sdwa_half`): a word
-/// select is a half, which is what the long form's `op_sel` picks.
-pub const SDWA_HALF: &[&str] = &[
-    "v_add_f16_e32",
-    "v_sub_f16_e32",
-    "v_subrev_f16_e32",
-    "v_mul_f16_e32",
-    "v_max_f16_e32",
-    "v_min_f16_e32",
-    "v_rcp_f16_e32",
-];
+pub(crate) const SDWA_MARKER: u32 = 249;
 
 /// The SDWA select codes for a register's low and high sixteen bits (`aco_ir.h:1679-1688`).
 const SDWA_WORD_0: u32 = 4;
 /// See [`SDWA_WORD_0`].
 const SDWA_WORD_1: u32 = 5;
-
-/// A sixteen-bit float short form in its SDWA form (AMD's published RDNA instruction set, SDWA):
-/// each source the half its select names - a word select, or the whole dword's low half - with the
-/// word's negate (bits 20 and 28) and absolute value (21 and 29); the result, computed in single
-/// precision and rounded to a half, into the half `dst_sel` names, the other kept where `dst_unused`
-/// preserves and zeroed where it pads, or into the low half of a whole-dword destination, the high
-/// kept as the plain form keeps it. Grand Theft Auto V's prologue programs do
-/// `v_mul_f16_sdwa v?, v29, v? dst_sel:WORD_1 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1` (word
-/// `0x0605151d`). A clamp is made as the stage's `DX10_CLAMP` says; byte selects, sign-extending fill
-/// and an output multiplier are refused.
-fn sdwa_half<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    name: &str,
-    word: u32,
-) -> Result<(), TranslateError> {
-    let refuse = |detail| TranslateError::Unsupported {
-        offset: instruction.offset,
-        detail,
-    };
-    let fields = SdwaFields::read(word);
-    if word & 0x3 << 14 != 0 {
-        return Err(refuse(
-            "a sixteen-bit float SDWA form's output multiplier, which is not translated",
-        ));
-    }
-    // A clamp to [0, 1], made in single precision before the result is rounded to a half, a NaN as
-    // the stage's `DX10_CLAMP` says.
-    let clamp = if word >> 13 & 1 != 0 {
-        Some(model.dx10_clamp().ok_or_else(|| {
-            refuse("a sixteen-bit float SDWA form clamps, and the stage's DX10_CLAMP mode was not given")
-        })?)
-    } else {
-        None
-    };
-    let half_of = |select: u32| match select {
-        SDWA_WORD_0 | SDWA_DWORD => Ok(false),
-        SDWA_WORD_1 => Ok(true),
-        _ => Err(refuse(
-            "a sixteen-bit float SDWA form selecting a byte, which is not translated",
-        )),
-    };
-    let (high_destination, pad) = match (fields.dst_sel, fields.dst_unused) {
-        (SDWA_DWORD, _) => (false, false),
-        (SDWA_WORD_0 | SDWA_WORD_1, SDWA_UNUSED_PRESERVE) => (fields.dst_sel == SDWA_WORD_1, false),
-        (SDWA_WORD_0 | SDWA_WORD_1, 0) => (fields.dst_sel == SDWA_WORD_1, true),
-        _ => {
-            return Err(refuse(
-                "a sixteen-bit float SDWA form whose destination select or fill is not translated",
-            ));
-        }
-    };
-    let [Operand::Vector(destination), rest @ ..] = instruction.operands.as_slice() else {
-        return Err(refuse(
-            "a sixteen-bit float SDWA form without a vector destination",
-        ));
-    };
-    let sources = sdwa_half_sources(instruction, (name, word, fields), rest, half_of)?;
-    let (sign, magnitude) = (model.constant(0x8000), model.constant(0x7FFF));
-    let one = model.constant(1.0f32.to_bits());
-    let sixteen = model.constant(16);
-    for lane in running_lanes(model) {
-        let mut operands = Vec::with_capacity(sources.len());
-        for (operand, high, [negate, absolute]) in &sources {
-            let mut bits = read_half_float(model, instruction, operand, lane, *high)?;
-            if *absolute {
-                bits = model.binary(op::BITWISE_AND, bits, magnitude);
-            }
-            if *negate {
-                bits = model.binary(op::BITWISE_XOR, bits, sign);
-            }
-            operands.push(model.half_to_float_bits(bits));
-        }
-        let (x, y) = (operands[0], operands.get(1).copied().unwrap_or(operands[0]));
-        let result = match name {
-            "v_add_f16_e32" => model.f32_binary(op::FADD, x, y),
-            "v_sub_f16_e32" => model.f32_binary(op::FSUB, x, y),
-            "v_subrev_f16_e32" => model.f32_binary(op::FSUB, y, x),
-            "v_mul_f16_e32" => model.f32_binary(op::FMUL, x, y),
-            "v_max_f16_e32" => model.f32_ext_binary(GLSL_FMAX, x, y),
-            "v_min_f16_e32" => model.f32_ext_binary(GLSL_FMIN, x, y),
-            _ => model.f32_binary(op::FDIV, one, x),
-        };
-        let result = match clamp {
-            Some(nan_to_zero) => clamp_unit(model, result, nan_to_zero),
-            None => result,
-        };
-        let half = model.float_bits_to_half(result);
-        if pad {
-            let word = if high_destination {
-                model.binary(op::SHIFT_LEFT_LOGICAL, half, sixteen)
-            } else {
-                half
-            };
-            model.write_vector_lane(u32::from(*destination), lane, word);
-        } else {
-            write_half(
-                model,
-                instruction,
-                (u32::from(*destination), lane),
-                half,
-                high_destination,
-            )?;
-        }
-    }
-    model.count();
-    Ok(())
-}
-
-/// A sixteen-bit float SDWA form's sources, each with the half its select reads and its negate and
-/// absolute value: the word's first source, and for a two-source form the vector register the first
-/// word names. A second source in the scalar space is refused.
-fn sdwa_half_sources(
-    instruction: &Instruction,
-    (name, word, fields): (&str, u32, SdwaFields),
-    rest: &[Operand],
-    half_of: impl Fn(u32) -> Result<bool, TranslateError>,
-) -> Result<Vec<(Operand, bool, [bool; 2])>, TranslateError> {
-    let mut sources = vec![(
-        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
-        half_of(fields.select[0].0)?,
-        [word >> 20 & 1 != 0, word >> 21 & 1 != 0],
-    )];
-    if name != "v_rcp_f16_e32" {
-        let Some(Operand::Vector(register)) = rest.last().filter(|_| !fields.src1_scalar) else {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: "a sixteen-bit float SDWA form whose second source is not a vector register",
-            });
-        };
-        sources.push((
-            Operand::Vector(*register),
-            half_of(fields.select[1].0)?,
-            [word >> 28 & 1 != 0, word >> 29 & 1 != 0],
-        ));
-    }
-    Ok(sources)
-}
-
-/// The float short-form instructions translated in their SDWA form over whole registers, each with
-/// the long form it then is: SDWA's source negate and absolute value, clamp and output multiplier
-/// are the long form's (RDNA ISA, SDWA), so only the selects are SDWA's own.
-pub const SDWA_FLOAT: &[(&str, &str)] = &[
-    ("v_add_f32_e32", "v_add_f32_e64"),
-    ("v_sub_f32_e32", "v_sub_f32_e64"),
-    ("v_subrev_f32_e32", REVERSE_SUBTRACT),
-    ("v_mul_f32_e32", "v_mul_f32_e64"),
-    ("v_max_f32_e32", "v_max_f32_e64"),
-    ("v_min_f32_e32", "v_min_f32_e64"),
-    ("v_fract_f32_e32", "v_fract_f32_e64"),
-];
-
-/// The one-source float short-form instructions translated in their SDWA form over whole registers:
-/// the word's source negate and absolute value apply to the one source (RDNA ISA, SDWA).
-pub const SDWA_FLOAT_UNARY: &[&str] = &[
-    "v_rcp_f32_e32",
-    "v_log_f32_e32",
-    "v_exp_f32_e32",
-    "v_rsq_f32_e32",
-    "v_rndne_f32_e32",
-    "v_floor_f32_e32",
-    "v_trunc_f32_e32",
-    "v_sqrt_f32_e32",
-];
-
-/// The short-form carry arithmetic translated in its SDWA form over whole registers: there the
-/// instruction is its short form on the sources the word names.
-pub const SDWA_CARRY: &[&str] = &["v_add_co_ci_u32_e32"];
 
 /// The short-form compares translated in their SDWA form over whole registers.
 pub const SDWA_COMPARE: &[&str] = &[
@@ -9564,10 +10193,41 @@ fn sdwa_compare_admitted(name: &str) -> bool {
         return false;
     };
     rest.ends_with("_e32")
-        && ["_f32_", "_i32_", "_u32_"]
+        && ["_f32_", "_i32_", "_u32_", "_i16_", "_u16_"]
             .iter()
             .any(|kind| rest.contains(kind))
-        && compare_op(&format!("v_cmp_{rest}")).is_some()
+        && compare_op(&widened_compare(&format!("v_cmp_{rest}"))).is_some()
+}
+
+/// A sixteen-bit integer compare's name as the thirty-two-bit compare of the same ordering and
+/// signedness: its sources, narrowed to their low sixteen bits by [`sixteen_bit_side`], compare as
+/// that one does. Any other name is itself.
+fn widened_compare(name: &str) -> String {
+    name.replacen("_i16_", "_i32_", 1)
+        .replacen("_u16_", "_u32_", 1)
+}
+
+/// Whether a compare is a sixteen-bit integer one, and if so whether it is signed.
+fn sixteen_bit_compare(name: &str) -> Option<bool> {
+    if name.contains("_i16_") {
+        Some(true)
+    } else {
+        name.contains("_u16_").then_some(false)
+    }
+}
+
+/// A sixteen-bit integer compare's side: the low sixteen bits of `value`, sign-extended for a
+/// signed compare and zero-extended for an unsigned one, as the operation reads its operand
+/// whatever the SDWA select extended it to.
+fn sixteen_bit_side<M: Model + ?Sized>(model: &mut M, value: Id, signed: bool) -> Id {
+    let sixteen = model.constant(16);
+    let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, sixteen);
+    let down = if signed {
+        op::SHIFT_RIGHT_ARITHMETIC
+    } else {
+        op::SHIFT_RIGHT_LOGICAL
+    };
+    model.binary(down, raised, sixteen)
 }
 
 /// A compare in its SDWA form, as ACO encodes one (`aco_assembler.cpp`, its SDWA emission): the
@@ -9601,8 +10261,11 @@ fn sdwa_compare<M: Model + ?Sized>(
             "an SDWA compare into the execution mask names a destination of its own",
         ));
     }
-    let compare = into_exec.map(|rest| format!("v_cmp_{rest}"));
-    let (opcode, floats) = op_for_compare(instruction, compare.as_deref().unwrap_or(name))?;
+    let compare = into_exec.map_or_else(|| name.to_owned(), |rest| format!("v_cmp_{rest}"));
+    // A sixteen-bit integer compare reads its sides' low halves, signed or not, and compares them
+    // as the thirty-two-bit compare of its ordering does.
+    let sixteen = sixteen_bit_compare(&compare);
+    let (opcode, floats) = op_for_compare(instruction, &widened_compare(&compare))?;
     // Negate and absolute value are float modifiers; on an integer compare they are refused. A
     // class test's first source is a float, its second a mask.
     if (!floats && opcode != CLASS_TEST || opcode == CLASS_TEST && word & 0b11 << 28 != 0)
@@ -9612,21 +10275,9 @@ fn sdwa_compare<M: Model + ?Sized>(
             "an SDWA integer compare negates or takes the absolute value of a source",
         ));
     }
-    // A select of part of a register reads that part as an integer, zero- or sign-extended
-    // (`sdwa_select`): an integer compare's sources, and a class test's mask. A float source is
-    // compared whole; a part of one is refused.
-    let integer_source =
-        |index: usize| !floats && opcode != CLASS_TEST || opcode == CLASS_TEST && index == 1;
-    if fields
-        .select
-        .iter()
-        .enumerate()
-        .any(|(index, &select)| select != (SDWA_DWORD, false) && !integer_source(index))
-    {
-        return Err(refuse(
-            "an SDWA compare selects part of a float source, which is not translated",
-        ));
-    }
+    // A select of part of a register reads that part's bits, zero- or sign-extended
+    // (`sdwa_select`), whatever the source holds: a float source compares those bits as a float,
+    // as any operation reads its selected part (D979).
     // A compare's operands begin with the `vcc` it writes; a `cmpx` writes none of its own.
     let second = if into_exec.is_some() { 1 } else { 2 };
     let Some(Operand::Vector(vsrc1)) = instruction.operands.get(second) else {
@@ -9651,6 +10302,7 @@ fn sdwa_compare<M: Model + ?Sized>(
         for (index, (side, operand)) in sides.iter_mut().zip(&sources).enumerate() {
             let value = model.read_source(instruction, operand, lane)?;
             let value = sdwa_select(model, instruction, value, fields.select[index])?;
+            let value = sixteen.map_or(value, |signed| sixteen_bit_side(model, value, signed));
             let value = apply_modifiers(model, value, modifiers, index);
             *side = if floats { model.as_float(value) } else { value };
         }
@@ -9690,39 +10342,6 @@ fn sdwa_compare<M: Model + ?Sized>(
     Ok(())
 }
 
-/// An `SDWA_CARRY` instruction in its SDWA form: with none of the word's float modifiers, it is its
-/// short form reading the first source the word names, and the second as a scalar register where
-/// bit 31 says (RDNA ISA, SDWA), each the part of its register the word selects. A destination
-/// part or a float modifier is refused.
-fn sdwa_carry<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    name: &str,
-    word: u32,
-) -> Result<(), TranslateError> {
-    // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
-    const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
-    let fields = SdwaFields::read(word);
-    if fields.dst_sel != SDWA_DWORD || word & FLOAT_MODIFIERS != 0 {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "SDWA carry arithmetic into part of a register or with a float modifier",
-        });
-    }
-    // The short form's sources follow its two destinations: the marker, then the register field.
-    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(3) else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "an SDWA carry instruction's second source is not its register field",
-        });
-    };
-    let mut plain = instruction.clone();
-    plain.operands[2] = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    plain.operands[3] = sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?;
-    plain.second_word = None;
-    carry_arithmetic_of_parts(model, &plain, name, fields.select)
-}
-
 /// A compare's answer with every lane that does not run zeroed, as the hardware writes it (AMD's
 /// published RDNA instruction set, VOPC): its two halves anded with the execution mask's.
 fn running_bits<M: Model + ?Sized>(
@@ -9736,16 +10355,9 @@ fn running_bits<M: Model + ?Sized>(
     ))
 }
 
-/// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
-fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
-    SDWA_FLOAT
-        .iter()
-        .find(|(short, _)| *short == name)
-        .map(|(_, long)| *long)
-}
-
 /// Whether an instruction's modifier - `marker`, from its first source - is one translated: SDWA
-/// on an `SDWA_INTEGER` or `SDWA_FLOAT` instruction.
+/// on a compare, or on any one- or two-source vector instruction that has an SDWA form (D979,
+/// `sdwa::refusal`). What the word asks of that instruction is checked as it is translated.
 #[must_use]
 pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
     marker == SDWA_MARKER
@@ -9758,220 +10370,107 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
                     .map(|name| (family.name.as_str(), name))
             })
             .is_some_and(|(family, name)| {
-                SDWA_INTEGER.contains(&name)
-                    || SDWA_HALF.contains(&name)
-                    || (name.starts_with("v_cmp_") && name.ends_with("_f16_e32"))
-                    || SDWA_FLOAT_UNARY.contains(&name)
+                (name.starts_with("v_cmp_") && name.ends_with("_f16_e32"))
                     || sdwa_compare_admitted(name)
-                    || SDWA_CARRY.contains(&name)
-                    || sdwa_float_long_form(name).is_some()
-                    || (family == "VOP1"
-                        && SUPPORTED.contains(&name)
-                        && instruction.second_word.is_some_and(plain_sdwa_one_source))
+                    || sdwa::refusal(family, name).is_none()
             })
-}
-
-/// Whether a one-source instruction's SDWA word asks for nothing its plain form does not but a part
-/// of its source: its destination whole, no clamp, output multiplier, negate or absolute value.
-/// Such a form is its plain form on the part of the source the word selects.
-const fn plain_sdwa_one_source(word: u32) -> bool {
-    (word >> 8 & 0x7) == SDWA_DWORD && word & (1 << 13 | 0x3 << 14 | 0x3 << 20) == 0
-}
-
-/// A one-source instruction's plain SDWA form ([`plain_sdwa_one_source`]) as its short form: the
-/// word's source in the first source's field and operand, the word dropped. Where the word selects
-/// part of the source, that part is first written into the destination in each running lane, and
-/// the short form reads it there: the one source is the instruction's only read.
-fn plain_short_form<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    word: u32,
-) -> Result<Instruction, TranslateError> {
-    let fields = SdwaFields::read(word);
-    let mut source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    let mut code = if fields.src0_scalar {
-        fields.src0
-    } else {
-        0x100 | fields.src0
-    };
-    if fields.select[0] != (SDWA_DWORD, false) {
-        let Some(Operand::Vector(destination)) = instruction.operands.first() else {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: "an SDWA source select whose destination is not a vector register",
-            });
-        };
-        let destination = *destination;
-        for lane in running_lanes(model) {
-            let value = model.read_source(instruction, &source, lane)?;
-            let part = sdwa_select(model, instruction, value, fields.select[0])?;
-            model.write_vector_lane(u32::from(destination), lane, part);
-        }
-        source = Operand::Vector(destination);
-        code = 0x100 | u32::from(destination);
-    }
-    let mut plain = instruction.clone();
-    plain.word = plain.word & !0x1ff | code;
-    plain.second_word = None;
-    if let Some(slot) = plain.operands.get_mut(1) {
-        *slot = source;
-    }
-    Ok(plain)
-}
-
-/// An `SDWA_FLOAT` instruction in its SDWA form: over whole registers, its long form `long` under
-/// the word's source negate and absolute value (20, 21; 28, 29), clamp (13) and output multiplier
-/// (15:14). A select of part of a register, a sign extension, or a destination part, which would
-/// read or write a float's bits as an integer field, is refused. A one-source instruction (VOP1)
-/// has no second source, and its word's second select is not read.
-fn sdwa_float<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    long: &str,
-    word: u32,
-) -> Result<(), TranslateError> {
-    let fields = SdwaFields::read(word);
-    let vsrc1 = instruction.operands.get(2);
-    let read = if vsrc1.is_some() { 2 } else { 1 };
-    let whole = fields.select[..read]
-        .iter()
-        .all(|&(select, extend)| select == SDWA_DWORD && !extend)
-        && fields.dst_sel == SDWA_DWORD;
-    let (Some(Operand::Vector(register)), None | Some(Operand::Vector(_)), true) =
-        (instruction.operands.first(), vsrc1, whole)
-    else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: concat!(
-                "a float SDWA instruction selects part of a register, or its destination or ",
-                "second source is not a register field"
-            ),
-        });
-    };
-    let mut sources = vec![sdwa_operand(instruction, fields.src0, fields.src0_scalar)?];
-    if let Some(Operand::Vector(vsrc1)) = vsrc1 {
-        sources.push(sdwa_operand(
-            instruction,
-            u32::from(*vsrc1),
-            fields.src1_scalar,
-        )?);
-    }
-    let bit = |at: u32| word >> at & 1 != 0;
-    let modifiers = Modifiers {
-        negate: [bit(20), bit(28), false],
-        absolute: [bit(21), bit(29), false],
-        clamp: bit(13),
-        output_multiplier: word >> 14 & 0x3,
-    };
-    arithmetic_with_modifiers(
-        model,
-        instruction,
-        long,
-        (u32::from(*register), &sources),
-        modifiers,
-    )
-}
-
-/// A `SDWA_FLOAT_UNARY` instruction in its SDWA form: over whole registers, its one source under the
-/// word's negate (20) and absolute value (21), its result clamped to `[0, 1]` where the clamp (13)
-/// asks, a NaN as the stage's `DX10_CLAMP` says. A select of part of a register, a sign extension,
-/// a destination part or the output multiplier (15:14) is refused.
-fn sdwa_float_unary<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    name: &str,
-    word: u32,
-) -> Result<(), TranslateError> {
-    let fields = SdwaFields::read(word);
-    let bit = |at: u32| word >> at & 1 != 0;
-    let plain = fields.select[0] == (SDWA_DWORD, false)
-        && fields.dst_sel == SDWA_DWORD
-        && word & (0x3 << 14) == 0;
-    let (Some(Operand::Vector(register)), true) = (instruction.operands.first(), plain) else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: concat!(
-                "a one-source float SDWA instruction selects part of a register, scales its ",
-                "result, or its destination is not a vector register"
-            ),
-        });
-    };
-    let clamp = match (bit(13), model.dx10_clamp()) {
-        (false, _) => None,
-        (true, Some(nan_to_zero)) => Some(nan_to_zero),
-        (true, None) => {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: concat!(
-                    "this instruction clamps its result to [0, 1], and what that does to a NaN ",
-                    "is the stage's DX10_CLAMP mode, which this translation was not given"
-                ),
-            });
-        }
-    };
-    let source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    let modifiers = Modifiers {
-        negate: [bit(20), false, false],
-        absolute: [bit(21), false, false],
-        clamp: false,
-        output_multiplier: 0,
-    };
-    let one = model.constant(ONE_F32);
-    let extended = unary_float_extended(name).map(|(extended, _)| extended);
-    for lane in running_lanes(model) {
-        let value = model.read_source(instruction, &source, lane)?;
-        let value = apply_modifiers(model, value, modifiers, 0);
-        // What the plain form computes: the reciprocal, or the extended instruction.
-        let result = match extended {
-            Some(extended) => model.f32_ext_unary(extended, value),
-            None => model.f32_binary(op::FDIV, one, value),
-        };
-        let result = match clamp {
-            Some(nan_to_zero) => clamp_unit(model, result, nan_to_zero),
-            None => result,
-        };
-        model.write_vector_lane(u32::from(*register), lane, result);
-    }
-    model.count();
-    Ok(())
 }
 
 /// The first-source code that marks an instruction's DPP16 form, its second word the DPP fields.
 const DPP16_MARKER: u32 = 250;
 
-/// The families whose DPP16 form is translated: the one- and two-source vector instructions,
-/// whose first source the DPP word replaces.
+/// The first-source codes that mark an instruction's DPP8 form, without and with `fi:1`: its second
+/// word the source register (7:0) and eight three-bit lane selects (31:8). `llvm-mc` for `gfx1030`
+/// encodes `v_mov_b32_dpp v0, v1 dpp8:[7,6,5,4,3,2,1,0]` as `0x7e0002e9 0x05397701`, and with
+/// `fi:1` its first byte `0xea`.
+const DPP8_MARKER: u32 = 233;
+/// See [`DPP8_MARKER`].
+const DPP8_FETCH_INACTIVE_MARKER: u32 = 234;
+
+/// The families whose DPP forms are translated: the one- and two-source vector instructions,
+/// whose first source the DPP word replaces. A compare has no DPP form on this generation (LLVM's
+/// assembler refuses `v_cmp_*_dpp` for `gfx1030`).
 const DPP_FAMILIES: [&str; 2] = ["VOP1", "VOP2"];
 
 /// The vector register a DPP form's permuted first source is staged in before the instruction
 /// itself runs: one past the 256 an instruction can name, so no guest register is overwritten.
+/// An SDWA form stages its first source there too (D979).
 pub const DPP_STAGING_REGISTER: u32 = 256;
 
-/// Whether an instruction's modifier - `marker`, from its first source - is a DPP16 form this
-/// translates: a one- or two-source vector instruction whose word names a row control and no
-/// source modifier (see `dpp_control`).
-#[must_use]
-pub fn dpp_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
-    marker == DPP16_MARKER
-        && instruction
-            .encoding
-            .and_then(|index| encodings.encodings().get(usize::from(index)))
-            .is_some_and(|family| DPP_FAMILIES.contains(&family.name.as_str()))
-        && instruction.second_word.and_then(dpp_control).is_some()
+/// A DPP form, DPP16 or DPP8, as one shape (D979): `word` laid out as a DPP16 word - the source
+/// register (7:0), `FETCH_INACTIVE` (18), `BOUND_CTRL` (19), each source's negate and absolute value
+/// (23:20), the bank and row masks (27:24, 31:28) - and the lane of its group each lane reads.
+///
+/// A DPP8 form reads within groups of eight with every row and bank enabled and no source
+/// modifier. Its source lane is always within the group; one the execution mask leaves out reads
+/// zero unless `fi:1` (LLVM's `AMDGPUModifierSyntax`, `fi` on `dpp8`), so its lane is always
+/// written: the DPP16 shape with `BOUND_CTRL` set.
+#[derive(Clone, Copy)]
+pub(crate) struct DppForm {
+    word: u32,
+    control: DppControl,
 }
 
-/// An instruction's DPP16 modifier word, when it carries one.
-pub(crate) fn dpp_word(encodings: &EncodingTable, instruction: &Instruction) -> Option<u32> {
+impl DppForm {
+    /// The form a first source `marker` and modifier word `second` name, or `None` for a marker
+    /// that is no DPP form, or a DPP16 row control the instruction set leaves reserved.
+    fn read(marker: u32, second: u32) -> Option<Self> {
+        match marker {
+            DPP16_MARKER => Some(Self {
+                word: second,
+                control: dpp_control(second)?,
+            }),
+            DPP8_MARKER | DPP8_FETCH_INACTIVE_MARKER => Some(Self {
+                word: (second & 0xff)
+                    | u32::from(marker == DPP8_FETCH_INACTIVE_MARKER) << 18
+                    | 1 << 19
+                    | 0xff << 24,
+                control: DppControl::Lanes8(core::array::from_fn(|lane| {
+                    (second >> (8 + 3 * lane)) & 7
+                })),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether an instruction's modifier - `marker`, from its first source - is a DPP form this
+/// translates: DPP16 with a row control, or DPP8, on a one- or two-source vector instruction. What
+/// the form asks of the instruction is checked as it is translated.
+#[must_use]
+pub fn dpp_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
+    instruction
+        .encoding
+        .and_then(|index| encodings.encodings().get(usize::from(index)))
+        .is_some_and(|family| DPP_FAMILIES.contains(&family.name.as_str()))
+        && instruction
+            .second_word
+            .and_then(|second| DppForm::read(marker, second))
+            .is_some()
+}
+
+/// An instruction's DPP form, DPP16 or DPP8, when it carries one: its modifier word's marker, and
+/// the form, `None` within where the marker's word names no form translated.
+pub(crate) fn dpp_word(
+    encodings: &EncodingTable,
+    instruction: &Instruction,
+) -> Option<(u32, Option<DppForm>)> {
     let family = encodings
         .encodings()
         .get(usize::from(instruction.encoding?))?;
-    (family.modifier_selected(&[instruction.word]) == Some(DPP16_MARKER))
-        .then_some(instruction.second_word)
-        .flatten()
+    let marker = family.modifier_selected(&[instruction.word])?;
+    if !matches!(
+        marker,
+        DPP16_MARKER | DPP8_MARKER | DPP8_FETCH_INACTIVE_MARKER
+    ) {
+        return None;
+    }
+    let second = instruction.second_word?;
+    Some((marker, DppForm::read(marker, second)))
 }
 
 /// The lane each lane of a row of sixteen reads under a DPP16 word's control (16:8), as AMD's
-/// published RDNA instruction set lays the word out.
+/// published RDNA instruction set lays the word out, or under a DPP8 word's lane selects.
 #[derive(Clone, Copy)]
 enum DppControl {
     /// `quad_perm:[a,b,c,d]`, below 0x100: two bits per lane, the lane of its quad each reads.
@@ -9990,6 +10489,8 @@ enum DppControl {
     Share(u32),
     /// `row_xmask:n`, 0x160-0x16f: the lane whose place is this one's exclusive-or `n`.
     Xmask(u32),
+    /// `dpp8:[a,b,c,d,e,f,g,h]`: the lane of its group of eight each lane reads.
+    Lanes8([u32; 8]),
 }
 
 impl DppControl {
@@ -10004,18 +10505,15 @@ impl DppControl {
             Self::HalfMirror => Some((place & 8) | (7 - (place & 7))),
             Self::Share(lane) => Some(lane),
             Self::Xmask(mask) => Some(place ^ mask),
+            Self::Lanes8(selects) => Some((place & 8) | selects[(place & 7) as usize]),
         }
     }
 }
 
-/// The row control of a DPP16 word with no source negate or absolute value (23:20); `None` for a
-/// control the instruction set leaves reserved, or a word with a source modifier.
+/// The row control of a DPP16 word; `None` for a control the instruction set leaves reserved.
 fn dpp_control(word: u32) -> Option<DppControl> {
     let control = (word >> 8) & 0x1ff;
     let by = control & 0xf;
-    if (word >> 20) & 0xf != 0 {
-        return None;
-    }
     Some(match control {
         0..=0xff => DppControl::QuadPermute([0, 1, 2, 3].map(|place| (control >> (2 * place)) & 3)),
         0x101..=0x10f => DppControl::ShiftLeft(by),
@@ -10043,43 +10541,52 @@ fn dpp_masks_full(word: u32) -> bool {
 ///
 /// The permuted source is staged in [`DPP_STAGING_REGISTER`] and the instruction translated as
 /// though it named that register; a lane the rules leave unwritten then gets its destination back.
-/// An instruction that writes a lane mask, such as a carry, is refused.
+/// The word's negate and absolute value (20, 21 for the first source; 22, 23 for the second) flip
+/// and clear a float or bit-pattern source's top bit (D979): the first after it is permuted, the
+/// second staged in the destination, whose old bits are kept apart. An instruction that writes a
+/// carry is refused where a lane may be left unwritten, since its carry bit cannot be given back.
 fn dpp_form<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    (name, word): (&str, u32),
+    (name, marker, form): (&str, u32, Option<DppForm>),
 ) -> Result<(), TranslateError> {
-    let (Some(Operand::Vector(destination)), Some(_), Some(control)) = (
-        instruction.operands.first(),
-        instruction.operands.get(1),
-        dpp_control(word),
-    ) else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a DPP form other than a row control of a source into a vector register is not translated",
-        });
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
     };
-    if touches_mask(instruction, name) {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a DPP form that reads or writes a lane mask is not translated",
-        });
-    }
+    let first = sdwa::marked_source(instruction, marker).unwrap_or(1);
+    let (Some(Operand::Vector(destination)), Some(_), Some(DppForm { word, control })) = (
+        instruction.operands.first(),
+        instruction.operands.get(first),
+        form,
+    ) else {
+        return Err(refuse(
+            "a DPP form other than a row control or a DPP8 select of a source into a vector register is not translated",
+        ));
+    };
     let destination = u32::from(*destination);
     let (fetch_inactive, bound_zero) = ((word >> 18) & 1 == 1, (word >> 19) & 1 == 1);
-    let zero = model.constant(0);
     // Every lane is written when every row and bank is, and no lane's source can be refused it: a
     // zero stands in for any source, or every source lies in the row and is read whether it runs.
     let always_written = dpp_masks_full(word)
         && (bound_zero || (fetch_inactive && (0..16).all(|place| control.source(place).is_some())));
+    if writes_a_carry(name) && !always_written {
+        return Err(refuse(
+            "a DPP form that writes a carry and may leave a lane unwritten is not translated",
+        ));
+    }
+    let accumulates = name.contains("mac");
+    let (first_flags, second_flags) = ((word >> 20) & 0b11, (word >> 22) & 0b11);
+    let (second, source_kinds) = dpp_modified_sources(instruction, name, (word, first))?;
+    let zero = model.constant(0);
     // An instruction that accumulates into its destination reads it as a source, so its result
-    // cannot be staged apart from it; any other runs its phases as loops over the lanes, where the
-    // model runs the whole wave in one invocation.
-    if !name.contains("mac") && model.open_lane_loop() {
+    // cannot be staged apart from it, nor can a modified second source; any other runs its phases
+    // as loops over the lanes, where the model runs the whole wave in one invocation.
+    if !accumulates && second.is_none() && model.open_lane_loop() {
         return dpp_form_looped(
             model,
             instruction,
-            (word, control),
+            (word, control, first, source_kinds[0]),
             (destination, fetch_inactive, bound_zero),
         );
     }
@@ -10087,6 +10594,7 @@ fn dpp_form<M: Model + ?Sized>(
     // The permuted source, staged; and, where a lane may be left unwritten, each destination lane
     // as it was.
     let fetched = permuted_first_source(model, instruction, word, control)?;
+    let keep = !always_written || second.is_some();
     let (inactive_read, zero_bound) = (
         model.constant(u32::from(fetch_inactive)),
         model.constant(u32::from(bound_zero)),
@@ -10109,8 +10617,9 @@ fn dpp_form<M: Model + ?Sized>(
         } else {
             value
         };
+        let value = sdwa::sign_flags(model, value, first_flags, source_kinds[0]);
         model.write_vector_lane(DPP_STAGING_REGISTER, lane, value);
-        if !always_written {
+        if keep {
             // Written: the lane's row and bank are enabled, and its source read or bound to zero.
             let written = model.binary(op::BITWISE_OR, readable, zero_bound);
             let written = model.binary(op::BITWISE_AND, enabled, written);
@@ -10118,13 +10627,22 @@ fn dpp_form<M: Model + ?Sized>(
             let before = model.read_source(instruction, &instruction.operands[0], lane)?;
             kept.push((lane, before, written));
         }
+        // A modified second source, staged in the destination once its old bits are kept.
+        if let Some((_, register)) = second {
+            let value = model.read_source(instruction, &Operand::Vector(register), lane)?;
+            let value = sdwa::sign_flags(model, value, second_flags, source_kinds[1]);
+            model.write_vector_lane(destination, lane, value);
+        }
     }
 
     // The instruction itself, reading its first source from the staged register. The word's
     // first-source field names an ordinary register so the form is not seen again; the operand
     // list is what translation reads.
     let mut plain = instruction.clone();
-    plain.operands[1] = Operand::Vector(DPP_STAGING_REGISTER as u16);
+    plain.operands[first] = Operand::Vector(DPP_STAGING_REGISTER as u16);
+    if let Some((at, _)) = second {
+        plain.operands[at] = Operand::Vector(destination as u16);
+    }
     plain.word = (plain.word & !0x1ff) | 0x100;
     plain.second_word = None;
     self::instruction(model, &plain)?;
@@ -10137,6 +10655,47 @@ fn dpp_form<M: Model + ?Sized>(
     Ok(())
 }
 
+/// What [`dpp_modified_sources`] answers: the place and register of a second source the word
+/// modifies, and each source's kind.
+type DppSources = (Option<(usize, u16)>, [sdwa::Kind; 2]);
+
+/// A DPP form's sources as its word modifies them (23:20): the second source where the word negates
+/// it or takes its absolute value - the register field after the first source at `first`, refused
+/// where the instruction accumulates into its destination - and each source's kind. A negate or an
+/// absolute value of an integer source is refused.
+fn dpp_modified_sources(
+    instruction: &Instruction,
+    name: &str,
+    (word, first): (u32, usize),
+) -> Result<DppSources, TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let (first_flags, second_flags) = ((word >> 20) & 0b11, (word >> 22) & 0b11);
+    let kinds = sdwa::kinds(name);
+    let second = match (second_flags, instruction.operands.get(first + 1)) {
+        (0, _) => None,
+        (_, Some(Operand::Vector(register))) if !name.contains("mac") => {
+            Some((first + 1, *register))
+        }
+        _ => {
+            return Err(refuse(
+                "a DPP form modifies a second source that is not its register field, or one it accumulates into",
+            ));
+        }
+    };
+    for (flags, index) in [(first_flags, 0), (second_flags, 1)] {
+        if flags != 0 && !kinds.is_some_and(|(_, sources)| sources[index].signed_by_bit()) {
+            return Err(refuse(
+                "a DPP form negates or takes the absolute value of an integer source",
+            ));
+        }
+    }
+    let source_kinds = kinds.map_or([sdwa::Kind::Bits { bits: 32 }; 2], |(_, sources)| sources);
+    Ok((second, source_kinds))
+}
+
 /// [`dpp_form`] in three loops over the lanes, the first of which the model has opened: every
 /// lane's permuted first source staged, as each reads the source before any lane writes; the
 /// instruction over the staged source, its result staged in its place, so the destination stays as
@@ -10145,7 +10704,7 @@ fn dpp_form<M: Model + ?Sized>(
 fn dpp_form_looped<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    (word, control): (u32, DppControl),
+    (word, control, first, kind): (u32, DppControl, usize, sdwa::Kind),
     (destination, fetch_inactive, bound_zero): (u32, bool, bool),
 ) -> Result<(), TranslateError> {
     let zero = model.constant(0);
@@ -10166,6 +10725,7 @@ fn dpp_form_looped<M: Model + ?Sized>(
         } else {
             fetched.value
         };
+        let value = sdwa::sign_flags(model, value, (word >> 20) & 0b11, kind);
         model.write_vector_lane(DPP_STAGING_REGISTER, fetched.lane, value);
     }
     model.close_lane_loop();
@@ -10173,7 +10733,7 @@ fn dpp_form_looped<M: Model + ?Sized>(
     let staged = Operand::Vector(DPP_STAGING_REGISTER as u16);
     let mut plain = instruction.clone();
     plain.operands[0] = staged.clone();
-    plain.operands[1] = staged.clone();
+    plain.operands[first] = staged.clone();
     plain.word = (plain.word & !0x1ff) | 0x100;
     plain.second_word = None;
     let looped = lane_looped(model, &plain) && model.open_lane_loop();
@@ -10322,7 +10882,7 @@ fn permuted_first_source<M: Model + ?Sized>(
         for lane in running_lanes(model) {
             // The lane is a run-time value where each invocation is one, or a loop over the lanes
             // is open.
-            let index = model.lane_index().or(model.looped_lane());
+            let index = model.lane_number(lane).or(model.looped_lane());
             let (from, half, within, enabled) = if let Some(index) = index {
                 let (from, upper, within, enabled) =
                     lane_source_at_run_time(model, control, index, word);
@@ -10540,148 +11100,6 @@ fn sdwa_place<M: Model + ?Sized>(
             detail: "an SDWA destination's unused-bits mode is reserved",
         }),
     }
-}
-
-/// An `SDWA_INTEGER` instruction in its SDWA form (`aco_assembler.cpp:1183-1225` for the fields):
-/// each source's selected part, the operation over them, and the result placed into the
-/// destination's selected part. Clamp and output modifier - float modifiers - are refused, and so
-/// are negate and absolute value except on a select or a move, where they are the sign bit of the
-/// word it carries, cleared and then flipped, as on any float source.
-fn sdwa_integer<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    name: &str,
-    word: u32,
-) -> Result<(), TranslateError> {
-    // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
-    const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
-    const SOURCE_MODIFIERS: u32 = (0x3 << 20) | (0x3 << 28);
-    // A select or a move carries its sources' bits, so a negate or an absolute value is an
-    // operation on the sign bit of the word it carries.
-    let carries_bits = matches!(name, "v_cndmask_b32_e32" | "v_mov_b32_e32");
-    let refused = if carries_bits {
-        FLOAT_MODIFIERS & !SOURCE_MODIFIERS
-    } else {
-        FLOAT_MODIFIERS
-    };
-    if word & refused != 0 {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "an SDWA float modifier on integer arithmetic, which is not translated",
-        });
-    }
-    let fields = SdwaFields::read(word);
-    // A move has one source; the short form's first source field holds the SDWA marker.
-    let unary = name == "v_mov_b32_e32";
-    let vsrc1 = match instruction.operands.get(2) {
-        Some(Operand::Vector(vsrc1)) => Some(*vsrc1),
-        _ => None,
-    };
-    let (Some(Operand::Vector(register)), true) =
-        (instruction.operands.first(), unary || vsrc1.is_some())
-    else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "an SDWA instruction's destination or second source is not a register field",
-        });
-    };
-    let register = u32::from(*register);
-    let first = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    let second = match vsrc1 {
-        Some(vsrc1) if !unary => Some(sdwa_operand(
-            instruction,
-            u32::from(vsrc1),
-            fields.src1_scalar,
-        )?),
-        _ => None,
-    };
-    let low_five = model.constant(31);
-    // A select reads its mask, `vcc` in the short form, a bit a lane.
-    let mask = match (name, instruction.operands.get(3)) {
-        ("v_cndmask_b32_e32", Some(mask)) => Some(lane_mask_source(model, instruction, mask)?),
-        _ => None,
-    };
-    for lane in running_lanes(model) {
-        let a = model.read_source(instruction, &first, lane)?;
-        let a = sdwa_select(model, instruction, a, fields.select[0])?;
-        let a = sign_modifiers(model, a, (word >> 20) & 0x3);
-        let b = match &second {
-            Some(second) => {
-                let b = model.read_source(instruction, second, lane)?;
-                let b = sdwa_select(model, instruction, b, fields.select[1])?;
-                sign_modifiers(model, b, (word >> 28) & 0x3)
-            }
-            None => a,
-        };
-        let result = match (name, mask) {
-            // A set bit picks the second source, as the short form's does.
-            ("v_cndmask_b32_e32", Some((low, high))) => {
-                let bit = model.lane_bit(low, high, lane);
-                pick(model, bit, b, a)
-            }
-            (name, _) => sdwa_integer_operation(model, instruction, name, (a, b), low_five)?,
-        };
-        let old = model.read_source(
-            instruction,
-            &Operand::Vector(u16::try_from(register).unwrap_or(u16::MAX)),
-            lane,
-        )?;
-        let value = sdwa_place(model, instruction, result, old, fields)?;
-        model.write_vector_lane(register, lane, value);
-    }
-    model.count();
-    Ok(())
-}
-
-/// A source's negate (bit 0 of `flags`) and absolute value (bit 1) as operations on its sign bit:
-/// cleared for the absolute value, then flipped for the negate. Nothing when neither is set.
-fn sign_modifiers<M: Model + ?Sized>(model: &mut M, value: Id, flags: u32) -> Id {
-    let value = if flags & 0b10 == 0 {
-        value
-    } else {
-        let magnitude = model.constant(0x7fff_ffff);
-        model.binary(op::BITWISE_AND, value, magnitude)
-    };
-    if flags & 0b01 == 0 {
-        value
-    } else {
-        let sign = model.constant(0x8000_0000);
-        model.binary(op::BITWISE_XOR, value, sign)
-    }
-}
-
-/// The operation of an `SDWA_INTEGER` instruction other than a select, over its two sources'
-/// selected parts.
-fn sdwa_integer_operation<M: Model + ?Sized>(
-    model: &mut M,
-    instruction: &Instruction,
-    name: &str,
-    (a, b): (Id, Id),
-    low_five: Id,
-) -> Result<Id, TranslateError> {
-    Ok(match name {
-        "v_mov_b32_e32" => a,
-        "v_add_nc_u32_e32" => model.binary(op::IADD, a, b),
-        "v_or_b32_e32" => model.binary(op::BITWISE_OR, a, b),
-        "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, a, b),
-        "v_and_b32_e32" => model.binary(op::BITWISE_AND, a, b),
-        // The reversed shifts: the amount is the first source.
-        "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_ashrrev_i32_e32" => {
-            let amount = model.binary(op::BITWISE_AND, a, low_five);
-            let shift = match name {
-                "v_lshlrev_b32_e32" => op::SHIFT_LEFT_LOGICAL,
-                "v_lshrrev_b32_e32" => op::SHIFT_RIGHT_LOGICAL,
-                _ => op::SHIFT_RIGHT_ARITHMETIC,
-            };
-            model.binary(shift, b, amount)
-        }
-        _ => {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: "no SDWA translation for this instruction",
-            });
-        }
-    })
 }
 
 /// `op_sel`, bits 14:11 of a long-form vector instruction's first word: for each source and then
@@ -11084,13 +11502,14 @@ fn packed_shift_left<M: Model + ?Sized>(
 /// `v_pk_add_u16 d, a, b` and `v_pk_sub_u16 d, a, b`: in each half of the result, `a`'s selected
 /// half plus or less `b`'s, wrapping at sixteen bits (AMD's published RDNA instruction set). The low
 /// result takes the halves `op_sel` picks and the high one those `op_sel_hi` picks; clamp, which
-/// saturates, is refused.
+/// saturates, is refused. The signed forms, `v_pk_add_i16` and `v_pk_sub_i16`, wrap to the same
+/// bits: only their clamp would differ.
 fn packed_add_or_subtract<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    let combine = if name == "v_pk_add_u16" {
+    let combine = if name.starts_with("v_pk_add_") {
         op::IADD
     } else {
         op::ISUB
@@ -12461,9 +12880,10 @@ fn long_sixteen_bit<M: Model + ?Sized>(
 
 /// `v_writelane_b32 v, s, lane`: `s` into `v` at the lane the second source names, its low six bits
 /// in a wave of sixty-four and five in one of thirty-two, every other lane kept (AMD's published RDNA
-/// instruction set). The hardware writes that lane whether it runs or not; here the write goes
-/// through the execution mask as every lane write does, so one aimed at a lane that does not run is
-/// not made (assumed: a program writes the lanes it then reads, which run).
+/// instruction set). The instruction ignores the execution mask: it writes that lane whether it runs
+/// or not (D978). Grand Theft Auto V's ray traversal pushes its node stack so, at the lane its depth
+/// names, under a mask of the lanes the last box test sent on; a push the mask kept out was lost, and
+/// the pop read an older entry back, so the walk revisited nodes for ever.
 fn write_lane<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -12479,13 +12899,20 @@ fn write_lane<M: Model + ?Sized>(
     let chosen = model.read_source(instruction, lane, 0)?;
     let low_bits = model.constant(model.lanes() - 1);
     let chosen = model.binary(op::BITWISE_AND, chosen, low_bits);
-    for lane in running_lanes(model) {
+    // Every lane, running or not: a lane known not to run is still read by `v_readlane_b32`.
+    let lanes: Vec<u32> = if model.in_lane_loop() {
+        vec![0]
+    } else {
+        (0..model.modelled_lanes()).collect()
+    };
+    for lane in lanes {
         let held = Operand::Vector(u16::try_from(destination).unwrap_or(u16::MAX));
         let old = model.read_source(instruction, &held, lane)?;
-        let this = model.constant(lane);
+        // The wave's lane, at run time where an invocation's lanes are (D760, D973).
+        let this = crate::scratch::lane_id(model, lane);
         let here = model.compare(op::IEQUAL, chosen, this);
         let written = model.select(here, value, old);
-        model.write_vector_lane(destination, lane, written);
+        model.write_vector_lane_unmasked(destination, lane, written);
     }
     model.count();
     Ok(())
@@ -12628,7 +13055,7 @@ fn permute_lanes_16<M: Model + ?Sized>(
     // Every lane's value first: each reads the source before any lane writes the destination.
     let mut values = Vec::new();
     for lane in running_lanes(model) {
-        let (select, row) = if let Some(index) = model.lane_index() {
+        let (select, row) = if let Some(index) = model.lane_number(lane) {
             // One invocation per lane (D760): its place in its row, at run time.
             let (fifteen, seven, eight, four) = (
                 model.constant(15),
@@ -12663,7 +13090,7 @@ fn permute_lanes_16<M: Model + ?Sized>(
                 detail: "a lane permute needs every lane",
             })?;
         // The source lane's execution bit: rows below thirty-two in the low half.
-        let half = if model.lane_index().is_some() {
+        let half = if model.lane_number(lane).is_some() {
             let thirty_two = model.constant(32);
             let upper = model.compare(op::UGREATER_THAN_EQUAL, from, thirty_two);
             model.select(upper, running_high, running_low)
@@ -12730,7 +13157,7 @@ fn backward_permute<M: Model + ?Sized>(
         let word = model.binary(op::SHIFT_RIGHT_LOGICAL, byte, two);
         let within = model.binary(op::BITWISE_AND, word, thirty_one);
         // The reading lane's half: the high one from lane thirty-two up.
-        let index = model.lane_index().or(model.looped_lane());
+        let index = model.lane_number(lane).or(model.looped_lane());
         let (from, half) = if let Some(index) = index {
             let upper = model.compare(op::UGREATER_THAN_EQUAL, index, thirty_two);
             let base = model.select(upper, thirty_two, zero);
@@ -13225,6 +13652,199 @@ fn shift_right_64<M: Model + ?Sized>(
         let large = model.compare(op::UGREATER_THAN_EQUAL, k, thirty_two);
         let new_low = pick(model, large, low_large, low_small);
         let new_high = pick(model, large, zero, high_small);
+        model.write_vector_lane(register, lane, new_low);
+        model.write_vector_lane(register + 1, lane, new_high);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_med3_u32 d, a, b, c`: the median of three unsigned words per lane (`V_MED3_U32`, AMD's
+/// published RDNA 2 instruction set, VOP3): the greater of the least two and the least of the
+/// rest, `max(min(a, b), min(max(a, b), c))`.
+fn unsigned_median_of_three<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 3)?;
+    let [destination, first, second, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_med3_u32 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_med3_u32 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let a = model.read_source(instruction, first, lane)?;
+        let b = model.read_source(instruction, second, lane)?;
+        let c = model.read_source(instruction, third, lane)?;
+        let a_below = model.compare(op::ULESS_THAN, a, b);
+        let low = model.select(a_below, a, b);
+        let high = model.select(a_below, b, a);
+        let c_below = model.compare(op::ULESS_THAN, c, high);
+        let upper = model.select(c_below, c, high);
+        let low_below = model.compare(op::ULESS_THAN, low, upper);
+        let median = model.select(low_below, upper, low);
+        model.write_vector_lane(register, lane, median);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_cmp_eq_u64_e64` and `v_cmp_ne_u64_e64`: whether two 64-bit sources - register pairs, or an
+/// inline integer sign-extended - are equal, a bit a lane into the destination's lane mask, as
+/// [`compare_long`] writes a 32-bit compare's (AMD's published RDNA 2 instruction set, VOPC in its
+/// long form).
+fn compare_long_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 2)?;
+    let (destination, first, second) = three_operands(instruction)?;
+    let equal = name == "v_cmp_eq_u64_e64";
+    let halves = every_lane_bit(model, true, |model, lane| {
+        let (a_low, a_high) = pair_source(model, instruction, first, lane)?;
+        let (b_low, b_high) = pair_source(model, instruction, second, lane)?;
+        let low = model.compare(op::IEQUAL, a_low, b_low);
+        let high = model.compare(op::IEQUAL, a_high, b_high);
+        let same = model.both(low, high);
+        Ok(if equal {
+            same
+        } else {
+            let bool_type = model.bool_type();
+            let b = model.builder();
+            let differ = b.id();
+            b.function(op::LOGICAL_NOT, &[bool_type.0, differ.0, same.0]);
+            differ
+        })
+    })?;
+    match destination {
+        Operand::Named(named) if lane_mask_name(named).is_some() => {
+            let mask = lane_mask_name(named).unwrap_or(EXEC_LOW_HALF);
+            write_wave_mask(model, mask, halves)?;
+        }
+        Operand::Scalar(register) if u32::from(*register) + 2 <= SCALAR_REGISTERS => {
+            let register = u32::from(*register);
+            model.write_scalar(register, halves.0);
+            if model.lanes() > 32 {
+                model.write_scalar(register + 1, halves.1);
+            }
+        }
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a 64-bit compare's destination is neither a register pair nor a lane mask",
+            });
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// `s_bitreplicate_b64_b32 d, s`: each bit of `s` twice, bit `n` into bits `2n` and `2n + 1` of the
+/// pair `d` (`S_BITREPLICATE_B64_B32`, AMD's published RDNA 2 instruction set, SOP1); the condition
+/// code is untouched. Each half's bits are spread apart by the shifts and masks of a Morton code,
+/// then doubled.
+fn bit_replicate<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Scalar(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_bitreplicate_b64_b32 destination is not a scalar register pair",
+        });
+    };
+    let register = u32::from(*register);
+    if register + 2 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_bitreplicate_b64_b32 destination runs past the end of the register file",
+        });
+    }
+    let value = model.read_source(instruction, source, 0)?;
+    let (low_mask, sixteen) = (model.constant(0xffff), model.constant(16));
+    let low = model.binary(op::BITWISE_AND, value, low_mask);
+    let high = model.binary(op::SHIFT_RIGHT_LOGICAL, value, sixteen);
+    let mut halves = [low, high];
+    for half in &mut halves {
+        for (shift, mask) in [
+            (8, 0x00ff_00ff),
+            (4, 0x0f0f_0f0f),
+            (2, 0x3333_3333),
+            (1, 0x5555_5555),
+        ] {
+            let by = model.constant(shift);
+            let moved = model.binary(op::SHIFT_LEFT_LOGICAL, *half, by);
+            let joined = model.binary(op::BITWISE_OR, *half, moved);
+            let mask = model.constant(mask);
+            *half = model.binary(op::BITWISE_AND, joined, mask);
+        }
+        let one = model.constant(1);
+        let doubled = model.binary(op::SHIFT_LEFT_LOGICAL, *half, one);
+        *half = model.binary(op::BITWISE_OR, *half, doubled);
+    }
+    model.write_scalar(register, halves[0]);
+    model.write_scalar(register + 1, halves[1]);
+    model.count();
+    Ok(())
+}
+
+/// `v_lshlrev_b64 d, amount, value`: the 64-bit `value` shifted left by `amount[5:0]`, into the
+/// register pair from `d` (`V_LSHLREV_B64`, AMD's published RDNA 2 instruction set, VOP3): the
+/// mirror of [`shift_right_64`].
+fn shift_left_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 2)?;
+    let (destination, amount, value) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshlrev_b64 destination is not a vector register pair",
+        });
+    };
+    let register = u32::from(*register);
+    if register + 2 > VECTOR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshlrev_b64 destination runs past the vector register file",
+        });
+    }
+    let (six_bits, thirty_one, thirty_two, zero) = (
+        model.constant(63),
+        model.constant(31),
+        model.constant(32),
+        model.constant(0),
+    );
+    for lane in running_lanes(model) {
+        let amount = model.read_source(instruction, amount, lane)?;
+        let (low, high) = pair_source(model, instruction, value, lane)?;
+        let k = model.binary(op::BITWISE_AND, amount, six_bits);
+        // Below 32: each half shifts, and the low half's high bits move into the high half.
+        let small = model.binary(op::BITWISE_AND, k, thirty_one);
+        let reverse = model.binary(op::ISUB, thirty_two, small);
+        let reverse = model.binary(op::BITWISE_AND, reverse, thirty_one);
+        let high_shifted = model.binary(op::SHIFT_LEFT_LOGICAL, high, small);
+        let carried = model.binary(op::SHIFT_RIGHT_LOGICAL, low, reverse);
+        let no_carry = model.compare(op::IEQUAL, small, zero);
+        let carried = pick(model, no_carry, zero, carried);
+        let high_small = model.binary(op::BITWISE_OR, high_shifted, carried);
+        let low_small = model.binary(op::SHIFT_LEFT_LOGICAL, low, small);
+        // 32 and above: the low half, shifted by the rest, becomes the high half.
+        let high_large = model.binary(op::SHIFT_LEFT_LOGICAL, low, small);
+        let large = model.compare(op::UGREATER_THAN_EQUAL, k, thirty_two);
+        let new_low = pick(model, large, zero, low_small);
+        let new_high = pick(model, large, high_large, high_small);
         model.write_vector_lane(register, lane, new_low);
         model.write_vector_lane(register + 1, lane, new_high);
     }
@@ -13930,7 +14550,21 @@ fn layer_in_bounds<M: Model + ?Sized>(
     let none = builder.id();
     builder.declare(op::CONSTANT_NULL, &[texture.result.0, none.0]);
     let held = model.compare(op::ULESS_THAN, layer, layers);
-    Ok(model.select(held, texel, none))
+    // The texel is a four-component vector, not a word: below SPIR-V 1.4 a select between vectors
+    // takes a condition as wide as they are, so the one answer is spread across four.
+    let bool_type = model.bool_type();
+    let builder = model.builder();
+    let wide = builder.declare_type(op::TYPE_VECTOR, &[bool_type.0, IMAGE_COMPONENTS]);
+    let each = builder.id();
+    let mut spread = vec![wide.0, each.0];
+    spread.extend(std::iter::repeat_n(held.0, IMAGE_COMPONENTS as usize));
+    builder.function(op::COMPOSITE_CONSTRUCT, &spread);
+    let chosen = builder.id();
+    builder.function(
+        op::SELECT,
+        &[texture.result.0, chosen.0, each.0, texel.0, none.0],
+    );
+    Ok(chosen)
 }
 
 /// Whether `layer` is one the storage image `image` holds, its texel coordinate type `texel`: below
@@ -14683,12 +15317,14 @@ fn close_if_active<M: Model + ?Sized>(model: &mut M, merge: Option<Id>) {
     }
 }
 
-/// Whether an access reads a buffer the tracer can give a slot: a scalar load, or a global load,
-/// which reads the buffer its lanes' addresses span (D883).
+/// Whether an access reaches a buffer the tracer can give a slot: a scalar load, or a global load
+/// or a dispatch's global store, which reach the buffer of the pages its lanes' addresses fall in
+/// (D883, D961).
 fn traced_load(name: &str) -> bool {
     name.starts_with("s_buffer_load_dword")
         || name.starts_with("s_load_dword")
         || name.starts_with("global_load_")
+        || name.starts_with("global_store_dword")
 }
 
 /// A traced global load's draw buffer and its guest base: the buffer its lanes' addresses span
@@ -14709,16 +15345,21 @@ fn traced_global_load<M: Model + ?Sized>(
     Ok(Some((slot, base)))
 }
 
-/// The word at `address` a global load reads: from its traced draw buffer, relative to the
-/// buffer's guest base, or through the window. With the word, for a traced load in an exact module,
-/// whether the buffer does not hold it: the range bound was placed from a sample of the dispatch's
-/// waves (D950), and a lane outside it is an escape, not a read of the wrong word.
+/// The word at `address` a global load reads, its low and high halves: from its traced draw
+/// buffer, relative to the buffer's guest base, or through the window. With the word, for a traced
+/// load in an exact module, whether the buffer does not hold it: the range bound was placed from a
+/// sample of the dispatch's waves (D950), and a lane outside it is an escape, not a read of the
+/// wrong word. A dispatch's buffer holds only the pages its waves reach ([`global_page_word`]).
 fn global_word<M: Model + ?Sized>(
     model: &mut M,
     bound: Option<(u32, Id)>,
-    address: Id,
+    (address, high): (Id, Id),
 ) -> Result<(Id, Option<Id>), TranslateError> {
     Ok(match bound {
+        Some((slot, _)) if model.global_pages() => {
+            let (value, outside) = global_page_word(model, slot, (address, high))?;
+            (value, model.exact_memory().then_some(outside))
+        }
         Some((slot, base)) => {
             let offset = model.binary(op::ISUB, address, base);
             let two = model.constant(2);
@@ -14735,6 +15376,230 @@ fn global_word<M: Model + ?Sized>(
         }
         None => (read_guarded(model, address), None),
     })
+}
+
+/// The word at `address`, its low and high halves, from a dispatch's global buffer of pages
+/// ([`crate::wavefront::GLOBAL_PAGE_BYTES`]), with whether the buffer does not hold it. A word not
+/// held reads zero, never another page's.
+fn global_page_word<M: Model + ?Sized>(
+    model: &mut M,
+    slot: u32,
+    address: (Id, Id),
+) -> Result<(Id, Id), TranslateError> {
+    let (index, held) = global_page_index(model, slot, address)?;
+    let word = model.read_draw_buffer(slot, index)?;
+    let zero = model.constant(0);
+    let value = model.select(held, word, zero);
+    let bool_type = model.bool_type();
+    let b = model.builder();
+    let outside = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, outside.0, held.0]);
+    Ok((value, outside))
+}
+
+/// Where the word at `low`, `high` lies in a dispatch's global buffer of pages
+/// ([`crate::wavefront::GLOBAL_PAGE_BYTES`]), and whether the buffer holds it (D961): its page's
+/// number, the address's top 52 bits as a low and a high half, hashed to its slot of the table
+/// ([`crate::wavefront::global_page_slot`]), and the slots after it searched for that number. A
+/// word not held lies at index zero, the table's size, which nothing stores to.
+fn global_page_index<M: Model + ?Sized>(
+    model: &mut M,
+    slot: u32,
+    (low, high): (Id, Id),
+) -> Result<(Id, Id), TranslateError> {
+    let page_bytes = crate::wavefront::GLOBAL_PAGE_BYTES;
+    let page_shift = page_bytes.trailing_zeros();
+    let (zero, one, three) = (model.constant(0), model.constant(1), model.constant(3));
+    let (down, up) = (model.constant(page_shift), model.constant(32 - page_shift));
+    let low_part = model.binary(op::SHIFT_RIGHT_LOGICAL, low, down);
+    let high_part = model.binary(op::SHIFT_LEFT_LOGICAL, high, up);
+    let number_low = model.binary(op::BITWISE_OR, low_part, high_part);
+    let number_high = model.binary(op::SHIFT_RIGHT_LOGICAL, high, down);
+    // The slot it hashes to, in a table of `1 << bits` slots.
+    let bits = model.read_draw_buffer(slot, zero)?;
+    let mixed = model.binary(op::BITWISE_XOR, number_low, number_high);
+    let hash = model.constant(crate::wavefront::GLOBAL_PAGE_HASH);
+    let hashed = model.binary(op::IMUL, mixed, hash);
+    let thirty_two = model.constant(32);
+    let keep = model.binary(op::ISUB, thirty_two, bits);
+    let home = model.binary(op::SHIFT_RIGHT_LOGICAL, hashed, keep);
+    let size = model.binary(op::SHIFT_LEFT_LOGICAL, one, bits);
+    let mask = model.binary(op::ISUB, size, one);
+    let (mut start, mut held) = (zero, model.compare(op::INOT_EQUAL, zero, zero));
+    for probe in 0..crate::wavefront::GLOBAL_PAGE_PROBES {
+        let step = model.constant(probe);
+        let at = model.add(home, step);
+        let at = model.binary(op::BITWISE_AND, at, mask);
+        let at = model.binary(op::IMUL, at, three);
+        let at = model.add(at, one);
+        let held_low = model.read_draw_buffer(slot, at)?;
+        let at = model.add(at, one);
+        let held_high = model.read_draw_buffer(slot, at)?;
+        let at = model.add(at, one);
+        let begins = model.read_draw_buffer(slot, at)?;
+        let same_low = model.compare(op::IEQUAL, held_low, number_low);
+        let same_high = model.compare(op::IEQUAL, held_high, number_high);
+        let occupied = model.compare(op::INOT_EQUAL, begins, zero);
+        let same = model.both(same_low, same_high);
+        let found = model.both(same, occupied);
+        start = model.select(found, begins, start);
+        held = model.either(held, found);
+    }
+    let within_mask = model.constant(page_bytes - 1);
+    let within = model.binary(op::BITWISE_AND, low, within_mask);
+    let two = model.constant(2);
+    let within = model.binary(op::SHIFT_RIGHT_LOGICAL, within, two);
+    let index = model.add(start, within);
+    Ok((model.select(held, index, zero), held))
+}
+
+/// A flat access's address for one lane, its low and high halves: the low as
+/// [`Model::flat_address`] forms it, and the high half of the vector pair or scalar base it adds
+/// to, with the carry out of the low half.
+fn wide_flat_address<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (vaddr, base): (&Operand, &Operand),
+    lane: u32,
+) -> Result<(Id, Id), TranslateError> {
+    let low = model.flat_address(instruction, vaddr, base, lane)?;
+    let (from, high) = match (base, vaddr) {
+        (Operand::Scalar(register), _) => {
+            let register = u32::from(*register);
+            (model.read_scalar(register), model.read_scalar(register + 1))
+        }
+        (_, Operand::Vector(register)) => {
+            let next = Operand::Vector(register.saturating_add(1));
+            (
+                model.read_source(instruction, vaddr, lane)?,
+                model.read_source(instruction, &next, lane)?,
+            )
+        }
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a flat access whose address is not a register pair",
+            });
+        }
+    };
+    Ok((low, carried(model, (from, low), high)))
+}
+
+/// A global access's address for one lane, its low and high halves: both where a dispatch's
+/// global buffer of pages looks its page up by its full number (D961), and elsewhere the low half
+/// alone, which is all a window or a range from a base reads, standing for both.
+fn global_access_address<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (vaddr, base): (&Operand, &Operand),
+    lane: u32,
+) -> Result<(Id, Id), TranslateError> {
+    if model.global_pages() && model.draw_buffer_slot(instruction).is_some() {
+        return wide_flat_address(model, instruction, (vaddr, base), lane);
+    }
+    let low = model.flat_address(instruction, vaddr, base, lane)?;
+    Ok((low, low))
+}
+
+/// `high` with one added where `low`, a sum from `from`, carried out of thirty-two bits.
+fn carried<M: Model + ?Sized>(model: &mut M, (from, low): (Id, Id), high: Id) -> Id {
+    let (zero, one) = (model.constant(0), model.constant(1));
+    let carry = model.compare(op::ULESS_THAN, low, from);
+    let carry = model.select(carry, one, zero);
+    model.add(high, carry)
+}
+
+/// The address `words` words past `address`, its low and high halves, with the carry.
+fn step_wide<M: Model + ?Sized>(model: &mut M, (low, high): (Id, Id), words: u32) -> (Id, Id) {
+    if words == 0 {
+        return (low, high);
+    }
+    let stepped = step_address(model, low, words);
+    // A low half standing for both ([`global_access_address`]) carries nothing.
+    if high == low {
+        return (stepped, stepped);
+    }
+    (stepped, carried(model, (low, stepped), high))
+}
+
+/// One lane's word of a dispatch's global store through its global buffer of pages (D961), at
+/// `address`, its low and high halves: stored where the buffer holds its page, and an escape,
+/// storing nothing, where it does not.
+fn global_page_store<M: Model + ?Sized>(
+    model: &mut M,
+    slot: u32,
+    (address, value): ((Id, Id), Id),
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let (index, held) = global_page_index(model, slot, address)?;
+    let bool_type = model.bool_type();
+    let b = model.builder();
+    let outside = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, outside.0, held.0]);
+    if model.exact_memory() {
+        model.note_escape(outside, Some(lane));
+    }
+    let previous = model.read_draw_buffer(slot, index)?;
+    let kept = pick(model, outside, previous, value);
+    model.write_draw_buffer(slot, (index, kept), outside, lane)
+}
+
+/// `global_store_byte` and `global_store_short`: a lane's data register's low byte or half stored
+/// at its address, merged into the word holding it and, for a half at a word's last byte, the
+/// next, as one step a part (D977) - through the window, or a dispatch's global buffer of pages
+/// (D961).
+fn global_sub_word_store<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    bytes: u32,
+) -> Result<(), TranslateError> {
+    let (vaddr, data, base) = first_three_operands(instruction)?;
+    if !matches!(data, Operand::Vector(_)) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a flat store's data is not a vector register",
+        });
+    }
+    let bound = traced_global_load(model, instruction)?;
+    if bound.is_some() && !model.global_pages() {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a global store through a bound buffer that is not a dispatch's pages (D961)",
+        });
+    }
+    for lane in running_lanes(model) {
+        let (low, high) = global_access_address(model, instruction, (vaddr, base), lane)?;
+        let value = model.read_source(instruction, data, lane)?;
+        let (parts, spans) = sub_word_parts(model, (low, value), 8 * bytes);
+        let aligned = model.constant(!3);
+        let first = model.binary(op::BITWISE_AND, low, aligned);
+        let first = (first, if high == low { first } else { high });
+        let always = model.compare(op::IEQUAL, aligned, aligned);
+        for (word, parts) in [0u32, 1].into_iter().zip(parts) {
+            let at = step_wide(model, first, word);
+            let reaches = if word == 0 { always } else { spans };
+            if let Some((slot, _)) = bound {
+                let (index, held) = global_page_index(model, slot, at)?;
+                let bool_type = model.bool_type();
+                let b = model.builder();
+                let unheld = b.id();
+                b.function(op::LOGICAL_NOT, &[bool_type.0, unheld.0, held.0]);
+                if model.exact_memory() {
+                    let escaped = model.both(unheld, reaches);
+                    model.note_escape(escaped, Some(lane));
+                }
+                let landed = model.both(held, reaches);
+                merge_draw_buffer(model, slot, (index, parts), landed, lane)?;
+            } else {
+                let inside = model.address_within_window(at.0);
+                let landed = model.both(inside, reaches);
+                let index = model.word_index(at.0);
+                model.merge_memory(index, parts, landed, lane);
+            }
+        }
+    }
+    model.count();
+    Ok(())
 }
 
 /// Records a traced global load's word outside its buffer as an escape in `lane` (D950), where
@@ -14783,11 +15648,11 @@ fn sub_word_load<M: Model + ?Sized>(
     let register = u32::from(*register);
     let bound = traced_global_load(model, instruction)?;
     for lane in running_lanes(model) {
-        let address = model.flat_address(instruction, vaddr, base, lane)?;
+        let (address, top) = global_access_address(model, instruction, (vaddr, base), lane)?;
         let aligned = model.constant(!3);
         let word_address = model.binary(op::BITWISE_AND, address, aligned);
-        let (low, low_outside) = global_word(model, bound, word_address)?;
-        let next = step_address(model, word_address, 1);
+        let (low, low_outside) = global_word(model, bound, (word_address, top))?;
+        let next = step_wide(model, (word_address, top), 1);
         let (high, high_outside) = global_word(model, bound, next)?;
         // The bytes from the address on: the low word shifted down, the next word's above it.
         let three = model.constant(3);
@@ -14873,11 +15738,11 @@ fn flat_memory<M: Model + ?Sized>(
             }
             let bound = traced_global_load(model, instruction)?;
             for lane in running_lanes(model) {
-                let address = model.flat_address(instruction, vaddr, base, lane)?;
+                let address = global_access_address(model, instruction, (vaddr, base), lane)?;
                 for word in 0..words {
                     // Consecutive words, stepped by address so each word is bounds-checked: a
                     // multi-word access can start inside the window and end outside it.
-                    let stepped = step_address(model, address, word);
+                    let stepped = step_wide(model, address, word);
                     let (value, outside) = global_word(model, bound, stepped)?;
                     note_global_escape(model, outside, None, lane);
                     model.write_vector_lane(register + word, lane, value);
@@ -14889,7 +15754,12 @@ fn flat_memory<M: Model + ?Sized>(
 
         // The flat stores: per lane and masked, because another lane may read what an inactive lane
         // would have written.
-        "global_store_dword" | "global_store_dwordx2" | "global_store_dwordx4" => {
+        "global_store_byte" => global_sub_word_store(model, instruction, 1),
+        "global_store_short" => global_sub_word_store(model, instruction, 2),
+        "global_store_dword"
+        | "global_store_dwordx2"
+        | "global_store_dwordx3"
+        | "global_store_dwordx4" => {
             let words = access_words(name);
             let (vaddr, data, base) = first_three_operands(instruction)?;
             let Operand::Vector(first_register) = data else {
@@ -14905,14 +15775,25 @@ fn flat_memory<M: Model + ?Sized>(
                     detail: "a flat store reads past the end of the vector register file",
                 });
             }
+            // A dispatch's traced store goes to its global buffer of pages (D961).
+            let bound = traced_global_load(model, instruction)?;
+            if bound.is_some() && !model.global_pages() {
+                return Err(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: "a global store through a bound buffer that is not a dispatch's pages (D961)",
+                });
+            }
             for lane in running_lanes(model) {
-                let address = model.flat_address(instruction, vaddr, base, lane)?;
+                let address = global_access_address(model, instruction, (vaddr, base), lane)?;
                 for word in 0..words {
-                    let stepped = step_address(model, address, word);
+                    let stepped = step_wide(model, address, word);
                     let source =
                         Operand::Vector(u16::try_from(first_register + word).unwrap_or(u16::MAX));
                     let value = model.read_source(instruction, &source, lane)?;
-                    write_guarded(model, stepped, value, lane);
+                    match bound {
+                        Some((slot, _)) => global_page_store(model, slot, (stepped, value), lane)?,
+                        None => write_guarded(model, stepped.0, value, lane),
+                    }
                 }
             }
             model.count();
@@ -15278,7 +16159,10 @@ fn memory<M: Model + ?Sized>(
         | "global_load_sshort"
         | "global_store_dword"
         | "global_store_dwordx2"
-        | "global_store_dwordx4" => flat_memory(model, instruction, name),
+        | "global_store_dwordx3"
+        | "global_store_dwordx4"
+        | "global_store_byte"
+        | "global_store_short" => flat_memory(model, instruction, name),
 
         _ => Err(TranslateError::NotTranslated {
             offset: instruction.offset,

@@ -21,3 +21,5 @@ serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 orbistoun-gpu-vulkan = { workspace = true }
+# A captured dispatch's translation context, read back to translate its program again.
+serde_json = { workspace = true }

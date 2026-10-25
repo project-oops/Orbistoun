@@ -426,10 +426,12 @@ fn branch_target(decode: &Decode, instruction: &Instruction, (jump, until): (i64
 }
 
 /// A global load whose addresses are found: one without a scalar base, which would add to every
-/// lane's address.
+/// lane's address. A dispatch's global store is found the same way, its address first and nothing
+/// written to a register (D961).
 fn load_step(instruction: &Instruction, name: &str) -> Option<Step> {
     let operands = instruction.operands.as_slice();
-    let Some(Operand::Vector(pair)) = operands.get(1) else {
+    let store = name.contains("store");
+    let Some(Operand::Vector(pair)) = operands.get(usize::from(!store)) else {
         return None;
     };
     if !matches!(operands.get(2), Some(Operand::Named(null)) if null == "null") {
@@ -444,6 +446,7 @@ fn load_step(instruction: &Instruction, name: &str) -> Option<Step> {
         pair: u32::from(*pair),
         offset,
         destination: vector_destination(operands.first())
+            .filter(|_| !store)
             .map(|first| (first, crate::evaluate::written_vectors(name))),
     })
 }
@@ -588,7 +591,7 @@ fn wave_vector_step(family: &str, name: &str, instruction: &Instruction) -> Opti
     let destination = vector_destination(operands.first())?;
     let at = |index: usize| operands.get(index).and_then(source);
     if let Some(word) = sdwa {
-        // Only the carry-in add, as the model translates it (`SDWA_CARRY`).
+        // Only the carry-in add over whole registers; the model decides every other SDWA form.
         if name != "v_add_co_ci_u32_e32" {
             return None;
         }

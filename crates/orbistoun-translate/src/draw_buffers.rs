@@ -56,13 +56,15 @@ pub enum BufferSource {
     Global(Box<GlobalLoads>),
 }
 
-/// A primitive shader's global loads with no scalar base (D758): the program through the last of
-/// them, and where each is and how far past its address it reads.
+/// A primitive shader's global loads with no scalar base (D758), and a dispatch's global stores too
+/// (D961): the program through the last of them, and where each is and how far past its address it
+/// reads or writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GlobalLoads {
-    /// The program's words through the last load.
+    /// The program's words through the last access.
     pub prefix: Vec<u32>,
-    /// Each load's byte offset in the program, and how many bytes it reads from its address.
+    /// Each access's byte offset in the program, and how many bytes it reads or writes from its
+    /// address.
     pub loads: Vec<(u32, u32)>,
     /// The scalar register the stage's first user-data word lands in.
     pub first_register: u32,
@@ -181,6 +183,18 @@ impl Default for DescriptorReads {
     }
 }
 
+/// A buffer descriptor table a dispatch selects a record of at run time (D966): a scalar buffer
+/// load of four words through the table's descriptor at a scalar offset the program computes, the
+/// words then read through as a descriptor. Every record the table holds is bound, and the module
+/// reads through whichever record the program selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SelectedTable {
+    /// The table's own descriptor, as the program traced it.
+    pub words: [DescriptorWord; 4],
+    /// Where a record's descriptor starts in its record: the selecting load's immediate offset.
+    pub element: u32,
+}
+
 /// A module's buffers and the accesses that read through each.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrawBuffers {
@@ -197,6 +211,14 @@ pub struct DrawBuffers {
     /// The offset and name of the first store that kept the program from being traced at all: one
     /// a snapshot bound for a draw would not see, or a dispatch's that is not a buffer store.
     pub untraced_by: Option<(u32, String)>,
+    /// A dispatch's computed slots whose descriptor is a record of a table it selects from at run
+    /// time, with the table (D966). Where the host cannot find the descriptor before the program
+    /// runs, every record of the table is bound, in the dispatch's global buffer of pages.
+    pub tables: BTreeMap<u32, SelectedTable>,
+    /// Those of [`Self::tables`]' slots that accesses at more than one place share, whose records
+    /// may differ between them (D966): a run up to the first does not find the others', so the
+    /// table is always bound whole.
+    pub several: std::collections::BTreeSet<u32>,
 }
 
 /// Traces the buffers a program reads through, for a stage whose `count` user-data words land in
@@ -247,19 +269,7 @@ pub fn trace_skipping(
     skipped: &std::collections::BTreeSet<u32>,
 ) -> DrawBuffers {
     let named = named_instructions(decode, encodings);
-    let untraced_by = decode
-        .instructions
-        .iter()
-        .zip(&named)
-        .filter(|(instruction, _)| !skipped.contains(&instruction.offset))
-        .find_map(|(instruction, named)| {
-            let (_, name) = (*named)?;
-            // A pixel shader's image store reaches a harness image, not the guest's: still untraced.
-            (writes_memory(name)
-                && !(stores
-                    && (bound_buffer_store(name) || (dispatch && bound_image_access(name)))))
-            .then(|| (instruction.offset, name.to_owned()))
-        });
+    let untraced_by = untraced_by(decode, &named, (stores, dispatch), skipped);
     if untraced_by.is_some() {
         return DrawBuffers {
             untraced_by,
@@ -281,6 +291,8 @@ pub fn trace_skipping(
     } else {
         vec![None; blocks.len()]
     };
+    // Which registers hold a record a dispatch selected from a descriptor table at run time (D966).
+    let selections = selection_entries(decode, &named, (&blocks, &reached), dispatch);
 
     // Every access, with the state it reads, in program order: the bases' reach is known only once
     // every load through them has been seen.
@@ -291,11 +303,14 @@ pub fn trace_skipping(
     // Each computed access that reads what an earlier one in its block read, with nothing between
     // them writing it: that earlier access, whose buffer it shares (D952).
     let mut shared = BTreeMap::new();
-    for ((block, state), lanes) in blocks.iter().zip(reached).zip(indices) {
+    for (((block, state), lanes), selected) in
+        blocks.iter().zip(reached).zip(indices).zip(selections)
+    {
         let Some(mut held) = state else {
             continue;
         };
         let mut lanes = lanes.unwrap_or_default();
+        let mut selected = selected.unwrap_or_default();
         let mut sharing = ComputedSharing::new();
         for (instruction, named) in decode.instructions[block.first..block.end]
             .iter()
@@ -304,7 +319,7 @@ pub fn trace_skipping(
             if skipped.contains(&instruction.offset) {
                 // A scratch access writes vector registers alone, which nothing here traces.
             } else if let Some(&(_, name)) = named.as_ref()
-                && let Some(access) = access(instruction, name, &held)
+                && let Some(access) = access(instruction, name, &held, dispatch)
             {
                 if bound_buffer_store(name) {
                     stores.insert(instruction.offset);
@@ -312,22 +327,32 @@ pub fn trace_skipping(
                 if name.starts_with("buffer_atomic_") {
                     atomics.insert(instruction.offset);
                 }
-                if let Access::Computed { through, soffset } = access
+                if let Access::Computed {
+                    through, soffset, ..
+                } = access
                     && let Some(first) = sharing.reads(instruction.offset, through, soffset)
                 {
                     shared.insert(instruction.offset, first);
                 }
-                let access = indexed_by(access, instruction, &lanes);
+                let access = indexed_by(selected_by(access, name, &selected), instruction, &lanes);
                 accesses.push((instruction.offset, access));
             } else if let Some(&(_, name)) = named.as_ref()
                 && (globals || dispatch)
                 && let Some(bytes) = global_load(instruction, name)
             {
                 accesses.push((instruction.offset, Access::Global { bytes }));
+            } else if let Some(&(_, name)) = named.as_ref()
+                && dispatch
+                && let Some(bytes) = global_store(instruction, name)
+            {
+                // A dispatch's global stores reach the global loads' buffer, written back (D961).
+                stores.insert(instruction.offset);
+                accesses.push((instruction.offset, Access::Global { bytes }));
             }
             if !lanes.is_empty() {
                 step_lanes(&mut lanes, &held, instruction, *named);
             }
+            step_selections(&mut selected, &held, instruction, *named);
             sharing.step(instruction, *named);
             step(&mut held, instruction, *named);
         }
@@ -353,6 +378,31 @@ pub fn trace_skipping(
         .map(|(_, &slot)| slot)
         .collect();
     buffers
+}
+
+/// The offset and name of the first write that keeps a program from being traced: any that is
+/// not, where `stores` are traced, a buffer store, or in a `dispatch` an image access it binds whole
+/// or a global store its global buffer takes (D961). A pixel shader's image store reaches a harness
+/// image, not the guest's, and stays untraced.
+fn untraced_by(
+    decode: &Decode,
+    named: &[Option<(&str, &str)>],
+    (stores, dispatch): (bool, bool),
+    skipped: &std::collections::BTreeSet<u32>,
+) -> Option<(u32, String)> {
+    decode
+        .instructions
+        .iter()
+        .zip(named)
+        .filter(|(instruction, _)| !skipped.contains(&instruction.offset))
+        .find_map(|(instruction, named)| {
+            let (_, name) = (*named)?;
+            let bound = bound_buffer_store(name)
+                || (dispatch
+                    && (bound_image_access(name) || global_store(instruction, name).is_some()));
+            (writes_memory(name) && !(stores && bound))
+                .then(|| (instruction.offset, name.to_owned()))
+        })
 }
 
 /// Each instruction's family and mnemonic, [`None`] for one the tables do not name.
@@ -506,13 +556,22 @@ fn slots(
                 globals.push((offset, bytes));
                 continue;
             }
-            Access::Computed { through, soffset } => {
+            Access::Computed {
+                through,
+                soffset,
+                table,
+            } => {
                 let Some(prefix) = prefix_words(decode, offset) else {
                     continue;
                 };
                 (
-                    // One that shares an earlier access's descriptor is that access's (D952).
-                    Key::Computed(shared.get(&offset).copied().unwrap_or(offset)),
+                    match table {
+                        // Every access reading through a record of one table shares the table,
+                        // wherever it is: each reads through the record it selected (D966).
+                        Some(table) => Key::Table(table),
+                        // One that shares an earlier access's descriptor is that access's (D952).
+                        None => Key::Computed(shared.get(&offset).copied().unwrap_or(offset)),
+                    },
                     BufferSource::Computed(Box::new(Computed {
                         prefix,
                         at: offset,
@@ -533,7 +592,8 @@ fn slots(
                 BufferSource::Pointer { base, extent: end },
             ),
         };
-        let slot = if let Some(slot) = keys.iter().position(|k| *k == key) {
+        let earlier = keys.iter().position(|k| *k == key);
+        let slot = if let Some(slot) = earlier {
             sources[slot] = combined(sources[slot].clone(), source);
             slot
         } else {
@@ -541,9 +601,25 @@ fn slots(
             sources.push(source);
             sources.len() - 1
         };
-        buffers
-            .served
-            .insert(offset, u32::try_from(slot).unwrap_or(u32::MAX));
+        let slot = u32::try_from(slot).unwrap_or(u32::MAX);
+        if let Key::Table(table) = key {
+            buffers.tables.insert(slot, table);
+            if earlier.is_some() {
+                buffers.several.insert(slot);
+            }
+        }
+        buffers.served.insert(offset, slot);
+    }
+    // A table's records are bound in the global buffer of pages (D966): a dispatch with no global
+    // access of its own still has one, holding nothing else.
+    if globals.is_empty() && !buffers.tables.is_empty() {
+        sources.push(BufferSource::Global(Box::new(GlobalLoads {
+            prefix: Vec::new(),
+            loads: Vec::new(),
+            first_register,
+            user_data,
+            width: 64,
+        })));
     }
     // Every global load through one buffer, after the others: the run that finds their addresses
     // goes through the last of them.
@@ -625,6 +701,7 @@ enum Key {
     Descriptor([DescriptorWord; 4]),
     Pointer(TableBase),
     Computed(u32),
+    Table(SelectedTable),
 }
 
 /// What a computed access reads (D952): whether through a base pair rather than a descriptor, its
@@ -732,6 +809,8 @@ enum Access {
     Computed {
         through: ComputedAccess,
         soffset: u8,
+        /// The table a dispatch selected the descriptor from at run time, where it did (D966).
+        table: Option<SelectedTable>,
     },
     /// A global load with no scalar base, reading `bytes` from its address (D758).
     Global { bytes: u32 },
@@ -747,6 +826,27 @@ fn global_load(instruction: &Instruction, name: &str) -> Option<u32> {
         _ => match name.strip_prefix("global_load_dword")? {
             "" => 4,
             count => 4 * count.strip_prefix('x')?.parse::<u32>().ok()?,
+        },
+    };
+    match instruction.operands.get(2)? {
+        Operand::Named(base) if base == crate::model::FLAT_NO_BASE => Some(bytes),
+        _ => None,
+    }
+}
+
+/// The bytes a global store with no scalar base writes, for the stores a dispatch's global buffer
+/// takes (D961): whole words, one to four, or a byte or a half, which merges into the word holding
+/// it as one step a part, keeping what another lane's store writes of the rest (D977).
+fn global_store(instruction: &Instruction, name: &str) -> Option<u32> {
+    let bytes = match name {
+        "global_store_byte" => 1,
+        "global_store_short" => 2,
+        _ => match name.strip_prefix("global_store_dword")? {
+            "" => 4,
+            "x2" => 8,
+            "x3" => 12,
+            "x4" => 16,
+            _ => return None,
         },
     };
     match instruction.operands.get(2)? {
@@ -1015,6 +1115,185 @@ fn indexed_by(mut access: Access, instruction: &Instruction, lanes: &Lanes) -> A
     access
 }
 
+/// What a scalar register holds of a descriptor a dispatch selected from a table at run time
+/// (D966): the table, and which of the descriptor's four words.
+type Selection = (SelectedTable, u8);
+
+/// Each scalar register's [`Selection`], [`None`] for one holding anything else.
+type Selections = Vec<Option<Selection>>;
+
+/// The table and destination of a load selecting a descriptor from a table at run time (D966):
+/// `s_buffer_load_dwordx4` through a traced descriptor at an offset register, neither `null` nor an
+/// inline constant, which the program computes. Its immediate is where the descriptor lies in the
+/// record the offset selects.
+fn selecting_load(
+    instruction: &Instruction,
+    name: &str,
+    held: &Held,
+) -> Option<(u16, SelectedTable)> {
+    if name != "s_buffer_load_dwordx4" {
+        return None;
+    }
+    let [
+        Operand::Scalar(destination),
+        Operand::Scalar(base),
+        Operand::Immediate(offset),
+    ] = instruction.operands.as_slice()
+    else {
+        return None;
+    };
+    let code = (instruction.second_word? >> 25) & 0x7f;
+    if code >= u32::from(SOFFSET_NULL) || !solved_scalar_offset(instruction) {
+        return None;
+    }
+    let words = descriptor(held, *base)?;
+    let element = u32::try_from(*offset).ok()?;
+    Some((*destination, SelectedTable { words, element }))
+}
+
+/// The table the four registers from `first` hold a selected descriptor of, in order (D966).
+fn selected_table(selected: &Selections, first: u16) -> Option<SelectedTable> {
+    let mut table = None;
+    for word in 0..4_u8 {
+        let (held, at) = selected
+            .get(usize::from(first) + usize::from(word))
+            .copied()
+            .flatten()?;
+        if at != word || table.is_some_and(|table| table != held) {
+            return None;
+        }
+        table = Some(held);
+    }
+    table
+}
+
+/// `access` with the table its descriptor was selected from at run time, where it reads through
+/// one (D966): a vector access that adds no scalar offset, whose reach the record's own descriptor
+/// then bounds, or a scalar buffer load, which reads within the record's descriptor whatever its
+/// offset - at an offset register, every byte of it.
+fn selected_by(mut access: Access, name: &str, selected: &Selections) -> Access {
+    let Access::Computed {
+        through: ComputedAccess::Descriptor { first, reads },
+        soffset,
+        table,
+    } = &mut access
+    else {
+        return access;
+    };
+    let scalar = name.starts_with("s_buffer_load");
+    // `null`, or the inline constant zero.
+    let no_offset = *soffset == SOFFSET_NULL || *soffset == 128;
+    if !scalar && !no_offset {
+        return access;
+    }
+    *table = selected_table(selected, *first);
+    if scalar && table.is_some() && *soffset != SOFFSET_NULL {
+        reads.scalar_reach = u32::MAX;
+    }
+    access
+}
+
+/// Which scalar registers each reachable block starts with a selected descriptor's words in
+/// (D966), carried along every branch until they settle; a register two paths disagree on holds
+/// none. The scalar registers each block starts with, `scalars`, have settled already. Only a
+/// `dispatch` selects so; any other program's blocks hold none.
+fn selection_entries(
+    decode: &Decode,
+    named: &[Option<(&str, &str)>],
+    (blocks, scalars): (&[crate::blocks::Block], &[Option<Held>]),
+    dispatch: bool,
+) -> Vec<Option<Selections>> {
+    let mut entries: Vec<Option<Selections>> = vec![None; blocks.len()];
+    let Some(first) = entries.first_mut().filter(|_| dispatch) else {
+        return entries;
+    };
+    *first = Some(vec![None; crate::model::SCALAR_REGISTERS as usize]);
+    let mut pending = vec![0usize];
+    while let Some(index) = pending.pop() {
+        let (Some(block), Some(Some(start)), Some(Some(held))) =
+            (blocks.get(index), entries.get(index), scalars.get(index))
+        else {
+            continue;
+        };
+        let (mut selected, mut held) = (start.clone(), held.clone());
+        for (instruction, named) in decode.instructions[block.first..block.end]
+            .iter()
+            .zip(&named[block.first..block.end])
+        {
+            step_selections(&mut selected, &held, instruction, *named);
+            step(&mut held, instruction, *named);
+        }
+        for successor in successors(block)
+            .into_iter()
+            .filter_map(|at| crate::blocks::block_at(blocks, at))
+        {
+            let changed = match &mut entries[successor] {
+                slot @ None => {
+                    *slot = Some(selected.clone());
+                    true
+                }
+                Some(known) => {
+                    let mut changed = false;
+                    for (word, theirs) in known.iter_mut().zip(&selected) {
+                        if word.is_some() && *word != *theirs {
+                            *word = None;
+                            changed = true;
+                        }
+                    }
+                    changed
+                }
+            };
+            if changed {
+                pending.push(successor);
+            }
+        }
+    }
+    entries
+}
+
+/// Carries `selected` over one instruction (D966): a selecting load fills its four registers, a
+/// scalar move copies what its source holds, and every other register an instruction may write
+/// holds none, as [`written_registers`] finds them. A block no selection reaches carries none.
+fn step_selections(
+    selected: &mut Selections,
+    held: &Held,
+    instruction: &Instruction,
+    named: Option<(&str, &str)>,
+) {
+    if selected.is_empty() {
+        return;
+    }
+    let at = |register: u16| selected.get(usize::from(register)).copied().flatten();
+    let mut set: Vec<(u16, Option<Selection>)> = Vec::new();
+    match (named.map(|(_, name)| name), instruction.operands.as_slice()) {
+        (Some("s_mov_b32"), [Operand::Scalar(destination), Operand::Scalar(source)]) => {
+            set.push((*destination, at(*source)));
+        }
+        (Some("s_mov_b64"), [Operand::Scalar(destination), Operand::Scalar(source)]) => {
+            set.push((*destination, at(*source)));
+            set.push((destination + 1, at(source + 1)));
+        }
+        (Some(name), _) => {
+            if let Some((destination, table)) = selecting_load(instruction, name, held) {
+                for word in 0..4_u8 {
+                    set.push((destination + u16::from(word), Some((table, word))));
+                }
+            }
+        }
+        (None, _) => {}
+    }
+    for register in written_registers(instruction, named) {
+        if let Some(word) = selected.get_mut(register) {
+            *word = None;
+        }
+    }
+    for (register, value) in set {
+        if let Some(word) = selected.get_mut(usize::from(register)) {
+            *word = value;
+        }
+    }
+}
+
 /// Narrows `known` to what it shares with `other`, answering whether anything changed.
 fn meet(known: &mut Held, other: &Held) -> bool {
     let mut changed = false;
@@ -1037,6 +1316,7 @@ fn writes_memory(name: &str) -> bool {
 /// or one converting by its descriptor's format (D738), which addresses the buffer the same way.
 fn bound_buffer_store(name: &str) -> bool {
     name.starts_with("buffer_store_dword")
+        || matches!(name, "buffer_store_byte" | "buffer_store_short")
         || name.starts_with("buffer_store_format_")
         || name.starts_with("buffer_atomic_")
 }
@@ -1045,7 +1325,8 @@ fn bound_buffer_store(name: &str) -> bool {
 /// does its buffers (D746): such an access needs no window and keeps no buffer from being traced.
 /// A size query asks the image a load would read, and reads no memory at all; a sample at a named
 /// level or by gradients reads the image a fetch would, through its sampler (D904), and so does a
-/// gather (D913).
+/// gather (D913). A depth-compare sample at level zero reads it too, the comparison made in the
+/// module, since a dispatch's images are bound as their texels (D976).
 pub(crate) fn bound_image_access(name: &str) -> bool {
     matches!(
         name,
@@ -1056,6 +1337,7 @@ pub(crate) fn bound_image_access(name: &str) -> bool {
             | "image_get_resinfo"
             | "image_sample_lz"
             | "image_sample_lz_o"
+            | "image_sample_c_lz"
             | "image_sample_l"
             | "image_sample_d"
             | "image_gather4_lz"
@@ -1107,8 +1389,9 @@ fn table_base(held: &Held, first: u16) -> Option<TableBase> {
 }
 
 /// The traced access an instruction makes, if it reads through a buffer and its descriptor or base
-/// is traced.
-fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> {
+/// is traced. In a `dispatch`, a scalar buffer load through a traced descriptor at an offset the
+/// program computes reaches the descriptor's whole buffer (D966).
+fn access(instruction: &Instruction, name: &str, held: &Held, dispatch: bool) -> Option<Access> {
     let operands = instruction.operands.as_slice();
     if name.starts_with("s_load_dword") || name.starts_with("s_buffer_load_dword") {
         let [_, Operand::Scalar(base), Operand::Immediate(offset)] = operands else {
@@ -1124,6 +1407,7 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
             return Some(Access::Computed {
                 through: ComputedAccess::Pointer { base: *base, end },
                 soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
+                table: None,
             });
         }
         if name.starts_with("s_buffer_load") && solved_scalar_offset(instruction) {
@@ -1139,12 +1423,24 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
                 Some(words) if plain_scalar_offset(instruction) => {
                     Some(Access::Descriptor(words, reads))
                 }
+                // A dispatch's load at an offset it computes through a descriptor it does not:
+                // the load reads zero past the descriptor's records whatever the offset, so the
+                // records are every byte it can read, and every such load through the descriptor
+                // shares them (D966). A table a record is selected from is read this way.
+                Some(words) if dispatch => Some(Access::Descriptor(
+                    words,
+                    DescriptorReads {
+                        scalar_reach: u32::MAX,
+                        ..DescriptorReads::default()
+                    },
+                )),
                 _ => Some(Access::Computed {
                     through: ComputedAccess::Descriptor {
                         first: *base,
                         reads,
                     },
                     soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
+                    table: None,
                 }),
             };
         }
@@ -1186,6 +1482,7 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
                     reads,
                 },
                 soffset: u8::try_from(instruction.second_word? >> 24).ok()?,
+                table: None,
             }),
         };
     }
@@ -1342,8 +1639,14 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
                 // where it has one, goes to `vcc`, which no operand names.
                 "SOP1" | "SOP2" | "SOPK" | "VOP1" | "VOP2" | "VOPC" => (true, false),
                 "SMEM" => {
+                    // A load writes the words its name states, and no more: forgetting past them
+                    // lost the pair after a two-word load, a table base the program still read
+                    // through (D966). Any other scalar memory instruction forgets four.
+                    let load =
+                        name.starts_with("s_load_dword") || name.starts_with("s_buffer_load_dword");
                     if let Some(Operand::Scalar(destination)) = operands.first() {
-                        forget(held, *destination, scalar_words(name).max(4));
+                        let words = scalar_words(name);
+                        forget(held, *destination, if load { words } else { words.max(4) });
                     }
                     (false, false)
                 }
@@ -1370,6 +1673,9 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
         }
     }
 }
+
+#[cfg(test)]
+mod table_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1488,6 +1794,56 @@ mod tests {
         assert_eq!(draw.untraced_by, Some((12, "image_store".to_owned())));
     }
 
+    /// A dispatch that writes with global stores still traces its buffers: each store reaches the
+    /// global loads' buffer, which it marks written, as Grand Theft Auto V's compute programs at
+    /// 0x74005b854a00 and 0x74005b857200 store through `global_store_dword` beside a
+    /// `buffer_load_format_x`. A draw's global store keeps it untraced.
+    #[test]
+    fn a_dispatch_s_global_store_leaves_its_buffers_traced() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // global_store_dword v[2:3], v1, off.
+        let mut program = COPY[..3].to_vec();
+        program.extend([0xdc70_8000, 0x007d_0102]);
+        program.push(END);
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let names: Vec<String> = decoded
+            .instructions
+            .iter()
+            .map(|i| crate::instruction_name(i, &encodings))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "buffer_load_dword",
+                "s_waitcnt",
+                "global_store_dword",
+                "s_endpgm"
+            ],
+            "the hand-assembled program"
+        );
+        let dispatch = trace(&decoded, &encodings, (0, 24), (true, false));
+        assert_eq!(dispatch.untraced_by, None);
+        assert_eq!(
+            dispatch.served,
+            std::collections::BTreeMap::from([(0, 0), (12, 1)])
+        );
+        let Some(BufferSource::Global(global)) = dispatch.sources.get(1) else {
+            panic!(
+                "the store reaches the global buffer: {:?}",
+                dispatch.sources
+            );
+        };
+        assert_eq!(global.loads, [(12, 4)]);
+        assert_eq!(dispatch.stored, std::collections::BTreeSet::from([1]));
+        let draw = trace(&decoded, &encodings, (0, 24), (false, false));
+        assert_eq!(
+            draw.untraced_by,
+            Some((12, "global_store_dword".to_owned()))
+        );
+    }
+
     /// A computed descriptor after a multiply-add with an inline constant is traced with the program
     /// before it whole: `v_madmk_f32`'s constant is a dword of its own that no literal operand
     /// names, and the prefix is rebuilt from every dword. PPSA03416's fetch shader, past its title
@@ -1595,10 +1951,11 @@ mod tests {
                 .is_empty(),
             "a draw's store is not traced"
         );
-        let mut global = COPY[..3].to_vec();
-        // global_store_dword v[0:1], v2, off
-        global.extend([0xdc70_8000, 0x007d_0200, END]);
-        let other = trace(&decode(&global), &encodings, (0, 16), (true, false));
+        let mut based = COPY[..3].to_vec();
+        // global_store_dword v0, v2, s[0:1]: a store through a scalar base, which no buffer takes.
+        // A byte store through a buffer is traced, merged into its word (D977).
+        based.extend([0xdc70_8000, 0x0000_0200, END]);
+        let other = trace(&decode(&based), &encodings, (0, 16), (true, false));
         assert!(
             other.sources.is_empty(),
             "a dispatch that stores another way traces nothing"

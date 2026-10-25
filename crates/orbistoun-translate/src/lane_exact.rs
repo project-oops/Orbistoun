@@ -14,6 +14,11 @@
 //! A program that reads a mask whole and needs nothing else of its wave runs per lane too, each
 //! invocation holding every lane's bits (D884): by the host subgroup's ballot where the subgroup is
 //! the wave, and through workgroup memory where the group is one wave. [`lane_masks`] says which.
+//!
+//! Where the host's subgroup carries the wave - its width, or half of it with two lanes an
+//! invocation - every need but a scalar store runs per lane (D973): masks are the subgroup's
+//! ballots, another lane's value its shuffle, and the wave's order at the local data share the
+//! subgroup's barrier.
 
 use std::collections::BTreeSet;
 
@@ -61,15 +66,15 @@ pub const fn refusal(need: LaneNeed) -> &'static str {
         ),
         LaneNeed::CrossLane => concat!(
             "the program reads another lane's value, and one invocation per lane holds only its own ",
-            "lane's registers (D880)"
+            "lane's registers where the host's subgroup does not carry its wave (D880, D973)"
         ),
         LaneNeed::LocalShare => concat!(
-            "the program uses the local data share, which one invocation per lane does not share ",
-            "between a wave's lanes (D880)"
+            "the program uses the local data share, which one invocation per lane does not keep in ",
+            "its wave's order where the host's subgroup does not carry the wave (D880, D973)"
         ),
         LaneNeed::Barrier => concat!(
             "the program waits at a barrier, which one invocation per lane does not hold its wave ",
-            "at (D880)"
+            "at where the host's subgroup does not carry it (D880, D973)"
         ),
         LaneNeed::ScalarEffect => concat!(
             "the program stores or makes an atomic through the scalar unit, which one invocation ",
@@ -87,6 +92,30 @@ pub enum LaneMasks {
     Ballot,
     /// Every lane's bits, through workgroup memory between barriers: the group is one wave (D884).
     Exchange,
+    /// Two lanes an invocation, its place in its subgroup and that place plus thirty-two: a wave of
+    /// sixty-four on a subgroup of thirty-two (D973). Every lane's bits are the subgroup's two
+    /// ballots, one for each of an invocation's lanes, and another lane's value is a shuffle of
+    /// the half it is in.
+    Halves,
+}
+
+impl LaneMasks {
+    /// How many of its wave's lanes one invocation runs: two where it holds a half of each
+    /// (D973), else one.
+    #[must_use]
+    pub const fn lanes_an_invocation(self) -> u32 {
+        match self {
+            Self::Halves => 2,
+            Self::Own | Self::Ballot | Self::Exchange => 1,
+        }
+    }
+
+    /// Whether the host's subgroup carries the wave, so its masks are ballots and its lane reads
+    /// shuffles: a barrier among a wave's lanes is then the subgroup's, never the workgroup's.
+    #[must_use]
+    pub const fn by_subgroup(self) -> bool {
+        matches!(self, Self::Ballot | Self::Halves)
+    }
 }
 
 /// Why a program that reads a mask whole is not run one invocation per lane where neither exchange
@@ -103,14 +132,31 @@ pub const WHOLE_MASK_ACROSS_WAVES: &str = concat!(
 ///
 /// # Errors
 ///
-/// Why the program keeps the whole wave in one invocation: any need but a whole mask (D880), or a
-/// whole mask in a group of several waves the host's subgroup cannot ballot (D884).
+/// Why the program keeps the whole wave in one invocation: a scalar store or atomic (D880); where
+/// the host's subgroup does not carry the wave (D973), any need but a whole mask, or a whole mask
+/// in a group of several waves (D884).
 pub fn lane_masks(
     needs: &LaneNeeds,
     lanes: u32,
     subgroup: Option<u32>,
     waves: u32,
 ) -> Result<LaneMasks, &'static str> {
+    // A scalar store is made by every invocation that computes it, however its lanes are held.
+    if needs.has(LaneNeed::ScalarEffect) {
+        return Err(refusal(LaneNeed::ScalarEffect));
+    }
+    if needs.exact() {
+        return Ok(LaneMasks::Own);
+    }
+    // A subgroup that carries the wave serves every other need (D973): masks are its ballots,
+    // another lane's value its shuffle, and the wave's own order at the local data share and
+    // its barrier the subgroup's barrier.
+    if subgroup == Some(lanes) {
+        return Ok(LaneMasks::Ballot);
+    }
+    if subgroup.is_some_and(|width| width * 2 == lanes) {
+        return Ok(LaneMasks::Halves);
+    }
     if let Some(&(need, _, _)) = needs
         .needs
         .iter()
@@ -118,11 +164,7 @@ pub fn lane_masks(
     {
         return Err(refusal(need));
     }
-    if !needs.has(LaneNeed::WholeMask) {
-        Ok(LaneMasks::Own)
-    } else if subgroup == Some(lanes) {
-        Ok(LaneMasks::Ballot)
-    } else if waves == 1 {
+    if waves == 1 {
         Ok(LaneMasks::Exchange)
     } else {
         Err(WHOLE_MASK_ACROSS_WAVES)
@@ -260,7 +302,8 @@ pub fn lane_needs(decode: &Decode, encodings: &EncodingTable, lanes: u32) -> Lan
             .encoding
             .and_then(|e| families.get(usize::from(e)))
             .and_then(|family| family.modifier_selected(&[instruction.word]))
-            .is_some_and(|marker| !crate::model::sdwa_translated(marker, instruction, encodings));
+            // An SDWA form reads only its own lane (D979); any other modifier is a DPP form.
+            .is_some_and(|marker| marker != crate::model::SDWA_MARKER);
         if crosses_lanes(name) || dpp {
             needs.add(LaneNeed::CrossLane, instruction, name);
         } else if name.starts_with("ds_") {
@@ -371,9 +414,12 @@ mod tests {
         };
         assert_eq!(lane_masks(&whole, 32, Some(32), 4), Ok(LaneMasks::Ballot));
         assert_eq!(lane_masks(&whole, 64, Some(64), 2), Ok(LaneMasks::Ballot));
-        assert_eq!(lane_masks(&whole, 64, Some(32), 1), Ok(LaneMasks::Exchange));
+        assert_eq!(lane_masks(&whole, 64, Some(32), 1), Ok(LaneMasks::Halves));
+        assert_eq!(lane_masks(&whole, 64, Some(32), 2), Ok(LaneMasks::Halves));
         assert_eq!(lane_masks(&whole, 64, None, 1), Ok(LaneMasks::Exchange));
-        assert!(lane_masks(&whole, 64, Some(32), 2).is_err());
+        assert!(lane_masks(&whole, 64, None, 2).is_err());
+        assert!(lane_masks(&whole, 64, Some(16), 1).is_ok());
+        assert!(lane_masks(&whole, 64, Some(16), 2).is_err());
         assert_eq!(
             lane_masks(&super::LaneNeeds::default(), 64, Some(32), 2),
             Ok(LaneMasks::Own)
@@ -385,6 +431,15 @@ mod tests {
             ],
             lane_bits: false,
         };
-        assert!(lane_masks(&shared, 32, Some(32), 1).is_err());
+        // The local data share needs a subgroup that carries the wave (D973).
+        assert_eq!(lane_masks(&shared, 32, Some(32), 4), Ok(LaneMasks::Ballot));
+        assert_eq!(lane_masks(&shared, 64, Some(32), 2), Ok(LaneMasks::Halves));
+        assert!(lane_masks(&shared, 64, None, 1).is_err());
+        let scalar = super::LaneNeeds {
+            needs: vec![(LaneNeed::ScalarEffect, 0, "s_store_dword".to_owned())],
+            lane_bits: false,
+        };
+        assert!(lane_masks(&scalar, 64, Some(32), 1).is_err());
+        assert!(lane_masks(&scalar, 32, Some(32), 1).is_err());
     }
 }

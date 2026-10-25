@@ -11,7 +11,13 @@
 use orbistoun_gpu_vulkan::{Availability, dispatch, probe};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::predicated::MEMORY_WORDS as MEMORY_WORDS_U32;
-use orbistoun_translate::{Fidelity, Strategy, Width, translate};
+use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
+use orbistoun_translate::{Fidelity, Strategy, Width, translate, translate_with_user_data};
+
+/// The `FLOAT_MODE` both models translate under: every subnormal kept. Left undeclared, a driver
+/// may flush them in one model's code and not the other's, and the models would disagree over the
+/// driver's choice rather than their own.
+const FLOAT_MODE: u8 = 0xf0;
 
 const MEMORY_WORDS: usize = MEMORY_WORDS_U32 as usize;
 const PER_FILE: usize = 8;
@@ -248,18 +254,38 @@ fn program(t: &EncodingTable, seed: u64) -> Vec<u32> {
     program
 }
 
-fn device_or_skip(test: &str) -> bool {
+fn device_or_skip(test: &str) -> Option<bool> {
     match probe() {
-        Availability::Available { .. } => true,
+        Availability::Available { properties } => Some(properties.subnormals_preserved),
         Availability::Unavailable { reason } => {
             println!();
             println!("!! SKIPPED: {test}");
             println!("!! no Vulkan device: {reason}");
             println!("!! the models were NOT compared");
             println!();
-            false
+            None
         }
     }
+}
+
+/// `wave` with each word that `lane` leaves subnormal and `wave` zero, or the other way about, taken
+/// from `lane`: all a device that cannot keep subnormals on request lets two models be compared on.
+/// Where the declared [`FLOAT_MODE`] cannot be honoured, the driver chooses per instruction
+/// whether to flush, and may choose differently in the two models' code. Any other difference
+/// still counts.
+fn reconciled(lane: &[u32], wave: &[u32]) -> Vec<u32> {
+    let zero_or_subnormal = |word: u32| word & 0x7f80_0000 == 0;
+    let zero = |word: u32| word.trailing_zeros() >= 31;
+    lane.iter()
+        .zip(wave)
+        .map(|(&l, &w)| {
+            if zero_or_subnormal(l) && zero_or_subnormal(w) && (zero(l) || zero(w)) {
+                l
+            } else {
+                w
+            }
+        })
+        .collect()
 }
 
 /// Runs a program at one fidelity, returning the observed registers and memory.
@@ -271,12 +297,18 @@ fn run(words: &[u32], fidelity: Fidelity) -> Option<(Vec<u32>, Vec<u32>)> {
     if !decoded.is_trustworthy() {
         return None;
     }
-    let translated = translate(
+    let translated = translate_with_user_data(
         &decoded,
         &table,
         Strategy::Predicated {
             fidelity,
             width: Width::default(),
+        },
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            float_mode: Some(FLOAT_MODE),
+            ..UserData::default()
         },
     )
     .ok()?;
@@ -287,8 +319,14 @@ fn run(words: &[u32], fidelity: Fidelity) -> Option<(Vec<u32>, Vec<u32>)> {
 /// Both models leave identical registers and memory on every generated program.
 #[test]
 fn the_two_models_agree_on_generated_programs() {
-    if !device_or_skip("the_two_models_agree_on_generated_programs") {
+    let Some(kept) = device_or_skip("the_two_models_agree_on_generated_programs") else {
         return;
+    };
+    if !kept {
+        println!(concat!(
+            "!! this device cannot keep 32-bit subnormals on request: a word one model ",
+            "leaves subnormal and the other zero is not counted as a disagreement",
+        ));
     }
 
     let table = EncodingTable::builtin().expect("encodings");
@@ -305,6 +343,11 @@ fn the_two_models_agree_on_generated_programs() {
             continue;
         };
 
+        let wave = if kept {
+            wave
+        } else {
+            (reconciled(&lane.0, &wave.0), reconciled(&lane.1, &wave.1))
+        };
         assert_eq!(
             lane.0, wave.0,
             concat!(
