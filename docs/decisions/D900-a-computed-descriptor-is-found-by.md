@@ -23,6 +23,11 @@ reach it with and where their runs ended, or why the waves could not be run. Ame
 above 256 waves, every wave of a lattice of the dispatch's groups runs instead. What the lattice
 reaches is bound as one buffer with a margin, and an access outside it is an escape.
 
+Relaxed by D964: a dispatch whose waves the host cannot run to the access, refused here because
+the host cannot know what it reaches, runs device-addressed where the device maps guest memory.
+Its unresolved accesses then reach guest memory by device address, and nothing is bound for them.
+The rejected alternative below stands for every dispatch the host can resolve.
+
 **Why:** Grand Theft Auto V's compute program at `0x74005b87ce00` picks each lane's store buffer
 from a 65,536-entry descriptor table through a waterfall. The 15,517 buffers the table names span
 the guest's whole address space, so no one range can be bound for them. The descriptors a dispatch

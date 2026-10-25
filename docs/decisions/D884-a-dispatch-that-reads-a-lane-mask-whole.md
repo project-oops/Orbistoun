@@ -24,7 +24,10 @@ A group of several waves on a subgroup narrower than its wave keeps the whole wa
 invocation, with the reason said: its waves' scalar control flows differ, and an exchange's
 barriers inside one wave's branch would not be met by the others'. So does a program that also
 needs any other thing D880 names - another lane's value, the local data share, a barrier, a scalar
-store.
+store. Amended by D973: a wave of sixty-four on a subgroup of thirty-two runs two lanes an
+invocation, each half of its masks a ballot. A group of one wave or of several takes no barrier for
+it, and one that also needs another lane's value, the local data share or a barrier runs per lane
+too. Workgroup memory is left for a subgroup whose width is not known.
 
 **The execution mask's seed.** A group of one wave with no partial groups seeds the mask as a
 constant, as before. Otherwise each lane's bit is whether its thread runs (D855, D858), and the

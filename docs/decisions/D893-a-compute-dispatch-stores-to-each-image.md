@@ -1,6 +1,6 @@
 # D893 - A compute dispatch stores to each image its descriptors name
 
-**Status:** decided
+**Status:** superseded by D963 (up to sixteen storage images, each named by the load reaching its store)
 **Date:** 2026-10-19
 
 A compute module may store to up to four images. Each one is identified by the registers that hold

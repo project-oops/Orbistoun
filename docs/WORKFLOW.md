@@ -499,9 +499,11 @@ address the run's log gives them; each one's first dispatch is written to `dispa
 without being asked. `ORBISTOUN_CAPTURE_RECENT=<n>` keeps a copy of the latest `n` dispatches,
 within 256 MiB, as they run, and a loss of the device writes them too, to
 `dispatch-<addr>-r<ordinal>/`, listed oldest first in `dispatch-recent.txt` with any too large to
-keep; unset, nothing is copied. A capture holds the module, the user data, the grid, the
-guest-memory window and each bound image and buffer, with the guest range of the window and each buffer and the
-dispatch's place among the run's. `replay-dispatch` rebuilds the same bindings and reports each
+keep; unset, nothing is copied. A capture holds the module with what it was translated from - the
+guest program in `program.bin` and the translation context in `translation.json`, so it can be
+translated again, whole or cut short, and compared - the user data, the grid, the guest-memory
+window and each bound image and buffer, with the guest range of the window and each buffer and
+the dispatch's place among the run's. `replay-dispatch` rebuilds the same bindings and reports each
 run's device time, whether it lost the device, and a hash of its output, so two builds are
 compared on one dispatch; `--out` writes what it left, named as the inputs are, to compare with
 the next dispatch's inputs. `ORBISTOUN_WATCH_GPU=<addr>+<len>` compares a range after each
@@ -526,9 +528,12 @@ compile each one, on up to four threads, with no pipeline cache, and times it. A
 compiled as a dispatch's pipeline is; a draw's pipeline needs state the store does not keep, so a
 draw's module is timed as a shader module alone, which a driver that compiles at pipeline creation
 does in no time. `--write` keeps every row as TSV, so two builds' censuses diff line for line.
+`--validate` runs every module through `spirv-val` for Vulkan 1.3 (`ORBISTOUN_SPIRV_VAL`, the SDK
+`VULKAN_SDK` names, or `PATH`), lists each invalid one with the validator's message, and exits
+non-zero where any is (D975): a driver that runs a module has not shown it valid.
 
 ```bash
-orbistoun-cli shader-census <title> [--compile] [--top N] [--write <file>]
+orbistoun-cli shader-census <title> [--compile] [--validate] [--top N] [--write <file>]
 ```
 
 ## Outputs

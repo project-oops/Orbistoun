@@ -13,7 +13,10 @@ well, its stores dropped there (D881).
 - **The draw.** A `DRAW_INDEX_AUTO` whose registers enable streamout runs the program at
   `SPI_SHADER_PGM_LO/HI_VS` as compute waves of `VS_W32_EN`'s width. Each wave takes whole
   primitives, one thread per vertex, and its `v0` holds the draw's vertex id
-  (`ComputeInputs::first_thread`). Its user data is the `USER_DATA_VS` words, then the words
+  (`ComputeInputs::first_thread`). This holds however the wave's lanes are held: the whole wave in
+  one invocation, one lane an invocation (D880) or two (D973). Run one lane an invocation, a wave
+  once held its lane's place in the wave alone, so every wave past a draw's first read vertex ids
+  from zero. Its user data is the `USER_DATA_VS` words, then the words
   `SO_EN` and `SO_BASEn_EN` add:
   - `streamout_config`, the wave's vertex count in bits 22:16;
   - `streamout_write_index`, the wave's first vertex counted from the draw's, since the offsets

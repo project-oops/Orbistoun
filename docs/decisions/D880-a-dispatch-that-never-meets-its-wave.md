@@ -9,7 +9,11 @@ or writes the execution mask, reads a lane mask whole, reads another lane's valu
 permute, a swizzle, a DPP modifier), uses the local data share, waits at `s_barrier`, or stores or
 makes an atomic through the scalar unit. `lane_exact::lane_needs` names which of these a program
 has, and any one keeps the whole wave in one invocation, as before, with the slowest-fidelity
-warning saying which. Asked to run per lane, such a program is refused by name.
+warning saying which. Asked to run per lane, such a program is refused by name. Amended by D973:
+where the host's subgroup carries the wave, its width or half of it, every one of these but a scalar
+store or atomic runs per lane too. Masks are the subgroup's ballots, another lane's value is its
+shuffle, and the wave's order at the local data share is the subgroup's barrier. A wave of
+sixty-four on a subgroup of thirty-two runs two lanes an invocation.
 
 **The workgroup.** A group of `n` waves is a host workgroup of `n` times the wave's width.
 Invocation `i` is lane `i mod width` of wave `i / width`, and its thread id is its wave's first

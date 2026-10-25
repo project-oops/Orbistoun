@@ -19,14 +19,18 @@ bound at the same offset as its slot, one word for each word. Vulkan requires a 
 binding's offset to be a multiple of `minStorageBufferOffsetAlignment`, at most 256 bytes. An
 offset that is not a multiple, or that falls outside the holder, is refused by name.
 
-A buffer that the module reads relative to a base of its own cannot be part of another's buffer:
-the global loads' buffer (D883), and one placed from a sample (D951). An overlap with one of those,
-where one side is written, is still refused.
+Each slot's binding starts at its own range's first byte, the base its accesses are read against:
+its descriptor's, or for a buffer placed from a sample (D951) the base the push block carries. Such
+a buffer joins a set as any other does, holder or member. The dispatch's global buffer of pages
+(D961) holds pages behind a table rather than a range, and a buffer on one of its pages, where
+either is written, is refused.
 
 **Why:** run 305 of Grand Theft Auto V refused three dispatches as two overlapping buffers. The
 programs at `0x400003e19200` and `0x400003e1ac00` bind a 0x20-byte written range that a
 0xe40f-byte written range ends inside. The program at `0x400003d88400` binds a four-byte written
-range inside a 0x94-byte range. On the hardware each pair addresses the same bytes.
+range inside a 0x94-byte range. On the hardware each pair addresses the same bytes. Its program at
+`0x74005b87e400` binds two sampled ranges of one descriptor, slot 20 a megabyte into slot 18, both
+written.
 
 **Rejected:**
 - Two buffers, with the written one copied over the other afterwards. A load through one slot after

@@ -9,8 +9,8 @@ supplies gets a binding of its own, filled from the guest range the descriptor n
 dispatch, written back to guest memory where it changed - the same all-or-nothing write the window
 gets (D711). The window covers only the accesses left untraced. Two bound ranges that overlap each
 other or the window are refused, since separate copies of one byte would disagree. A program that
-writes any other way - a typed store, an atomic, a global or scratch store - traces nothing and
-keeps the single window.
+writes any other way - a typed store, an atomic, a scratch store, a global store of part of a word
+(whole-word global stores bind as D961 says) - traces nothing and keeps the single window.
 
 **Why:** the window is one power-of-two span of at most 64 Ki words, and a dispatch's buffers need
 not be near each other. radeonsi's buffer copy reads one buffer and writes another wherever its

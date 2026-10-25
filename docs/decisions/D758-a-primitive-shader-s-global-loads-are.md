@@ -18,6 +18,11 @@ words carry beside the range's place (D747): one word per slot, the address's lo
 flat address is translated from its low half. A load whose lanes' addresses or mask the host cannot
 know is refused by name, as is a draw of more vertices than one wave holds.
 
+Amended by D970: the refusal of a branch on a mask the host cannot know belongs to the host's run
+alone. A compute dispatch refused so is prepared device-addressed where the device maps guest
+memory (D964). Its module carries the branch on the device, per wave, as it carries every branch,
+and nothing of it runs on the host.
+
 The run is kept cheap without changing what it finds. It runs only the vector instructions whose
 results can reach a load's address, a backward slice to a fixed point. When no instruction it runs
 reads one lane from another, it runs only the draw's vertex lanes. A lane read, a permute, a
