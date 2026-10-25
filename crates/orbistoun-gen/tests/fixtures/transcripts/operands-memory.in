@@ -200,6 +200,26 @@ global_store_dwordx2 v190, v[100:101], s[70:71]
 global_store_dwordx4 v1, v[4:7], s[10:11]
 global_store_dwordx4 v255, v[248:251], s[100:101]
 global_store_dwordx4 v77, v[128:131], s[70:71]
+//
+// The wider stores with their byte offset, which none of the stores above carried: the solver
+// left the field out, so a translation dropped every such offset and wrote the words at zero.
+// Values spread across the field, as for the single-word forms. Then the three-word store and
+// the byte and half stores, which no probe had named at all.
+global_store_dwordx2 v3, v[6:7], s[8:9] offset:8
+global_store_dwordx2 v201, v[100:101], s[70:71] offset:512
+global_store_dwordx2 v99, v[254:255], s[100:101] offset:2044
+global_store_dwordx4 v5, v[8:11], s[10:11] offset:16
+global_store_dwordx4 v203, v[128:131], s[70:71] offset:1024
+global_store_dwordx4 v97, v[252:255], s[100:101] offset:2032
+global_store_dwordx3 v2, v[4:6], s[6:7]
+global_store_dwordx3 v255, v[249:251], s[100:101] offset:16
+global_store_dwordx3 v190, v[128:130], s[70:71] offset:2040
+global_store_byte v4, v9, s[8:9]
+global_store_byte v255, v200, s[100:101] offset:7
+global_store_byte v130, v255, s[70:71] offset:2047
+global_store_short v6, v11, s[8:9]
+global_store_short v255, v202, s[100:101] offset:6
+global_store_short v131, v255, s[70:71] offset:2046
 
 // ---- local data share, with its byte offset --------------------------------------
 //

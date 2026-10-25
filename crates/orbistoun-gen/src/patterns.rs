@@ -92,12 +92,56 @@ pattern!(
 // `; encoding: [0x01,0x03,0x00,0x7e]`, when the mnemonic is not wanted.
 pattern!(encoding_re, r"encoding:\s*\[(?P<bytes>[^\]]+)\]");
 
+// `hwreg(HW_REG_MODE, 0, 4)`, `hwreg(63, 31, 32)` or `hwreg(HW_REG_FLAT_SCR_LO)`: a hardware
+// register, a bit offset in it and a width, printed as one operand with commas inside it.
+pattern!(
+    hwreg_re,
+    r"hwreg\((?P<id>[A-Z_0-9]+)(?:,\s*(?P<offset>\d+),\s*(?P<size>\d+))?\)"
+);
+
+/// The hardware registers the reference prints by name, by id: each one's id is what its own
+/// recording encodes (`operands-hwreg.out`), so a wrong entry leaves the field unsolved.
+const HARDWARE_REGISTERS: [(&str, u32); 3] = [
+    ("HW_REG_MODE", 1),
+    ("HW_REG_FLAT_SCR_LO", 20),
+    ("HW_REG_FLAT_SCR_HI", 21),
+];
+
+/// `text` with each `hwreg(...)` replaced by the sixteen-bit value it encodes - the id in bits
+/// 5:0, the offset in 10:6 and the size less one in 15:11, a whole register where no offset and
+/// size are printed - so the operand is one immediate, as the instruction carries it. A name not
+/// in [`HARDWARE_REGISTERS`] is left as printed, and its operand unsolved.
+pub(crate) fn hardware_registers(text: &str) -> String {
+    hwreg_re()
+        .replace_all(text, |caps: &regex::Captures<'_>| {
+            let id = caps.name("id").map_or("", |m| m.as_str());
+            let id = id.parse::<u32>().ok().or_else(|| {
+                HARDWARE_REGISTERS
+                    .iter()
+                    .find(|(name, _)| *name == id)
+                    .map(|&(_, id)| id)
+            });
+            let number = |name: &str, default: u32| {
+                caps.name(name)
+                    .map_or(Some(default), |m| m.as_str().parse::<u32>().ok())
+            };
+            match (id, number("offset", 0), number("size", 32)) {
+                (Some(id), Some(offset), Some(size)) if (1..=32).contains(&size) => {
+                    (id | offset << 6 | (size - 1) << 11).to_string()
+                }
+                _ => caps[0].to_owned(),
+            }
+        })
+        .into_owned()
+}
+
 /// One assembled listing line, or `None` if the line carries no encoding.
 pub(crate) fn assembled(line: &str) -> Option<Sample> {
     let caps = assembled_re().captures(line)?;
-    let printed = caps.name("operands")?.as_str().trim().to_owned();
+    let text = hardware_registers(caps.name("operands")?.as_str());
+    let printed = text.trim().to_owned();
     let mut operands = Vec::new();
-    for piece in caps.name("operands")?.as_str().split(',') {
+    for piece in text.split(',') {
         operands.extend(split_operand(piece));
     }
     Some(Sample {
@@ -264,6 +308,27 @@ mod tests {
         assert_eq!(s.operands, vec!["v0", "v1"]);
         assert_eq!(s.words, vec![0x7e00_0301]);
         assert_eq!(s.printed, "v0, v1");
+    }
+
+    /// A hardware register is one operand, the sixteen-bit value its encoding carries, though
+    /// the reference prints commas inside it: as the recording `operands-hwreg.out` encodes it.
+    #[test]
+    fn a_hardware_register_is_one_immediate() {
+        let s = assembled(
+            "\ts_setreg_b32 hwreg(HW_REG_MODE, 0, 4), s5 ; encoding: [0x01,0x18,0x85,0xb9]",
+        )
+        .expect("parses");
+        assert_eq!(s.operands, vec!["6145", "s5"], "1 | 3 << 11");
+        let s = assembled(
+            "\ts_setreg_b32 hwreg(HW_REG_FLAT_SCR_LO), s96 ; encoding: [0x14,0xf8,0xe0,0xb9]",
+        )
+        .expect("parses");
+        assert_eq!(s.operands, vec!["63508", "s96"], "0xf814");
+        let s =
+            assembled("\ts_getreg_b32 s101, hwreg(63, 31, 32) ; encoding: [0xff,0xff,0x65,0xb9]")
+                .expect("parses");
+        assert_eq!(s.operands, vec!["s101", "65535"]);
+        assert_eq!(s.printed, "s101, 65535");
     }
 
     /// Modifiers are separate tokens even though the reference prints them without commas.
