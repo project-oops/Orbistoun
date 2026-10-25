@@ -48,4 +48,13 @@ fn main() {
         "storing.spv",
         orbistoun_spirv::storing_fragment_module([1, 0], [0.0, 1.0, 0.0, 1.0]),
     );
+    // The direct-addressing oracle (D964): memory reached through a pushed device address.
+    write(
+        "direct-address.spv",
+        orbistoun_spirv::direct_address_module(&[orbistoun_spirv::DirectStep {
+            from: 0x2000,
+            to: 0x1_0000_0004,
+            add: 1,
+        }]),
+    );
 }

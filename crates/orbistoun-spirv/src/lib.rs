@@ -4,10 +4,13 @@
 //! semantics onto what is here. Modules are built as 32-bit words directly, with no assembler, so
 //! the translator runs wherever it is needed. [`Builder`] allocates every identifier, so the
 //! header's bound always exceeds them. Structural properties are unit-tested here; validity is
-//! decided by `spirv-val`, run over emitted modules by `tools/validate-spirv.sh`.
+//! decided by `spirv-val`, which [`validator`] runs over a module.
 
 use core::fmt;
 use std::collections::BTreeMap;
+
+mod interface;
+pub mod validator;
 
 /// First word of every module.
 pub const MAGIC: u32 = 0x0723_0203;
@@ -98,6 +101,9 @@ pub mod op {
     /// Replaces the word a pointer names with a value, as one indivisible step, answering what it
     /// held.
     pub const ATOMIC_EXCHANGE: u16 = 229;
+    /// Replaces the word a pointer names with a value where it holds a comparator, as one
+    /// indivisible step, answering what it held either way.
+    pub const ATOMIC_COMPARE_EXCHANGE: u16 = 230;
     /// Exclusive-ors a value into the word a pointer names, as one indivisible step.
     pub const ATOMIC_XOR: u16 = 242;
     /// Subtracts a value from the word a pointer names, as one indivisible step.
@@ -124,12 +130,20 @@ pub mod op {
     pub const FUNCTION: u16 = 54;
     /// Ends a function.
     pub const FUNCTION_END: u16 = 56;
+    /// A function's parameter, after its `OpFunction`.
+    pub const FUNCTION_PARAMETER: u16 = 55;
+    /// Calls a function.
+    pub const FUNCTION_CALL: u16 = 57;
+    /// Returns from a function with a value.
+    pub const RETURN_VALUE: u16 = 254;
     /// Begins a block.
     pub const LABEL: u16 = 248;
     /// Returns from a function with no value.
     pub const RETURN: u16 = 253;
     /// Ends a fragment invocation without writing its outputs: the pixel is discarded.
     pub const KILL: u16 = 252;
+    /// Ends a block control never reaches: an unreachable merge.
+    pub const UNREACHABLE: u16 = 255;
     /// Unconditional branch.
     pub const BRANCH: u16 = 249;
     /// Branch on a boolean.
@@ -258,6 +272,8 @@ pub mod op {
     /// Converts an unsigned integer to another width; truncating narrows a packed field to the
     /// sixteen bits a half occupies.
     pub const UCONVERT: u16 = 113;
+    /// Forms a pointer from an integer: a physical pointer from a 64-bit device address (D964).
+    pub const CONVERT_U_TO_PTR: u16 = 120;
     /// Converts a float to another width, widening a half to a single-precision float.
     pub const FCONVERT: u16 = 115;
     /// Chooses between two values without branching.
@@ -362,6 +378,19 @@ pub mod op {
 /// flushed to zero.
 pub const FLOAT_CONTROLS: &str = "SPV_KHR_float_controls";
 
+/// The `SPV_KHR_physical_storage_buffer` extension, by name: what a module below version 1.5
+/// declares to form pointers from device addresses (D964).
+pub const PHYSICAL_STORAGE_BUFFER: &str = "SPV_KHR_physical_storage_buffer";
+
+/// The `Aligned` memory operand of a load or store, followed by the alignment in bytes: required
+/// of every access through a physical pointer.
+pub const MEMORY_ALIGNED: u32 = 0x2;
+
+/// The `Volatile` memory operand of a load or store: the access is made each time it runs, never
+/// kept or merged by the driver. What a decorated variable has from its `Volatile` decoration, an
+/// access through a physical pointer has only from this (D964).
+pub const MEMORY_VOLATILE: u32 = 0x1;
+
 /// Storage classes.
 pub mod storage {
     /// A buffer the shader may read and write. Needs version 1.3 or later.
@@ -389,6 +418,9 @@ pub mod storage {
     /// Used for a constant table a shader indexes: a composite constant cannot be indexed
     /// dynamically, but a `Private` variable initialised with one can.
     pub const PRIVATE: u32 = 6;
+    /// Memory reached through a 64-bit device address rather than a binding: guest memory a
+    /// dispatch addresses directly (D964).
+    pub const PHYSICAL_STORAGE_BUFFER: u32 = 5349;
 }
 
 /// The optional operands a sampling instruction may carry, as a mask.
@@ -439,6 +471,10 @@ pub mod decoration {
     pub const VOLATILE: u32 = 21;
     /// What another invocation writes, in any workgroup, is what a later access reads.
     pub const COHERENT: u32 = 23;
+    /// The alignment, in bytes, an access through a physical pointer keeps; a pointer type into
+    /// [`super::storage::PHYSICAL_STORAGE_BUFFER`] whose element is a structure member needs it, and
+    /// a load or store through one names it as a memory operand ([`super::MEMORY_ALIGNED`]).
+    pub const ALIGNED: u32 = 44;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -476,6 +512,10 @@ pub mod capability {
     /// From `SPV_KHR_float_controls`. A device that does not offer it refuses the module rather
     /// than computing zero where the guest expected a subnormal.
     pub const DENORM_PRESERVE: u32 = 4464;
+    /// Permits a module to require that subnormal inputs and results are flushed to zero.
+    ///
+    /// From `SPV_KHR_float_controls`.
+    pub const DENORM_FLUSH_TO_ZERO: u32 = 4465;
     /// Permits a module to require that signed zeros, infinities and NaNs survive its arithmetic.
     ///
     /// From `SPV_KHR_float_controls`. Without it a driver may assume no infinity or NaN occurs and
@@ -505,6 +545,9 @@ pub mod capability {
     /// Atomics on 64-bit integers. A device without `shaderBufferInt64Atomics` refuses a module
     /// declaring this.
     pub const INT64_ATOMICS: u32 = 12;
+    /// Pointers formed from 64-bit device addresses (D964). A device without
+    /// `bufferDeviceAddress` refuses a module declaring this.
+    pub const PHYSICAL_STORAGE_BUFFER_ADDRESSES: u32 = 5347;
 }
 
 /// Execution scopes, for the group operations.
@@ -584,6 +627,9 @@ pub mod built_in {
 pub mod addressing {
     /// No physical addressing. What a shader uses.
     pub const LOGICAL: u32 = 0;
+    /// Physical pointers into [`super::storage::PHYSICAL_STORAGE_BUFFER`] are 64 bits; everything
+    /// else stays logical. What a module that addresses guest memory directly declares (D964).
+    pub const PHYSICAL_STORAGE_BUFFER_64: u32 = 5348;
 }
 
 /// Memory models.
@@ -619,6 +665,8 @@ pub mod mode {
     ///
     /// Takes the bit width as its literal operand, so a module can ask for 32 bits alone.
     pub const DENORM_PRESERVE: u32 = 4459;
+    /// Subnormal inputs and results of the given width are flushed to zero. Takes the bit width.
+    pub const DENORM_FLUSH_TO_ZERO: u32 = 4460;
     /// Signed zeros, infinities and NaNs of the given width are preserved. Takes the bit width.
     pub const SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4461;
     /// The most vertices a mesh shader's workgroup will emit. One literal operand.
@@ -656,7 +704,8 @@ pub fn without_inf_nan_preserve(words: &[u32]) -> Vec<u32> {
         let drop = match opcode {
             op::CAPABILITY => instruction.get(1) == Some(&capability::SIGNED_ZERO_INF_NAN_PRESERVE),
             op::EXECUTION_MODE => instruction.get(2) == Some(&mode::SIGNED_ZERO_INF_NAN_PRESERVE),
-            op::EXTENSION => instruction[1..] == extension[..],
+            // The extension stays while a subnormal mode still needs it.
+            op::EXTENSION => instruction[1..] == extension[..] && subnormal_mode(words).is_none(),
             _ => false,
         };
         if !drop {
@@ -665,6 +714,72 @@ pub fn without_inf_nan_preserve(words: &[u32]) -> Vec<u32> {
         at += count;
     }
     out
+}
+
+/// Whether a module declares its 32-bit subnormals kept (`Some(true)`) or flushed (`Some(false)`)
+/// through `SPV_KHR_float_controls`; `None` where it declares neither, or cannot be read.
+#[must_use]
+pub fn subnormal_mode(words: &[u32]) -> Option<bool> {
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        let instruction = words.get(at..at + count).filter(|_| count > 0)?;
+        if (words[at] & 0xffff) as u16 == op::EXECUTION_MODE && instruction.get(3) == Some(&32) {
+            match instruction.get(2) {
+                Some(&mode::DENORM_PRESERVE) => return Some(true),
+                Some(&mode::DENORM_FLUSH_TO_ZERO) => return Some(false),
+                _ => {}
+            }
+        }
+        at += count;
+    }
+    None
+}
+
+/// A module whose 32-bit subnormal mode a device offering to keep subnormals where `preserve`,
+/// and to flush them where `flush`, cannot honour: with the other mode where the device offers it,
+/// or with neither, the driver then choosing. `None` where the module declares a mode the device
+/// offers, or none, and needs no change. The capability goes with its execution mode.
+#[must_use]
+pub fn subnormals_for(words: &[u32], (preserve, flush): (bool, bool)) -> Option<Vec<u32>> {
+    let kept = subnormal_mode(words)?;
+    if (kept && preserve) || (!kept && flush) {
+        return None;
+    }
+    let (from, to) = if kept {
+        (
+            (capability::DENORM_PRESERVE, mode::DENORM_PRESERVE),
+            flush.then_some((capability::DENORM_FLUSH_TO_ZERO, mode::DENORM_FLUSH_TO_ZERO)),
+        )
+    } else {
+        (
+            (capability::DENORM_FLUSH_TO_ZERO, mode::DENORM_FLUSH_TO_ZERO),
+            preserve.then_some((capability::DENORM_PRESERVE, mode::DENORM_PRESERVE)),
+        )
+    };
+    let mut out = words.get(..5)?.to_vec();
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        let instruction = words.get(at..at + count).filter(|_| count > 0)?;
+        let opcode = (words[at] & 0xffff) as u16;
+        let (index, value) = match opcode {
+            op::CAPABILITY if instruction.get(1) == Some(&from.0) => (1, to.map(|to| to.0)),
+            op::EXECUTION_MODE if instruction.get(2) == Some(&from.1) => (2, to.map(|to| to.1)),
+            _ => {
+                out.extend_from_slice(instruction);
+                at += count;
+                continue;
+            }
+        };
+        if let Some(value) = value {
+            let mut changed = instruction.to_vec();
+            changed[index] = value;
+            out.extend_from_slice(&changed);
+        }
+        at += count;
+    }
+    Some(out)
 }
 
 /// How many ordered slots the header is kept in.
@@ -700,6 +815,14 @@ pub struct Builder {
     declarations: Vec<u32>,
     /// Function bodies.
     functions: Vec<u32>,
+    /// Helper functions' bodies, placed after every other function: what [`Self::function`] appends
+    /// while [`Self::into_helpers`] holds, so a helper is written whole while the function that
+    /// calls it is still open.
+    helpers: Vec<u32>,
+    /// Whether [`Self::function`] appends to the helpers.
+    in_helper: bool,
+    /// The constants [`Self::declare_constant`] declared, by type and value.
+    constants: BTreeMap<(u32, Vec<u32>), Id>,
     /// Every type the format allows once per module, by opcode and operands after the result, so
     /// [`Self::declare_type`] answers a second request with the first declaration.
     types: BTreeMap<(u16, Vec<u32>), Id>,
@@ -741,6 +864,9 @@ impl Builder {
             annotations: Vec::new(),
             declarations: Vec::new(),
             functions: Vec::new(),
+            helpers: Vec::new(),
+            in_helper: false,
+            constants: BTreeMap::new(),
             types: BTreeMap::new(),
             // Identifier zero is reserved by the format, so allocation starts at one.
             next_id: 1,
@@ -811,9 +937,36 @@ impl Builder {
         id
     }
 
+    /// The scalar constant of type `kind` whose value is `value`, its words low first: declared once
+    /// per module, and answered from then on. A module forming many addresses names the same few
+    /// 64-bit constants at every access.
+    pub fn declare_constant(&mut self, kind: Id, value: &[u32]) -> Id {
+        if let Some(&id) = self.constants.get(&(kind.0, value.to_vec())) {
+            return id;
+        }
+        let id = self.id();
+        let mut words = vec![kind.0, id.0];
+        words.extend_from_slice(value);
+        self.declare(op::CONSTANT, &words);
+        self.constants.insert((kind.0, value.to_vec()), id);
+        id
+    }
+
     /// Appends an instruction to the function section.
     pub fn function(&mut self, opcode: u16, operands: &[u32]) {
-        encode(&mut self.functions, opcode, operands);
+        if self.in_helper {
+            encode(&mut self.helpers, opcode, operands);
+        } else {
+            encode(&mut self.functions, opcode, operands);
+        }
+    }
+
+    /// Sends what [`Self::function`] appends to the helper functions, placed after every other
+    /// function, while `on`; answers whether it did before. A helper is defined whole between two
+    /// calls, `OpFunction` to `OpFunctionEnd`, however far into the function calling it the
+    /// builder is.
+    pub fn into_helpers(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.in_helper, on)
     }
 
     /// The function section so far, as encoded: what a reader of the instructions emitted since
@@ -873,7 +1026,8 @@ impl Builder {
             5 + self.header.len()
                 + self.annotations.len()
                 + self.declarations.len()
-                + self.functions.len(),
+                + self.functions.len()
+                + self.helpers.len(),
         );
         words.push(MAGIC);
         words.push(self.version);
@@ -882,13 +1036,27 @@ impl Builder {
         // guarantees.
         words.push(self.next_id);
         words.push(0); // schema, reserved
+        // Every entry point names what its interface must, however late it was declared, and a
+        // fragment entry point's inputs that cannot be interpolated are flat ([`interface`]).
+        let (entry_points, flat) = interface::complete(
+            self.version,
+            &self.header[header_slot(op::ENTRY_POINT)],
+            &self.annotations,
+            &self.declarations,
+        );
         // The order the format requires, enforced here rather than by callers.
-        for slot in &self.header {
-            words.extend_from_slice(slot);
+        for (at, slot) in self.header.iter().enumerate() {
+            if at == header_slot(op::ENTRY_POINT) {
+                words.extend_from_slice(&entry_points);
+            } else {
+                words.extend_from_slice(slot);
+            }
         }
         words.extend_from_slice(&self.annotations);
+        words.extend_from_slice(&flat);
         words.extend_from_slice(&self.declarations);
         words.extend_from_slice(&self.functions);
+        words.extend_from_slice(&self.helpers);
         words
     }
 
@@ -907,6 +1075,7 @@ impl Builder {
             // Function bodies forward-reference by necessity (a branch names a later label, a loop
             // header its merge block), so only the "defined somewhere" half applies.
             (self.functions.as_slice(), true),
+            (self.helpers.as_slice(), true),
         ];
 
         // Every opcode first: an unknown one makes the rest of the check unreliable, so it is
@@ -1123,6 +1292,160 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
     b.check()
         .expect("this crate built a module with identifiers that do not resolve");
     b.finish()
+}
+
+/// One step of [`direct_address_module`]: the word `from` bytes past the pushed device address is
+/// read, `add` added, and the sum stored `to` bytes past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectStep {
+    /// Where the word is read, in bytes from the pushed address.
+    pub from: u64,
+    /// Where the sum is stored, in bytes from the pushed address.
+    pub to: u64,
+    /// What is added to the word read.
+    pub add: u32,
+}
+
+/// Builds a compute shader that reads and writes memory through a device address and no binding
+/// (D964): its push constants are the address, low half then high, and it runs `steps` in order.
+///
+/// Proves direct addressing apart from any translation: a guest range imported into the device is
+/// read where the guest wrote it, and what the shader stores is in the guest's own pages after.
+/// One invocation.
+#[must_use]
+pub fn direct_address_module(steps: &[DirectStep]) -> Vec<u32> {
+    let mut b = Builder::new().with_version(VERSION_1_3);
+
+    let void = b.id();
+    let fn_type = b.id();
+    let u32_type = b.id();
+    let u64_type = b.id();
+    let pair_type = b.id();
+    let push = b.id();
+    let push_ptr = b.id();
+    let push_word_ptr = b.id();
+    let word_ptr = b.id();
+    let constants = b.id();
+    let (zero, one) = (b.id(), b.id());
+    let main = b.id();
+    let entry_block = b.id();
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::CAPABILITY, &[capability::INT64]);
+    b.header(
+        op::CAPABILITY,
+        &[capability::PHYSICAL_STORAGE_BUFFER_ADDRESSES],
+    );
+    b.header(
+        op::EXTENSION,
+        &Builder::literal_string(PHYSICAL_STORAGE_BUFFER),
+    );
+    b.header(
+        op::MEMORY_MODEL,
+        &[addressing::PHYSICAL_STORAGE_BUFFER_64, memory::GLSL450],
+    );
+    let mut entry = vec![execution::GL_COMPUTE, main.0];
+    entry.extend(Builder::literal_string("main"));
+    b.header(op::ENTRY_POINT, &entry);
+    b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
+
+    b.annotate(op::DECORATE, &[push.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[push.0, 0, decoration::OFFSET, 0]);
+    b.annotate(op::MEMBER_DECORATE, &[push.0, 1, decoration::OFFSET, 4]);
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
+    b.declare(op::TYPE_INT, &[u64_type.0, 64, 0]);
+    b.declare(op::TYPE_VECTOR, &[pair_type.0, u32_type.0, 2]);
+    b.declare(op::TYPE_STRUCT, &[push.0, u32_type.0, u32_type.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[push_ptr.0, storage::PUSH_CONSTANT, push.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[push_word_ptr.0, storage::PUSH_CONSTANT, u32_type.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[word_ptr.0, storage::PHYSICAL_STORAGE_BUFFER, u32_type.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[push_ptr.0, constants.0, storage::PUSH_CONSTANT],
+    );
+    b.declare(op::CONSTANT, &[u32_type.0, zero.0, 0]);
+    b.declare(op::CONSTANT, &[u32_type.0, one.0, 1]);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    // The address: the two pushed words as one 64-bit value.
+    let mut halves = [zero, zero];
+    for (half, member) in halves.iter_mut().zip([zero, one]) {
+        let (at, value) = (b.id(), b.id());
+        b.function(
+            op::ACCESS_CHAIN,
+            &[push_word_ptr.0, at.0, constants.0, member.0],
+        );
+        b.function(op::LOAD, &[u32_type.0, value.0, at.0]);
+        *half = value;
+    }
+    let (pair, base) = (b.id(), b.id());
+    b.function(
+        op::COMPOSITE_CONSTRUCT,
+        &[pair_type.0, pair.0, halves[0].0, halves[1].0],
+    );
+    b.function(op::BITCAST, &[u64_type.0, base.0, pair.0]);
+    direct_steps(&mut b, (u32_type, u64_type, word_ptr), base, steps);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// [`direct_address_module`]'s steps, from the 64-bit address `base`: each word read through a
+/// physical pointer, its addend added, and the sum stored through another.
+fn direct_steps(
+    b: &mut Builder,
+    (u32_type, u64_type, word_ptr): (Id, Id, Id),
+    base: Id,
+    steps: &[DirectStep],
+) {
+    // Each step's offsets and addend, as constants: a 64-bit constant is its low word then its high.
+    let step_constants: Vec<(Id, Id, Id)> = steps
+        .iter()
+        .map(|step| {
+            let (from, to, add) = (b.id(), b.id(), b.id());
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the halves of a 64-bit word"
+            )]
+            let halves = |at: u64| [at as u32, (at >> 32) as u32];
+            let [from_low, from_high] = halves(step.from);
+            let [to_low, to_high] = halves(step.to);
+            b.declare(op::CONSTANT, &[u64_type.0, from.0, from_low, from_high]);
+            b.declare(op::CONSTANT, &[u64_type.0, to.0, to_low, to_high]);
+            b.declare(op::CONSTANT, &[u32_type.0, add.0, step.add]);
+            (from, to, add)
+        })
+        .collect();
+    let pointer_at = |b: &mut Builder, offset: Id| {
+        let (address, pointer) = (b.id(), b.id());
+        b.function(op::IADD, &[u64_type.0, address.0, base.0, offset.0]);
+        b.function(op::CONVERT_U_TO_PTR, &[word_ptr.0, pointer.0, address.0]);
+        pointer
+    };
+    for (from, to, add) in step_constants {
+        let source = pointer_at(b, from);
+        let (read, sum) = (b.id(), b.id());
+        b.function(op::LOAD, &[u32_type.0, read.0, source.0, MEMORY_ALIGNED, 4]);
+        b.function(op::IADD, &[u32_type.0, sum.0, read.0, add.0]);
+        let destination = pointer_at(b, to);
+        b.function(op::STORE, &[destination.0, sum.0, MEMORY_ALIGNED, 4]);
+    }
 }
 
 /// The invocations in one group of [`stored_word_compaction_module`].
@@ -1932,14 +2255,25 @@ pub const TEXTURE_BINDING: u32 = 2;
 pub const STORAGE_IMAGE_BINDING: u32 = 3;
 
 /// Which binding each of a compute dispatch's storage images is bound at, in the order its program
-/// first stores to them: [`STORAGE_IMAGE_BINDING`], then 21 onwards, after the last of
-/// [`TEXTURE_BINDINGS`].
-pub const STORAGE_IMAGE_BINDINGS: [u32; MAX_STORED_IMAGES] = [STORAGE_IMAGE_BINDING, 21, 22, 23];
+/// first stores to them: [`STORAGE_IMAGE_BINDING`], then 37 onwards, after the last of
+/// [`TEXTURE_BINDINGS`] (D963).
+pub const STORAGE_IMAGE_BINDINGS: [u32; MAX_STORED_IMAGES] = {
+    let mut bindings = [0; MAX_STORED_IMAGES];
+    bindings[0] = STORAGE_IMAGE_BINDING;
+    let mut slot = 1;
+    while slot < MAX_STORED_IMAGES {
+        bindings[slot] = TEXTURE_BINDINGS[MAX_TEXTURES - 1] + slot as u32;
+        slot += 1;
+    }
+    bindings
+};
 
-/// How many images a compute dispatch may store to, one binding each: four, the storage images one
-/// stage may reach on every Vulkan device (the required minimum of
-/// `maxPerStageDescriptorStorageImages`). A pixel shader stores to one.
-pub const MAX_STORED_IMAGES: usize = 4;
+/// How many images a compute dispatch may store to, one binding each: sixteen, a fixed number so
+/// every module's bindings are laid out alike (D963). Grand Theft Auto V's full-screen compute pass
+/// stores to six. A device that lets one stage reach fewer storage images
+/// (`maxPerStageDescriptorStorageImages`, four at the least) refuses a dispatch storing to more. A
+/// pixel shader stores to one.
+pub const MAX_STORED_IMAGES: usize = 16;
 
 /// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
 /// The open-toolchain GL context's second texture unit samples one.
@@ -1985,6 +2319,14 @@ pub const DISPATCH_ESCAPE_WORD: u32 = 0;
 /// Where a guest dispatch module's observation names a loop it cut (D949): the byte offset of the
 /// loop's backward branch plus one, and zero where it cut none.
 pub const DISPATCH_LOOP_WORD: u32 = 1;
+
+/// Where a device-addressed dispatch module's observation names a guest page an access escaped at
+/// (D971): bits 47:16 of the address, so a 64 KiB page, the highest of those any invocation
+/// reached; zero where none escaped at an address it formed.
+pub const DISPATCH_ESCAPE_PAGE_WORD: u32 = 2;
+
+/// The bytes of the page [`DISPATCH_ESCAPE_PAGE_WORD`] names, as a shift.
+pub const DISPATCH_ESCAPE_PAGE_SHIFT: u32 = 16;
 
 /// Whether `module` declares a variable at `binding` of descriptor set zero: an `OpDecorate ...
 /// Binding binding` beside an `OpDecorate ... DescriptorSet 0` on the same target.
@@ -2580,6 +2922,14 @@ static SHAPES: &[ShapeEntry] = &[
         None,
         RestStride::Every,
     ),
+    // Result type, result, pointer, scope, the two semantics, value and comparator.
+    (
+        op::ATOMIC_COMPARE_EXCHANGE,
+        Some(1),
+        &[0, 2, 3, 4, 5, 6, 7],
+        None,
+        RestStride::Every,
+    ),
     (
         op::ATOMIC_XOR,
         Some(1),
@@ -2689,10 +3039,33 @@ static SHAPES: &[ShapeEntry] = &[
     (op::VARIABLE, Some(1), &[0], Some(3), RestStride::Every),
     // Operand two is a function control mask, operand three the function type.
     (op::FUNCTION, Some(1), &[0, 3], None, RestStride::Every),
+    (
+        op::FUNCTION_PARAMETER,
+        Some(1),
+        &[0],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, the function, then every argument.
+    (
+        op::FUNCTION_CALL,
+        Some(1),
+        &[0, 2],
+        Some(3),
+        RestStride::Every,
+    ),
+    (op::RETURN_VALUE, None, &[0], None, RestStride::Every),
     // Every index after the base is an identifier, not a literal.
     (op::ACCESS_CHAIN, Some(1), &[0], Some(2), RestStride::Every),
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
+    (
+        op::CONVERT_U_TO_PTR,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
     (
         op::CONVERT_F_TO_U,
         Some(1),
@@ -2987,6 +3360,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::FUNCTION_END, None, &[], None, RestStride::Every),
     (op::RETURN, None, &[], None, RestStride::Every),
     (op::KILL, None, &[], None, RestStride::Every),
+    (op::UNREACHABLE, None, &[], None, RestStride::Every),
     // Control flow. Every operand of these is a label except the control masks and the
     // switch's case values.
     (op::BRANCH, None, &[0], None, RestStride::Every),
@@ -3469,6 +3843,23 @@ mod tests {
         storage,
     };
 
+    /// A dispatch's image bindings never share a number (D963): its sixteen storage images, its
+    /// thirty-two textures, and the window, memory, draw data and global data share before them.
+    /// Storage images at 21 to 23 once shared the bindings of texture slots 16 to 18.
+    #[test]
+    fn a_dispatch_s_image_bindings_are_distinct() {
+        let mut bindings: Vec<u32> = super::TEXTURE_BINDINGS
+            .iter()
+            .chain(&super::STORAGE_IMAGE_BINDINGS)
+            .copied()
+            .chain([0, 1, super::DRAW_DATA_BINDING, super::GDS_BINDING])
+            .collect();
+        let count = bindings.len();
+        bindings.sort_unstable();
+        bindings.dedup();
+        assert_eq!(bindings.len(), count, "every binding its own");
+    }
+
     /// A module's push-constant block is sized as declared: the compaction module's three words, and
     /// none for a module that declares no block.
     #[test]
@@ -3540,6 +3931,53 @@ mod tests {
         words.extend_from_slice(&mode);
         assert_eq!(super::without_inf_nan_preserve(&words), plain);
         assert_eq!(super::without_inf_nan_preserve(&plain), plain);
+    }
+
+    /// A module's 32-bit subnormal mode is read from its execution mode; a device that cannot keep
+    /// them gets the flushing mode where it offers that, or neither, the capability changed with
+    /// its mode; and stripping the inf-NaN declaration keeps the extension the subnormal mode
+    /// needs.
+    #[test]
+    fn a_subnormal_mode_is_what_the_device_offers() {
+        let plain = minimal_compute_module([1, 1, 1]);
+        let main = 1_u32;
+        let declared = |kept: bool| {
+            let (capability, mode) = if kept {
+                (
+                    super::capability::DENORM_PRESERVE,
+                    super::mode::DENORM_PRESERVE,
+                )
+            } else {
+                (
+                    super::capability::DENORM_FLUSH_TO_ZERO,
+                    super::mode::DENORM_FLUSH_TO_ZERO,
+                )
+            };
+            let name = Builder::literal_string(super::FLOAT_CONTROLS);
+            let mut words = plain.clone();
+            words.extend([(2 << 16) | u32::from(op::CAPABILITY), capability]);
+            words.push((((name.len() + 1) as u32) << 16) | u32::from(op::EXTENSION));
+            words.extend(name);
+            words.extend([(4 << 16) | u32::from(op::EXECUTION_MODE), main, mode, 32]);
+            words
+        };
+        let (keep, flush) = (declared(true), declared(false));
+        assert_eq!(super::subnormal_mode(&keep), Some(true));
+        assert_eq!(super::subnormal_mode(&flush), Some(false));
+        assert_eq!(super::subnormal_mode(&plain), None);
+        assert_eq!(super::subnormals_for(&keep, (true, false)), None, "offered");
+        assert_eq!(
+            super::subnormals_for(&keep, (false, true)),
+            Some(flush.clone()),
+            "the other mode"
+        );
+        let neither = super::subnormals_for(&keep, (false, false)).expect("changed");
+        assert_eq!(super::subnormal_mode(&neither), None, "the driver chooses");
+        assert_eq!(
+            super::without_inf_nan_preserve(&keep),
+            keep,
+            "the extension stays"
+        );
     }
 
     /// A stream that cannot be walked is handed back unchanged, for the device to refuse.
