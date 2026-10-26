@@ -2848,7 +2848,8 @@ fn glsl_float(instruction: u32, (a, b, c): (Option<f32>, Option<f32>, Option<f32
         37 | 79 => a?.min(b?),
         40 | 80 => a?.max(b?),
         43 | 81 => a?.max(b?).min(c?),
-        50 => a?.mul_add(b?, c?),
+        // Rounded once: the host's own fused multiply-add.
+        GLSL_FMA => a?.mul_add(b?, c?),
         13 => a?.sin(),
         14 => a?.cos(),
         29 => a?.exp2(),
@@ -2858,6 +2859,9 @@ fn glsl_float(instruction: u32, (a, b, c): (Option<f32>, Option<f32>, Option<f32
         _ => return None,
     })
 }
+
+/// `GLSL.std.450` `Fma`.
+const GLSL_FMA: u32 = 50;
 
 /// Indices into [`Concrete::types`].
 const U32: usize = 0;
@@ -3096,7 +3100,9 @@ impl<'a> Concrete<'a> {
                     single_to_half(*low) | single_to_half(*high) << 16,
                 ))
             }
-            op::EXT_INST if self.approximate => {
+            // A fused multiply-add is exact on every device, so every run computes it; the rest
+            // only a trace does ([`Concrete::approximate`]).
+            op::EXT_INST if self.approximate || arguments.get(1) == Some(&GLSL_FMA) => {
                 let float = |at: usize| word(at).map(f32::from_bits);
                 glsl_float(*arguments.get(1)?, (float(2), float(3), float(4)))
                     .map(|value| Value::Word(value.to_bits()))
@@ -3549,10 +3555,7 @@ impl<'a> Concrete<'a> {
                 return;
             }
         };
-        let offset = match instruction.operands.get(3) {
-            Some(Operand::Immediate(offset)) => *offset,
-            _ => 0,
-        };
+        let offset = model::flat_offset(instruction);
         let (data, vaddr) = (u32::from(*data), u32::from(*vaddr));
         for lane in 0..self.modelled {
             let runs = self.lane_runs(lane);
@@ -4001,10 +4004,7 @@ impl<'a> Concrete<'a> {
         let Some(Operand::Vector(pair)) = instruction.operands.get(usize::from(!store)) else {
             return None;
         };
-        let offset = match instruction.operands.get(3) {
-            Some(Operand::Immediate(offset)) => *offset,
-            _ => 0,
-        };
+        let offset = model::flat_offset(instruction);
         let mut addresses = Vec::new();
         for lane in 0..lanes.min(self.modelled) {
             // A lane that may run reads where it addresses: what is found is what either way of

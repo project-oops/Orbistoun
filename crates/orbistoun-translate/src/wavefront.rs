@@ -2428,6 +2428,10 @@ pub struct Wavefront<'a> {
     selected_images: BTreeMap<u32, crate::draw_buffers::SelectedImage>,
     /// The array selected images are read through and its directory, once declared (D983).
     selected_set: Option<selected::SelectedSet>,
+    /// A dispatch's samples and gathers whose sampler words the trace names, by byte offset (D995).
+    traced_samplers: BTreeMap<u32, [crate::draw_buffers::DescriptorWord; 4]>,
+    /// Each texture slot's sampler words, from its first sample the trace names (D995).
+    slot_samplers: BTreeMap<u32, [crate::draw_buffers::DescriptorWord; 4]>,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -2726,9 +2730,18 @@ impl Wavefront<'_> {
                 saturated: bound.texture.saturate,
                 mirrored: bound.texture.mirror,
                 shader_compare: bound.texture.shader_compare.is_some(),
+                sampler_words: self.slot_samplers.get(&bound.source.slot).copied(),
                 ..bound.source
             })
             .collect()
+    }
+
+    /// Records the sampler words the trace names at the sample at `at`, for `slot`, where none was
+    /// recorded for it yet (D995).
+    fn note_traced_sampler(&mut self, slot: u32, at: u32) {
+        if let Some(&words) = self.traced_samplers.get(&at) {
+            self.slot_samplers.entry(slot).or_insert(words);
+        }
     }
 
     /// Settles each texture's sampler before an access whose sampler registers `reaching` filled:
@@ -2987,6 +3000,7 @@ impl Wavefront<'_> {
             layered: shape.layered(),
             level_user_data: None,
             computed: None,
+            sampler_words: None,
         })
     }
 
@@ -3678,6 +3692,8 @@ impl<'a> Wavefront<'a> {
             type_rewrites: std::collections::BTreeSet::new(),
             selected_images: BTreeMap::new(),
             selected_set: None,
+            traced_samplers: BTreeMap::new(),
+            slot_samplers: BTreeMap::new(),
             images: ImageTrace::seeded(user_data.first_register, user_data.count),
             bool_type,
             lane_ptr: files.lane_ptr,
@@ -6650,7 +6666,11 @@ impl Model for Wavefront<'_> {
                 bound.sampler_load = sampler_reaching;
             }
             bound.sampler = bound.sampler.or(sampler);
-            return Ok(bound.texture);
+            let (slot, texture) = (bound.source.slot, bound.texture);
+            if sampler.is_some() {
+                self.note_traced_sampler(slot, at);
+            }
+            return Ok(texture);
         }
         let source = if computed {
             self.computed_texture_source(descriptor, (at, shape))?
@@ -6724,6 +6744,9 @@ impl Model for Wavefront<'_> {
             sampler_disturbed: false,
             sampler_load: sampler.and(sampler_reaching),
         });
+        if sampler.is_some() {
+            self.note_traced_sampler(source.slot, at);
+        }
         Ok(texture)
     }
 
@@ -7524,8 +7547,22 @@ fn shader_compare_of(compared: &[u8], slot: u32, shape: model::ImageShape) -> Op
         .get(slot as usize)
         .copied()
         .filter(|compared| shape.compare && compared & SHADER_COMPARE != 0)
-        .map(|compared| (compared & 0x7, compared & SHADER_COMPARE_LINEAR != 0))
+        .map(|compared| {
+            if compared & SHADER_COMPARE_RUNNING == 0 {
+                (compared & 0x7, compared & SHADER_COMPARE_LINEAR != 0)
+            } else {
+                (RUNNING_COMPARE, false)
+            }
+        })
 }
+
+/// In [`UserData::compared`]: the slot's sampler is not one the host can read, so its function
+/// and filter are read from the sampler's registers as the module runs (D995), as a format load
+/// reads its descriptor's format (D967).
+pub const SHADER_COMPARE_RUNNING: u8 = 0x40;
+/// The function `shader_compare_of` answers for [`SHADER_COMPARE_RUNNING`]: none of
+/// `SQ_TEX_DEPTH_COMPARE`'s eight.
+pub const RUNNING_COMPARE: u8 = 8;
 
 /// In [`UserData::compared`]: the shader makes the slot's compares itself.
 pub const SHADER_COMPARE: u8 = 0x80;
@@ -7612,6 +7649,13 @@ pub struct TextureSource {
     /// host runs the program up to the access to read it (D960). `None` for any other.
     #[serde(default)]
     pub computed: Option<ComputedImage>,
+    /// The sampler's four words as the trace names them at the slot's first sample - constants,
+    /// including those folded from constants, user data or loads at fixed places - where a dispatch
+    /// builds it so (D995): what the host reads for a sampler [`Self::sampler_offset`] and
+    /// [`Self::sampler_user_data`] do not name. `None` for a fetch, a draw's stage, and a sampler
+    /// the trace cannot name.
+    #[serde(default)]
+    pub sampler_words: Option<[crate::draw_buffers::DescriptorWord; 4]>,
 }
 
 /// An image access whose descriptor a dispatch's program computes: the host finds the descriptor by
@@ -8938,21 +8982,9 @@ pub fn translate_for_primitive(
     .map(|(words, translated, _)| (words, translated))
 }
 
-/// As [`translate_for_primitive`], for a module that reads its stage's user data at entry.
-///
-/// # Errors
-///
-/// As the translation refuses anything, and when the stage takes more user-data words than its
-/// share of the push-constant block holds ([`USER_DATA_STAGE_WORDS`]): refused rather than
-/// truncated, because a missing word would read zero and look plausible.
-pub fn translate_with_user_data(
-    decode: &Decode,
-    encodings: &EncodingTable,
-    width: Width,
-    (stage, primitive): (Stage, MeshPrimitive),
-    window: Window,
-    user_data: UserData,
-) -> Result<(Vec<u32>, usize, ImageSources), TranslateError> {
+/// Refuses user data the push-constant block cannot hold for `stage`: more words than its share,
+/// or a mesh module's anywhere but the block's start.
+fn check_user_data_share(stage: Stage, user_data: &UserData) -> Result<(), TranslateError> {
     if user_data.count > USER_DATA_STAGE_WORDS
         || user_data.block_offset + user_data.count > USER_DATA_BLOCK_WORDS
     {
@@ -8969,6 +9001,25 @@ pub fn translate_with_user_data(
             detail: "a mesh module's user data is the geometry stage's share of the block, at offset zero",
         });
     }
+    Ok(())
+}
+
+/// As [`translate_for_primitive`], for a module that reads its stage's user data at entry.
+///
+/// # Errors
+///
+/// As the translation refuses anything, and when the stage takes more user-data words than its
+/// share of the push-constant block holds ([`USER_DATA_STAGE_WORDS`]): refused rather than
+/// truncated, because a missing word would read zero and look plausible.
+pub fn translate_with_user_data(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    width: Width,
+    (stage, primitive): (Stage, MeshPrimitive),
+    window: Window,
+    user_data: UserData,
+) -> Result<(Vec<u32>, usize, ImageSources), TranslateError> {
+    check_user_data_share(stage, &user_data)?;
     if let (Stage::Fragment, Some(inputs)) = (stage, user_data.pixel_inputs) {
         inputs.seeded()?;
     }
@@ -9051,6 +9102,12 @@ pub fn translate_with_user_data(
     // A dispatch's images selected from a table at run time are read through one array (D983).
     if stage == Stage::Compute {
         module.selected_images.clone_from(&buffers.image_tables);
+        // And a sampler built from what the trace names is read by the host (D995).
+        module.traced_samplers = crate::draw_buffers::traced_samplers(
+            decode,
+            encodings,
+            (user_data.first_register, user_data.count),
+        );
     }
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     module.type_rewrites = type_rewrites(decode, encodings, &module.descriptor_loads.0);

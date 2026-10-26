@@ -532,6 +532,24 @@ pub fn supports_named(encodings: &EncodingTable, family: &str, opcode: u32) -> b
 /// fields.
 pub const FLAT_NO_BASE: &str = NO_DESTINATION;
 
+/// The byte offset a flat-family access carries: its `OFFSET` field (11:0 of the first word),
+/// which a global or scratch access (`SEG`, 15:14, two or one) reads as a signed twelve-bit number
+/// and a flat one as unsigned (AMD's published RDNA 2 instruction set, `FLAT`; the reference
+/// assembler takes `offset:-2048` for a global access and encodes it `0x800`). The decoder hands
+/// the field as it lies; zero where the instruction carries none.
+pub fn flat_offset(instruction: &Instruction) -> i64 {
+    const SIGN: i64 = 0x800;
+    let Some(Operand::Immediate(field)) = instruction.operands.get(3) else {
+        return 0;
+    };
+    let segment = instruction.word >> 14 & 3;
+    if segment != 0 && field & SIGN != 0 {
+        (field & 0xfff) - 2 * SIGN
+    } else {
+        *field
+    }
+}
+
 /// The operand that names no register at all.
 ///
 /// In an address field ([`FLAT_NO_BASE`]) the access has no base register; in a destination field
@@ -2048,10 +2066,11 @@ pub trait Model {
         let mut address = self.read_source(instruction, vaddr, lane)?;
         // The byte offset the instruction carries. The reference prints it only when it is not
         // zero, so the operand is absent from an access at offset zero.
-        if let Some(Operand::Immediate(byte_offset)) = instruction.operands.get(3)
-            && let Ok(byte_offset) = u32::try_from(*byte_offset)
-        {
-            let constant = self.constant(byte_offset);
+        // Signed for a global access ([`flat_offset`]): a 32-bit wrapping add of its two's
+        // complement subtracts.
+        let byte_offset = i32::try_from(flat_offset(instruction)).unwrap_or(0);
+        if byte_offset != 0 {
+            let constant = self.constant(u32::from_ne_bytes(byte_offset.to_ne_bytes()));
             address = self.add(address, constant);
         }
         let offset = address;
@@ -2145,6 +2164,36 @@ pub trait Model {
 
         let result = b.id();
         b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
+        result
+    }
+
+    /// The fused multiply-add `a * b + c` of three register values, rounded once: `GLSL.std.450`
+    /// `Fma`, bitcast in and out as [`f32_ext_binary`](Self::f32_ext_binary) does.
+    ///
+    /// Which instructions are fused follows the instruction set's opcode tables (AMD's published
+    /// RDNA 2 instruction set, the `VOP2`, `VOP3` and `VOP3P` sections):
+    ///
+    /// - fused, rounded once: `V_FMA_F32`, `V_FMAC_F32`, `V_FMAAK_F32`, `V_FMAMK_F32`,
+    ///   `V_DIV_FMAS_F32` and `V_FMA_MIX_F32` here; `V_FMA_F16`, `V_FMAC_F16`, `V_PK_FMA_F16`,
+    ///   `V_PK_FMAC_F16`, `V_FMA_MIXLO_F16` and `V_FMA_MIXHI_F16` once to a half
+    ///   (`fused_to_half`);
+    /// - unfused, the product rounded before the add: `V_MAD_F32`, `V_MAC_F32`, `V_MADAK_F32` and
+    ///   `V_MADMK_F32`, their denormals flushed (`legacy_multiply_add`). ACO selects these for
+    ///   an `fmul` and an `fadd` kept apart, and the fused opcodes for `ffma`
+    ///   (`aco_instruction_selection.cpp`).
+    ///
+    /// `V_FMA_F64` is not translated.
+    fn f32_fma(&mut self, a: Id, b: Id, c: Id) -> Id {
+        let (u32_type, f32_type, set) = (self.u32_type(), self.f32_type(), self.glsl_set());
+        let builder = self.builder();
+        let floats = [a, b, c].map(|value| {
+            let float = builder.id();
+            builder.function(op::BITCAST, &[f32_type.0, float.0, value.0]);
+            float
+        });
+        let result_f = builder.ext_inst(f32_type, set, GLSL_FMA, &floats);
+        let result = builder.id();
+        builder.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
         result
     }
 
@@ -4267,11 +4316,11 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             }
             // Float. `v_subrev_f32` reverses its operands, as its name says and its encoding does
             // not. `v_fmac_f32` accumulates into its destination, read through the ordinary source
-            // path because the destination names a vector register.
+            // path because the destination names a vector register, and is fused
+            // ([`Model::f32_fma`]).
             "v_fmac_f32_e32" => {
                 let previous = model.read_source(instruction, destination, lane)?;
-                let product = model.f32_binary(op::FMUL, lhs, rhs);
-                model.f32_binary(op::FADD, product, previous)
+                model.f32_fma(lhs, rhs, previous)
             }
             // The legacy multiply-add, accumulating into its destination.
             "v_mac_f32_e32" => {
@@ -5700,8 +5749,8 @@ fn division_fmas<M: Model + ?Sized>(
         let c = model.read_source(instruction, third, lane)?;
         let c = apply_modifiers(model, c, modifiers, 2);
 
-        let product = model.f32_binary(op::FMUL, a, b);
-        let sum = model.f32_binary(op::FADD, product, c);
+        // Fused, as `V_DIV_FMAS_F32` is ([`Model::f32_fma`]).
+        let sum = model.f32_fma(a, b, c);
         let scaled = model.f32_binary(op::FMUL, sum, scale);
 
         let bit = model.lane_bit(low, high, lane);
@@ -6168,13 +6217,8 @@ fn combine<M: Model + ?Sized>(
             };
             Ok(model.f32_binary(spirv, left, right))
         }
-        // Fused multiply-add, a*b+c. SPIR-V's core multiply and add each round, so this is less
-        // faithful than a fused operation; `GLSL.std.450` `Fma` is the exact spelling if a
-        // framebuffer comparison needs it.
-        ("v_fma_f32", [a, b, c]) => {
-            let product = model.f32_binary(op::FMUL, *a, *b);
-            Ok(model.f32_binary(op::FADD, product, *c))
-        }
+        // The fused multiply-add, rounded once ([`Model::f32_fma`]).
+        ("v_fma_f32", [a, b, c]) => Ok(model.f32_fma(*a, *b, *c)),
         ("v_mad_f32" | "v_mac_f32_e64", [a, b, c]) => Ok(legacy_multiply_add(model, *a, *b, *c)),
         ("v_div_fixup_f32", [quotient, denominator, numerator]) => {
             Ok(division_fixup(model, *quotient, *denominator, *numerator))
@@ -11437,8 +11481,14 @@ fn mixed_multiply_add<M: Model + ?Sized>(
         let [Some(a), Some(b), Some(c)] = read else {
             unreachable!("every source was read above");
         };
-        let product = model.f32_binary(op::FMUL, a, b);
-        let value = model.f32_binary(op::FADD, product, c);
+        // Fused: once in single precision for `v_fma_mix_f32`, once to a half for the narrowing
+        // forms where every source is a half, whose product is then exact in single precision.
+        // A narrowing form with a single-precision source rounds to single precision first.
+        let value = if name != "v_fma_mix_f32" && half.iter().all(|half| *half) {
+            fused_to_half(model, a, b, c)
+        } else {
+            model.f32_fma(a, b, c)
+        };
         let value = match clamp {
             Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),
             None => value,
@@ -11777,6 +11827,45 @@ fn legacy_multiply_add<M: Model + ?Sized>(model: &mut M, a: Id, b: Id, c: Id) ->
     flush_denormal(model, sum)
 }
 
+/// `a * b + c` of three halves widened to single precision, rounded so that narrowing the result to
+/// a half rounds the exact value once, as a fused sixteen-bit multiply-add does. The product of two
+/// halves is exact in single precision, so the sum is the only rounding: its error is found exactly
+/// (`TwoSum`), and an inexact sum whose last bit is even is moved one step toward the exact value -
+/// rounded to odd. Rounding to odd at 24 bits and then to nearest at 11 is the single rounding to
+/// nearest at 11 (Boldo and Melquiond, "Emulation of FMA and correctly rounded sums: proved
+/// algorithms using rounding to odd", IEEE Trans. Computers 57(4), 2008), where rounding a nearest
+/// sum twice can round a tie the wrong way. Every step is kept from contraction.
+pub(crate) fn fused_to_half<M: Model + ?Sized>(model: &mut M, a: Id, b: Id, c: Id) -> Id {
+    let product = model.f32_binary_uncontracted(op::FMUL, a, b);
+    let sum = model.f32_binary_uncontracted(op::FADD, product, c);
+    let part_c = model.f32_binary_uncontracted(op::FSUB, sum, product);
+    let part_product = model.f32_binary_uncontracted(op::FSUB, sum, part_c);
+    let lost_product = model.f32_binary_uncontracted(op::FSUB, product, part_product);
+    let lost_c = model.f32_binary_uncontracted(op::FSUB, c, part_c);
+    let error = model.f32_binary_uncontracted(op::FADD, lost_product, lost_c);
+    let magnitude_mask = model.constant(0x7FFF_FFFF);
+    let (zero, one) = (model.constant(0), model.constant(1));
+    let error_magnitude = model.binary(op::BITWISE_AND, error, magnitude_mask);
+    let inexact = model.compare(op::INOT_EQUAL, error_magnitude, zero);
+    let last = model.binary(op::BITWISE_AND, sum, one);
+    let even = model.compare(op::IEQUAL, last, zero);
+    // Finite: an exponent short of all ones. An infinite or NaN sum is left as it is.
+    let sum_magnitude = model.binary(op::BITWISE_AND, sum, magnitude_mask);
+    let infinity = model.constant(0x7F80_0000);
+    let finite = model.compare(op::ULESS_THAN, sum_magnitude, infinity);
+    // The exact value lies beyond the sum's magnitude where the error has the sum's sign.
+    let signs = model.binary(op::BITWISE_XOR, error, sum);
+    let sign_bit = model.constant(0x8000_0000);
+    let differing = model.binary(op::BITWISE_AND, signs, sign_bit);
+    let outward = model.compare(op::IEQUAL, differing, zero);
+    let up = model.add(sum, one);
+    let down = model.binary(op::ISUB, sum, one);
+    let stepped = model.select(outward, up, down);
+    let odd = model.both(inexact, even);
+    let odd = model.both(odd, finite);
+    model.select(odd, stepped, sum)
+}
+
 /// A float's bits with a denormal replaced by the zero of its sign; every other value, zero and the
 /// infinities and NaNs among them, unchanged.
 fn flush_denormal<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
@@ -11987,8 +12076,7 @@ fn multiply_add_constant<M: Model + ?Sized>(
         let value = if legacy {
             legacy_multiply_add(model, a, b, c)
         } else {
-            let product = model.f32_binary(op::FMUL, a, b);
-            model.f32_binary(op::FADD, product, c)
+            model.f32_fma(a, b, c)
         };
         model.write_vector_lane(register, lane, value);
     }
@@ -12470,10 +12558,10 @@ fn half_float_arithmetic<M: Model + ?Sized>(
             "v_mul_f16_e32" => model.f32_binary(op::FMUL, x, y),
             "v_max_f16_e32" => model.f32_ext_binary(GLSL_FMAX, x, y),
             "v_min_f16_e32" => model.f32_ext_binary(GLSL_FMIN, x, y),
+            // `v_fmac_f16`, fused: rounded once to the half it writes.
             _ => {
-                let product = model.f32_binary(op::FMUL, x, y);
                 let accumulated = widen(model, old);
-                model.f32_binary(op::FADD, product, accumulated)
+                fused_to_half(model, x, y, accumulated)
             }
         };
         let half = model.float_bits_to_half(result);
@@ -12687,11 +12775,8 @@ fn half_float_operation<M: Model + ?Sized>(model: &mut M, name: &str, operands: 
             let capped = model.f32_ext_binary(GLSL_FMIN, more, c);
             model.f32_ext_binary(GLSL_FMAX, less, capped)
         }
-        // `v_pk_fma_f16` and `v_fma_f16`.
-        _ => {
-            let product = model.f32_binary(op::FMUL, a, b);
-            model.f32_binary(op::FADD, product, c)
-        }
+        // `v_pk_fma_f16` and `v_fma_f16`, fused: rounded once to the half the caller narrows to.
+        _ => fused_to_half(model, a, b, c),
     }
 }
 
@@ -14743,6 +14828,7 @@ fn compare_sample<M: Model + ?Sized>(
     };
     let reference = address_element(model, instruction, (addresses, a16), 0, lane)?;
     if let Some(compare) = texture.shader_compare {
+        let compare = running_compare(model, instruction, compare)?;
         let result = shader_compare(model, reference, (texture, coordinate, implicit), compare);
         model.write_vector_lane(u32::from(*destination), lane, result);
         return Ok(());
@@ -14780,79 +14866,185 @@ fn compare_sample<M: Model + ?Sized>(
     Ok(())
 }
 
+/// How a compare the shader makes itself chooses its function and filter: compiled in, as the
+/// sampler the host read names them, or read from the sampler's registers as the module runs.
+#[derive(Debug, Clone, Copy)]
+enum CompareBy {
+    /// `SQ_TEX_DEPTH_COMPARE` and whether the sampler filters bilinearly.
+    Known(u8, bool),
+    /// The function, `0..=7`, and one where the sampler filters bilinearly, else zero, as ids.
+    Running(Id, Id),
+}
+
+/// A slot's compare as the module makes it: the one compiled in, or - for
+/// [`crate::wavefront::RUNNING_COMPARE`] - the function and filter read from the instruction's
+/// sampler registers as the module runs (D995), `DEPTH_COMPARE_FUNC` (word 0, bits 14:12) and
+/// `XY_MAG_FILTER`'s bilinear bit (word 2, bit 20; `gfx10-rsrc.json`).
+fn running_compare<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (function, linear): (u8, bool),
+) -> Result<CompareBy, TranslateError> {
+    if function != crate::wavefront::RUNNING_COMPARE {
+        return Ok(CompareBy::Known(function, linear));
+    }
+    let Some(Operand::Scalar(sampler)) = instruction.operands.get(3) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a depth-compare sample whose sampler is not in scalar registers",
+        });
+    };
+    let sampler = u32::from(*sampler);
+    if sampler + 4 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sampler descriptor runs past the end of the register file",
+        });
+    }
+    let (word0, word2) = (model.read_scalar(sampler), model.read_scalar(sampler + 2));
+    let (twelve, twenty, seven, one) = (
+        model.constant(12),
+        model.constant(20),
+        model.constant(7),
+        model.constant(1),
+    );
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word0, twelve);
+    let function = model.binary(op::BITWISE_AND, shifted, seven);
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word2, twenty);
+    let linear = model.binary(op::BITWISE_AND, shifted, one);
+    Ok(CompareBy::Running(function, linear))
+}
+
 /// A compare the shader makes itself, of an image that is not a depth target, which no host
 /// compare sampler reads: the image's first channel compared with the reference by the sampler's
 /// `SQ_TEX_DEPTH_COMPARE` function - 1.0 where the reference passes, 0.0 where it does not - as a
 /// compare sampler compares a depth (`reference OP texel`, Vulkan's `Dref` order). A bilinear
 /// filter compares the four texels it would blend, gathered, and blends the answers with the
-/// filter's weights, as a filtered compare does; a point filter compares the one texel. Answers
-/// the result's bits.
+/// filter's weights, as a filtered compare does; a point filter compares the one texel. A compare
+/// read as the module runs makes every function's answer and both filters', and keeps the ones its
+/// sampler names. Answers the result's bits.
 fn shader_compare<M: Model + ?Sized>(
     model: &mut M,
     reference: Id,
     (texture, coordinate, implicit): (&Texture, Id, bool),
-    (function, linear): (u8, bool),
+    compare: CompareBy,
 ) -> Id {
-    let (f32_type, u32_type) = (model.f32_type(), model.u32_type());
     let (one, nothing) = (model.constant(1.0f32.to_bits()), model.constant(0));
     let reference_f = model.as_float(reference);
     let passes = |model: &mut M, texel_bits: Id| -> Id {
-        let opcode = match function {
-            1 => op::FORD_LESS_THAN,
-            2 => op::FORD_EQUAL,
-            3 => op::FORD_LESS_THAN_EQUAL,
-            4 => op::FORD_GREATER_THAN,
-            5 => op::FUNORD_NOT_EQUAL,
-            6 => op::FORD_GREATER_THAN_EQUAL,
-            // Never (0) and always (7) answer alike whatever the texel holds.
-            0 => return nothing,
-            _ => return one,
-        };
         let texel = model.as_float(texel_bits);
-        let passed = model.compare(opcode, reference_f, texel);
-        model.select(passed, one, nothing)
-    };
-    let zero_level = model.constant(0);
-    let builder = model.builder();
-    let bound = bound_texture(builder, texture);
-    // The texels, as bits, and how to blend their answers.
-    let channel = |model: &mut M, vector: Id, at: u32| -> Id {
-        let b = model.builder();
-        let float = b.id();
-        b.function(op::COMPOSITE_EXTRACT, &[f32_type.0, float.0, vector.0, at]);
-        let bits = b.id();
-        b.function(op::BITCAST, &[u32_type.0, bits.0, float.0]);
-        bits
-    };
-    if !linear {
-        let b = model.builder();
-        let sampled = b.id();
-        if implicit {
-            b.function(
-                op::IMAGE_SAMPLE_IMPLICIT_LOD,
-                &[texture.result.0, sampled.0, bound.0, coordinate.0],
-            );
-        } else {
-            let level = b.id();
-            b.function(op::BITCAST, &[f32_type.0, level.0, zero_level.0]);
-            b.function(
-                op::IMAGE_SAMPLE_EXPLICIT_LOD,
-                &[
-                    texture.result.0,
-                    sampled.0,
-                    bound.0,
-                    coordinate.0,
-                    image_operands::LOD,
-                    level.0,
-                ],
-            );
+        let function = match compare {
+            CompareBy::Known(function, _) => {
+                let Some(opcode) = compare_opcode(function) else {
+                    // Never (0) and always (7) answer alike whatever the texel holds.
+                    return if function == 0 { nothing } else { one };
+                };
+                let passed = model.compare(opcode, reference_f, texel);
+                return model.select(passed, one, nothing);
+            }
+            CompareBy::Running(function, _) => function,
+        };
+        let seven = model.constant(7);
+        let always = model.compare(op::IEQUAL, function, seven);
+        let mut answer = model.select(always, one, nothing);
+        for code in 1..=6 {
+            let Some(opcode) = compare_opcode(code) else {
+                continue;
+            };
+            let passed = model.compare(opcode, reference_f, texel);
+            let held = model.select(passed, one, nothing);
+            let named = model.constant(u32::from(code));
+            let chosen = model.compare(op::IEQUAL, function, named);
+            answer = model.select(chosen, held, answer);
         }
-        let texel = channel(model, sampled, 0);
-        return passes(model, texel);
+        answer
+    };
+    match compare {
+        CompareBy::Known(_, false) => {
+            compare_point(model, (texture, coordinate, implicit), &passes)
+        }
+        CompareBy::Known(_, true) => compare_bilinear(model, (texture, coordinate), &passes),
+        CompareBy::Running(_, linear) => {
+            let point = compare_point(model, (texture, coordinate, implicit), &passes);
+            let blended = compare_bilinear(model, (texture, coordinate), &passes);
+            let zero = model.constant(0);
+            let filtered = model.compare(op::INOT_EQUAL, linear, zero);
+            model.select(filtered, blended, point)
+        }
     }
-    // Four texels gathered from the first channel: (i0, j1), (i1, j1), (i1, j0), (i0, j0), in the
-    // order `OpImageGather` answers them.
+}
+
+/// The comparison `SQ_TEX_DEPTH_COMPARE` names, of the reference with the texel; `None` for never
+/// (0) and always (7).
+const fn compare_opcode(function: u8) -> Option<u16> {
+    Some(match function {
+        1 => op::FORD_LESS_THAN,
+        2 => op::FORD_EQUAL,
+        3 => op::FORD_LESS_THAN_EQUAL,
+        4 => op::FORD_GREATER_THAN,
+        5 => op::FUNORD_NOT_EQUAL,
+        6 => op::FORD_GREATER_THAN_EQUAL,
+        _ => return None,
+    })
+}
+
+/// Channel `at` of the float vector `vector`, as bits.
+fn channel_bits<M: Model + ?Sized>(model: &mut M, vector: Id, at: u32) -> Id {
+    let (f32_type, u32_type) = (model.f32_type(), model.u32_type());
     let b = model.builder();
+    let float = b.id();
+    b.function(op::COMPOSITE_EXTRACT, &[f32_type.0, float.0, vector.0, at]);
+    let bits = b.id();
+    b.function(op::BITCAST, &[u32_type.0, bits.0, float.0]);
+    bits
+}
+
+/// A point-filtered compare: the one texel at `coordinate`, compared by `passes`.
+fn compare_point<M: Model + ?Sized>(
+    model: &mut M,
+    (texture, coordinate, implicit): (&Texture, Id, bool),
+    passes: &dyn Fn(&mut M, Id) -> Id,
+) -> Id {
+    let f32_type = model.f32_type();
+    let zero_level = model.constant(0);
+    let b = model.builder();
+    let bound = bound_texture(b, texture);
+    let sampled = b.id();
+    if implicit {
+        b.function(
+            op::IMAGE_SAMPLE_IMPLICIT_LOD,
+            &[texture.result.0, sampled.0, bound.0, coordinate.0],
+        );
+    } else {
+        let level = b.id();
+        b.function(op::BITCAST, &[f32_type.0, level.0, zero_level.0]);
+        b.function(
+            op::IMAGE_SAMPLE_EXPLICIT_LOD,
+            &[
+                texture.result.0,
+                sampled.0,
+                bound.0,
+                coordinate.0,
+                image_operands::LOD,
+                level.0,
+            ],
+        );
+    }
+    let texel = channel_bits(model, sampled, 0);
+    passes(model, texel)
+}
+
+/// A bilinear compare: four texels gathered from the first channel - (i0, j1), (i1, j1), (i1, j0),
+/// (i0, j0), in the order `OpImageGather` answers them - each compared by `passes`, the answers
+/// blended with the filter's weights.
+fn compare_bilinear<M: Model + ?Sized>(
+    model: &mut M,
+    (texture, coordinate): (&Texture, Id),
+    passes: &dyn Fn(&mut M, Id) -> Id,
+) -> Id {
+    let zero_level = model.constant(0);
+    let b = model.builder();
+    let bound = bound_texture(b, texture);
     b.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
     let gathered = b.id();
     b.function(
@@ -14873,11 +15065,11 @@ fn shader_compare<M: Model + ?Sized>(
     );
     let answers: Vec<Id> = (0..4)
         .map(|at| {
-            let texel = channel(model, gathered, at);
+            let texel = channel_bits(model, gathered, at);
             passes(model, texel)
         })
         .collect();
-    let across = [0, 1].map(|axis| channel(model, coordinate, axis));
+    let across = [0, 1].map(|axis| channel_bits(model, coordinate, axis));
     bilinear_blend(
         model,
         [answers[0], answers[1], answers[2], answers[3]],

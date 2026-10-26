@@ -408,6 +408,60 @@ pub fn selected_images(
     encodings: &EncodingTable,
     (first_register, count): (u32, u32),
 ) -> BTreeMap<u32, SelectedImage> {
+    let mut images = BTreeMap::new();
+    each_traced_instruction(
+        decode,
+        encodings,
+        (first_register, count),
+        &mut |instruction, name, (held, selected)| {
+            if let Some(image) = selected_image(instruction, name, (held, selected)) {
+                images.insert(instruction.offset, image);
+            }
+        },
+    );
+    images
+}
+
+/// Each sample or gather of a dispatch, by byte offset, whose four sampler registers hold words the
+/// trace names - constants, including those a scalar instruction folds from constants, user data,
+/// or loads at fixed places - for a stage whose `count` user-data words land in the scalar
+/// registers from `first_register`: the sampler the host reads for an image no table record or
+/// user-data word pairs it with, as a selected image's is (D983, D995).
+#[must_use]
+pub fn traced_samplers(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+) -> BTreeMap<u32, [DescriptorWord; 4]> {
+    let mut samplers = BTreeMap::new();
+    each_traced_instruction(
+        decode,
+        encodings,
+        (first_register, count),
+        &mut |instruction, name, (held, _)| {
+            if (name.starts_with("image_sample") || name.starts_with("image_gather"))
+                && let Some(Operand::Scalar(first)) = instruction.operands.get(3)
+                && let Some(words) = descriptor(held, *first)
+            {
+                samplers.insert(instruction.offset, words);
+            }
+        },
+    );
+    samplers
+}
+
+/// What [`each_traced_instruction`] calls for each instruction: it, its name, and the registers'
+/// traced words and selections before it.
+type TracedVisit<'a> = dyn FnMut(&Instruction, &str, (&Held, &Selections)) + 'a;
+
+/// Calls `visit` with each named instruction a dispatch reaches and the registers' traced words and
+/// selections before it: the walk [`selected_images`] and [`traced_samplers`] share.
+fn each_traced_instruction(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+    visit: &mut TracedVisit<'_>,
+) {
     let named = named_instructions(decode, encodings);
     let Ok(blocks) = crate::blocks::split(decode, |instruction| {
         let family = encodings
@@ -415,11 +469,10 @@ pub fn selected_images(
             .get(usize::from(instruction.encoding?))?;
         Some(family.name.clone())
     }) else {
-        return BTreeMap::new();
+        return;
     };
     let reached = block_entries(decode, &named, &blocks, entry_state(first_register, count));
     let selections = selection_entries(decode, &named, (&blocks, &reached), true);
-    let mut images = BTreeMap::new();
     for ((block, state), selected) in blocks.iter().zip(reached).zip(selections) {
         let (Some(mut held), Some(mut selected)) = (state, selected) else {
             continue;
@@ -428,16 +481,13 @@ pub fn selected_images(
             .iter()
             .zip(&named[block.first..block.end])
         {
-            if let Some(&(_, name)) = named.as_ref()
-                && let Some(image) = selected_image(instruction, name, (&held, &selected))
-            {
-                images.insert(instruction.offset, image);
+            if let Some(&(_, name)) = named.as_ref() {
+                visit(instruction, name, (&held, &selected));
             }
             step_selections(&mut selected, &held, instruction, *named);
             step(&mut held, instruction, *named);
         }
     }
-    images
 }
 
 /// The table an image access's descriptor was selected from at run time, where it was (D983): a
@@ -597,6 +647,138 @@ pub fn trace_hierarchies(
         }
     }
     sources
+}
+
+/// The high word every flat address at or above which no guest mapping holds: a guest runs in the
+/// host's user address space, which ends below 2^47 (D989). A flat store there reaches the local
+/// data share's or the private aperture ([`crate::device_address::LOCAL_APERTURE_HIGH`],
+/// [`crate::device_address::PRIVATE_APERTURE_HIGH`]), or nothing, and never guest memory.
+pub const BEYOND_GUEST_HIGH: u32 = 0x8000;
+
+/// Whether `instruction`, named `named`, is a store in the flat segment: a flat-encoded store
+/// (named as the global segment's, the family's mnemonics naming no segment) whose `SEG` field,
+/// bits 15:14 of its first word, is zero. Its address may reach the local data share's or the
+/// private aperture as well as guest memory (D964).
+#[must_use]
+pub fn flat_segment_store(instruction: &Instruction, named: Option<(&str, &str)>) -> bool {
+    named.is_some_and(|(family, name)| {
+        family == "FLAT"
+            && name.starts_with("global_store_")
+            && (instruction.word >> 14) & 3 == FLAT_SEGMENT
+    })
+}
+
+/// A flat-encoded access's `SEG` for the flat segment, which routes by aperture.
+const FLAT_SEGMENT: u32 = 0;
+
+/// The byte offsets of a program's flat stores whose address's high word is at least
+/// [`BEYOND_GUEST_HIGH`] in every lane, for a stage whose `count` user-data words land in the
+/// scalar registers from `first_register` (D989): stores into the wave's own local data share or
+/// private memory, which write no guest memory.
+///
+/// The high word is bounded where the same straight run of the program set it, after the last
+/// change of the execution mask, with a `v_med3_u32` two of whose operands are constants or
+/// scalar registers the trace holds as constants: a median is at least the smaller of any two of
+/// its operands. Grand Theft Auto V's ray traversal clamps a stack pointer's high word between
+/// [`crate::device_address::PRIVATE_APERTURE_HIGH`] and
+/// [`crate::device_address::LOCAL_APERTURE_HIGH`] this way before each push (guest-observed, the
+/// program at 0x74005b854a00). Any other write to a vector register forgets its bound.
+#[must_use]
+pub fn flat_stores_beyond_guest(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (first_register, count): (u32, u32),
+) -> std::collections::BTreeSet<u32> {
+    let mut beyond = std::collections::BTreeSet::new();
+    let named = named_instructions(decode, encodings);
+    if !decode
+        .instructions
+        .iter()
+        .zip(&named)
+        .any(|(instruction, named)| flat_segment_store(instruction, *named))
+    {
+        return beyond;
+    }
+    let Ok(blocks) = crate::blocks::split(decode, |instruction| {
+        let family = encodings
+            .encodings()
+            .get(usize::from(instruction.encoding?))?;
+        Some(family.name.clone())
+    }) else {
+        return beyond;
+    };
+    let reached = block_entries(decode, &named, &blocks, entry_state(first_register, count));
+    for (block, state) in blocks.iter().zip(reached) {
+        let Some(mut held) = state else {
+            continue;
+        };
+        // Each vector register's least value in every lane, where this run set one.
+        let mut floors: BTreeMap<u16, u32> = BTreeMap::new();
+        for (instruction, named) in decode.instructions[block.first..block.end]
+            .iter()
+            .zip(&named[block.first..block.end])
+        {
+            let Some((_, name)) = named else {
+                floors.clear();
+                step(&mut held, instruction, *named);
+                continue;
+            };
+            let operands = instruction.operands.as_slice();
+            if flat_segment_store(instruction, *named)
+                && let Some(Operand::Vector(address)) = operands.first()
+                && floors
+                    .get(&(address + 1))
+                    .is_some_and(|&floor| floor >= BEYOND_GUEST_HIGH)
+            {
+                beyond.insert(instruction.offset);
+            }
+            // A lane the mask leaves out keeps what it held before, so a change of the mask
+            // forgets every bound.
+            let masks = name.starts_with("v_cmpx")
+                || name.contains("saveexec")
+                || name.starts_with("s_wqm")
+                || operands.iter().any(
+                    |operand| matches!(operand, Operand::Named(special) if special.starts_with("exec")),
+                );
+            if masks || name.starts_with("v_movrel") || name.starts_with("s_set_gpr_idx") {
+                floors.clear();
+            } else {
+                for operand in operands {
+                    if let Operand::Vector(first) = operand {
+                        floors.retain(|&register, _| {
+                            !(*first..first.saturating_add(16)).contains(&register)
+                        });
+                    }
+                }
+            }
+            if *name == "v_med3_u32"
+                && let [Operand::Vector(destination), sources @ ..] = operands
+            {
+                let known: Vec<u32> = sources
+                    .iter()
+                    .take(3)
+                    .filter_map(|source| match source {
+                        Operand::Literal(value) => Some(*value),
+                        Operand::Integer(value) => u32::try_from(*value).ok(),
+                        Operand::Scalar(register) => {
+                            match held.get(usize::from(*register)).copied().flatten() {
+                                Some(DescriptorWord::Constant(value)) => Some(value),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if known.len() >= 2
+                    && let Some(&floor) = known.iter().min()
+                {
+                    floors.insert(*destination, floor);
+                }
+            }
+            step(&mut held, instruction, *named);
+        }
+    }
+    beyond
 }
 
 /// The slots every access to which is one of `stores` (D809).
@@ -2882,5 +3064,38 @@ mod tests {
             )
         );
         assert_eq!(computed.prefix, program[..10]);
+    }
+
+    /// A flat store whose address's high word a `v_med3_u32` clamps between the private and the
+    /// local data share's apertures reaches no guest memory (D989), as Grand Theft Auto V's ray
+    /// traversal pushes its stack at 0x74005b854a00 + 0x12d0. With the clamp's bound unknown, or the
+    /// mask changed after it, the store is not known to stay off guest memory.
+    #[test]
+    fn a_flat_store_clamped_to_the_apertures_reaches_no_guest_memory() {
+        const BREV: u32 = 0xbee5_0b81; // s_brev_b32 s101, 1
+        // v_med3_u32 v9, s101, 0x70000000, v43
+        const MED3: [u32; 3] = [0xd559_0009, 0x04ad_fe65, 0x7000_0000];
+        const STORE: [u32; 2] = [0xdc70_0000, 0x007d_0308]; // flat_store_dword v[8:9], v3
+        const CMPX: u32 = 0x7daa_0283; // v_cmpx_ne_u32_e32 3, v1
+        let beyond = |words: &[u32]| {
+            let encodings = EncodingTable::builtin().expect("encodings");
+            let operands = OperandTable::builtin().expect("operands");
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let decoded = decode_program(&bytes, &encodings, &operands);
+            assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
+            super::flat_stores_beyond_guest(&decoded, &encodings, (0, 4))
+        };
+        let clamped = [&[BREV][..], &MED3, &STORE, &[END]].concat();
+        assert_eq!(beyond(&clamped).into_iter().collect::<Vec<_>>(), [16]);
+        // s101 never set: the clamp's floor is not known.
+        let unknown = [&MED3[..], &STORE, &[END]].concat();
+        assert!(beyond(&unknown).is_empty());
+        // The mask changed between the clamp and the store: a lane left out of the clamp keeps
+        // whatever its register held.
+        let masked = [&[BREV][..], &MED3, &[CMPX], &STORE, &[END]].concat();
+        assert!(beyond(&masked).is_empty());
+        // The same store in the global segment (`SEG` 2) is not a flat one.
+        let global = [&[BREV][..], &MED3, &[STORE[0] | 2 << 14, STORE[1]], &[END]].concat();
+        assert!(beyond(&global).is_empty());
     }
 }

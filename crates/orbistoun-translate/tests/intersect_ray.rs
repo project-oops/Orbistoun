@@ -65,10 +65,11 @@ fn store_node(program: &mut Vec<u32>, node: &[u32; NODE_WORDS]) {
     }
 }
 
-/// The descriptor in s[4:7] - base zero, box sorting on, barycentric return, type 8 - and the
-/// ray in v[8:18]: the pointer, extent, origin, direction and inverse direction.
+/// The descriptor in s[4:7] - base zero, box sorting on, every node index in range, barycentric
+/// return, type 8, as Mesa builds it (`radv_nir_rt_common.c:582-585`) - and the ray in v[8:18]:
+/// the pointer, extent, origin, direction and inverse direction.
 fn set_ray(program: &mut Vec<u32>, pointer: u32, origin: [f32; 3], direction: [f32; 3]) {
-    for (register, word) in (4..).zip([0, 1 << 31, 0, 0x8100_0000]) {
+    for (register, word) in (4..).zip([0, 1 << 31, u32::MAX, 0x8100_03ff]) {
         program.extend(s_mov_literal(register, word));
     }
     let inverse = direction.map(|component| 1.0 / component);
@@ -137,7 +138,8 @@ fn a_box_node_answers_the_children_the_ray_enters_nearest_first() {
 }
 
 /// A triangle node hit at (1,1) by a ray down -z answers `t`, `det`, `v` and `w` whose quotients
-/// are the distance 2 and the second and third vertices' weights 1/4.
+/// are the distance 2 and the second and third vertices' weights 1/4: the weights its flags word
+/// (word 15) names, `9` as a node of one triangle holds it (D992).
 #[test]
 fn a_triangle_node_answers_its_distance_and_barycentrics() {
     let mut node = [0; NODE_WORDS];
@@ -145,6 +147,7 @@ fn a_triangle_node_answers_its_distance_and_barycentrics() {
     for (word, coordinate) in node.iter_mut().zip(vertices) {
         *word = coordinate.to_bits();
     }
+    node[15] = 9;
     let mut program = Vec::new();
     store_node(&mut program, &node);
     set_ray(&mut program, NODE >> 3, [1.0, 1.0, 0.0], [0.0, 0.0, -1.0]);

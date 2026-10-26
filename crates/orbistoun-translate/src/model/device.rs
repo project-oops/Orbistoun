@@ -753,10 +753,7 @@ fn flat_address<M: Model + ?Sized>(
             ));
         }
     };
-    let immediate = match instruction.operands.get(3) {
-        Some(Operand::Immediate(immediate)) => *immediate,
-        _ => 0,
-    };
+    let immediate = super::flat_offset(instruction);
     if immediate == 0 {
         return Ok(address);
     }
@@ -1256,19 +1253,144 @@ fn sub_word_store<M: Model + ?Sized>(
     }
 }
 
+/// The 64-bit integer atomic `opcode` of `value` on the aligned pair at device address `address`,
+/// answering what the pair held; zero where it does not land. As [`atomic_word`] places a word: a
+/// pair no mapping holds is an escape where it would have landed, and a lane that does not land
+/// reaches the marks' sink instead, which nothing reads. The pair is one 64-bit step, so its two
+/// words are never seen apart (D955).
+fn atomic_pair<M: Model + ?Sized>(
+    model: &mut M,
+    t: &DeviceTable,
+    (address, opcode, value): (Id, u16, Id),
+    landed: Id,
+    lane: u32,
+) -> Id {
+    let aligned = wide_constant(model, t, !7);
+    let address = wide_op(model, t, op::BITWISE_AND, address, aligned);
+    let (device, found, mark) = lookup(model, t, address);
+    let lost = logical_not(model, found);
+    let escaped = model.both(lost, landed);
+    let page = page_of(model, t, address);
+    model.note_escape_at(escaped, Some(lane), page);
+    let mut lands = model.both(found, landed);
+    if let Some(runs) = lane_runs(model, lane) {
+        lands = model.both(lands, runs);
+    }
+    let marked = wide_select(model, t, lands, mark, t.marks);
+    mark_written(model, t, marked);
+    let target = wide_select(model, t, lands, device, t.marks);
+    let (device_scope, relaxed) = (model.constant(scope::DEVICE), model.constant(0));
+    let builder = model.builder();
+    builder.header(
+        op::CAPABILITY,
+        &[orbistoun_spirv::capability::INT64_ATOMICS],
+    );
+    let pair_pointer = builder.id();
+    builder.declare(
+        op::TYPE_POINTER,
+        &[
+            pair_pointer.0,
+            orbistoun_spirv::storage::PHYSICAL_STORAGE_BUFFER,
+            t.u64_type.0,
+        ],
+    );
+    let at = builder.id();
+    builder.function(op::CONVERT_U_TO_PTR, &[pair_pointer.0, at.0, target.0]);
+    let held = builder.id();
+    builder.function(
+        opcode,
+        &[
+            t.u64_type.0,
+            held.0,
+            at.0,
+            device_scope.0,
+            relaxed.0,
+            value.0,
+        ],
+    );
+    let zero = wide_constant(model, t, 0);
+    wide_select(model, t, lands, held, zero)
+}
+
+/// The 64-bit integer atomic a `buffer_atomic_*_x2` names: the exchange and the or a bound buffer's
+/// pair takes too (D955), `None` for another.
+fn pair_opcode(name: &str) -> Option<u16> {
+    match name {
+        "buffer_atomic_swap_x2" => Some(op::ATOMIC_EXCHANGE),
+        "buffer_atomic_or_x2" => Some(op::ATOMIC_OR),
+        _ => None,
+    }
+}
+
+/// A 64-bit buffer atomic no bound buffer serves, by device address: the data register pair, low
+/// word first, combined with the eight bytes at the access's place as one 64-bit atomic, answering
+/// the pair it held into the same registers where `GLC` (bit 14) asks (AMD's published RDNA 2
+/// instruction set, MUBUF). An access out of bounds leaves the pair and answers zero.
+fn buffer_atomic_pair<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let Some(opcode) = pair_opcode(name) else {
+        return Err(refuse(
+            instruction,
+            "a 64-bit buffer atomic not translated by device address (D964)",
+        ));
+    };
+    let (register, vaddr, resource_base, soffset) = buffer_operands(instruction)?;
+    if register + 2 > VECTOR_REGISTERS {
+        return Err(refuse(
+            instruction,
+            "a buffer atomic's data runs past the end of the vector register file",
+        ));
+    }
+    let returning = instruction.word & 1 << 14 != 0;
+    let t = table(model, instruction.offset)?;
+    let computed = computed(model, resource_base);
+    let resource = computed.resource;
+    let base = wide(model, &t, (resource.base, resource.high));
+    let zero = model.constant(0);
+    let payload = model.constant(8);
+    for lane in running_lanes(model) {
+        let (start, outside) = buffer_place(
+            model,
+            instruction,
+            (vaddr, soffset),
+            &computed,
+            (0, payload),
+            lane,
+        )?;
+        let landed = logical_not(model, outside);
+        let at = widen(model, &t, start);
+        let address = wide_op(model, &t, op::IADD, base, at);
+        let [low, high] = [register, register + 1].map(|at| {
+            model.read_source(instruction, &Operand::Vector(super::address_of(at)), lane)
+        });
+        let value = wide(model, &t, (low?, high?));
+        let held = atomic_pair(model, &t, (address, opcode, value), landed, lane);
+        if returning {
+            let held_low = narrow(model, held);
+            let held_high = high_half(model, &t, held);
+            for (at, part) in [(register, held_low), (register + 1, held_high)] {
+                let kept = pick(model, outside, zero, part);
+                model.write_vector_lane(at, lane, kept);
+            }
+        }
+    }
+    model.count();
+    Ok(())
+}
+
 /// A one-word buffer atomic no bound buffer serves, by device address (D919's forms): an integer
 /// one as one atomic, a float minimum or maximum as two by the value's sign. A 64-bit one is
-/// refused.
+/// [`buffer_atomic_pair`].
 fn buffer_atomic<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
     if name.ends_with("_x2") {
-        return Err(refuse(
-            instruction,
-            "a 64-bit buffer atomic by device address, which is not translated (D964)",
-        ));
+        return buffer_atomic_pair(model, instruction, name);
     }
     let float = match name {
         "buffer_atomic_fmin" => Some(false),

@@ -226,3 +226,21 @@ fn a_clamped_result_is_computed_under_the_program_s_clamp_mode() {
     let run = trace(&program, &[0; 4], &|_| None, &mut Blank);
     assert_eq!(run.lanes[0][2], Some(1.0_f32.to_bits()));
 }
+
+/// A global access's offset is a signed twelve-bit number: `global_load_dword v3, v[6:7], off
+/// offset:-4` reads the word before the address its registers hold.
+#[test]
+fn a_global_offset_is_signed() {
+    const BASE: u64 = 0x3_0000;
+    let mut program = Vec::new();
+    program.extend(move_literal(6, 0x3_0010));
+    program.extend(move_literal(7, 0));
+    // `0xffc` in the offset field: -4.
+    program.extend([0xdc30_8ffc, 0x037d_0006, S_ENDPGM]);
+    let memory = |address: u64| {
+        let word = address.checked_sub(BASE)? / 4;
+        (word < 64).then(|| 0x500 + word as u32)
+    };
+    let run = trace(&program, &[0; 4], &memory, &mut Blank);
+    assert_eq!(run.lanes[0][3], Some(0x503), "the word at 0x3000c");
+}

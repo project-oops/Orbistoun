@@ -437,10 +437,7 @@ fn load_step(instruction: &Instruction, name: &str) -> Option<Step> {
     if !matches!(operands.get(2), Some(Operand::Named(null)) if null == "null") {
         return None;
     }
-    let offset = match operands.get(3) {
-        Some(Operand::Immediate(offset)) => *offset,
-        _ => 0,
-    };
+    let offset = crate::model::flat_offset(instruction);
     Some(Step::Load {
         at: instruction.offset,
         pair: u32::from(*pair),

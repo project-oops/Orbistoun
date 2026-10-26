@@ -35,9 +35,20 @@ const LONG_LAST_BYTE: u32 = 108;
 /// word: the invalid node (`RADV_BVH_INVALID_NODE`, `bvh_defines.h:151`).
 pub(super) const NO_CHILD: u32 = u32::MAX;
 
-/// The word of a triangle node holding the triangle's id, which return mode 0 answers
-/// (`radv_bvh_triangle_node::triangle_id`, byte 48, `bvh_defines.h:93-101`).
-const TRIANGLE_ID_WORD: usize = 12;
+/// The word of a triangle node holding its triangles' flags, a byte a triangle in the order the
+/// pointer's type bits number them. Bits 1:0 and 3:2 of a triangle's byte name which of its three
+/// vertices' weights return mode 1 answers first and second; return mode 0 answers the whole word
+/// as the triangle's id. A node a guest builds for one triangle holds `9` there - the second and
+/// third vertices' weights - as Mesa's node writer sets it (`radv_bvh_triangle_node::id`,
+/// `bvh_defines.h:93-101`), and as every triangle node in Grand Theft Auto V's captured hierarchy
+/// holds it (D991).
+const TRIANGLE_FLAGS_WORD: usize = 15;
+
+/// The vertices of each of a triangle node's four triangles, by the pointer's type bits: five
+/// vertices, three words apart from word 0, the second to fourth triangles each sharing an edge
+/// with one before it and wound as the first. Assumed for the third and fourth (D992): no guest
+/// seen builds them.
+const TRIANGLE_VERTICES: [[usize; 3]; 4] = [[0, 1, 2], [1, 3, 2], [2, 3, 4], [2, 4, 0]];
 
 /// A node pointer's low three bits are the node's type: 0-3 a triangle, 4 a box of halves, 5 a box
 /// of floats, 6 an instance, 7 a procedural box (`bvh_defines.h:12-16`; Mesa's traversal reads bit
@@ -48,10 +59,17 @@ const BOX32: u32 = 5;
 const TRIANGLE_TYPES: u32 = 4;
 
 /// Descriptor fields (RDNA 2 instruction set, table 49): the base address in 256-byte units in bits
-/// 39:0, box sorting in bit 63, the triangle return mode in bit 120.
+/// 39:0, the box growth in bits 62:55, box sorting in bit 63, the last node's index - in 64-byte
+/// units - in bits 105:64, the triangle return mode in bit 120 and the descriptor's type in bits
+/// 127:124, which a hierarchy's holds as 8.
 const BASE_HIGH_MASK: u32 = 0xff;
+const GROW_SHIFT: u32 = 23;
+const GROW_MASK: u32 = 0xff;
 const BOX_SORTING: u32 = 1 << 31;
+const LAST_NODE_HIGH_MASK: u32 = 0x3ff;
 const BARYCENTRIC_RETURN: u32 = 1 << 24;
+const TYPE_SHIFT: u32 = 28;
+const HIERARCHY_TYPE: u32 = 8;
 
 /// The instruction's address registers (table 48): the node pointer (two registers for the 64-bit
 /// form), the ray's extent, origin, direction and inverse direction - each direction three floats,
@@ -113,6 +131,22 @@ pub(super) trait Arithmetic {
         when_true: Self::Word,
         when_false: Self::Word,
     ) -> Self::Word;
+    /// A binary word operation, a shift by fewer than thirty-two places.
+    fn word_op(&mut self, operation: WordOp, lhs: Self::Word, rhs: Self::Word) -> Self::Word;
+    /// `lhs < rhs`, the words read unsigned.
+    fn word_below(&mut self, lhs: Self::Word, rhs: Self::Word) -> Self::Truth;
+    /// Whether two words are equal.
+    fn word_equal(&mut self, lhs: Self::Word, rhs: Self::Word) -> Self::Truth;
+}
+
+/// The binary word operations the tests use: a sum wraps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WordOp {
+    And,
+    Or,
+    Add,
+    ShiftLeft,
+    ShiftRight,
 }
 
 /// The binary float operations the tests use.
@@ -121,7 +155,6 @@ pub(super) enum FloatOp {
     Add,
     Sub,
     Mul,
-    Div,
     /// The lesser, ignoring a NaN operand.
     Min,
     /// The greater, ignoring a NaN operand.
@@ -143,31 +176,41 @@ pub(super) struct Ray<F> {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Kind<T> {
     pub(super) triangle: T,
+    /// Which triangle of a triangle node: the type bits 1, 2 and 3 ([`TRIANGLE_VERTICES`]); 0 the
+    /// first.
+    pub(super) which: [T; 3],
     pub(super) box16: T,
     pub(super) box32: T,
 }
 
 /// The descriptor's answer options.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Options<T> {
+pub(super) struct Options<T, W> {
     /// Box hits nearest first, rather than in the node's order.
     pub(super) sorted: T,
     /// A triangle answers barycentrics (return mode 1) rather than its id and a hit flag.
     pub(super) barycentrics: T,
+    /// How many float steps each box's exit distance is pushed out by.
+    pub(super) grow: W,
 }
+
+/// What picks a node's test and shapes its answer: the node's kind, the descriptor's options, and
+/// whether the descriptor holds the node ([`in_range`]).
+pub(super) type Selectors<T, W> = (Kind<T>, Options<T, W>, T);
 
 /// The four result words for one node: the box test's for a box, the triangle test's for a
 /// triangle, and [`NO_CHILD`] in every word for an instance or a procedural box, whose result Mesa's
-/// traversal never reads (`radv_nir_rt_common.c:1018-1092`; assumed).
+/// traversal never reads (`radv_nir_rt_common.c:1018-1092`; assumed), and for a node `valid` says
+/// the descriptor does not hold ([`in_range`]).
 pub(super) fn intersect<A: Arithmetic>(
     arithmetic: &mut A,
     node: &[A::Word; NODE_WORDS],
     ray: &Ray<A::Float>,
-    (kind, options): (Kind<A::Truth>, Options<A::Truth>),
+    (kind, options, valid): Selectors<A::Truth, A::Word>,
 ) -> [A::Word; 4] {
-    let wide = box_test(arithmetic, node, ray, false, options.sorted);
-    let narrow = box_test(arithmetic, node, ray, true, options.sorted);
-    let triangle = triangle_test(arithmetic, node, ray, options.barycentrics);
+    let wide = box_test(arithmetic, node, ray, false, (options.sorted, options.grow));
+    let narrow = box_test(arithmetic, node, ray, true, (options.sorted, options.grow));
+    let triangle = triangle_test(arithmetic, node, ray, (options.barycentrics, kind.which));
     let unanswered = arithmetic.word(NO_CHILD);
     let mut result = [unanswered; 4];
     for (slot, ((wide, narrow), triangle)) in result
@@ -176,9 +219,49 @@ pub(super) fn intersect<A: Arithmetic>(
     {
         let leaf = arithmetic.choose_word(kind.triangle, triangle, unanswered);
         let half = arithmetic.choose_word(kind.box16, narrow, leaf);
-        *slot = arithmetic.choose_word(kind.box32, wide, half);
+        let answer = arithmetic.choose_word(kind.box32, wide, half);
+        *slot = arithmetic.choose_word(valid, answer, unanswered);
     }
     result
+}
+
+/// Whether the descriptor holds the node `pointer` names (its low and high words; the high zero for
+/// the 32-bit form): a hierarchy's descriptor (type 8), and the node's last 64-byte slot - its
+/// second for a box of floats, `long` - no further than the descriptor's last node index. A node
+/// it does not hold answers no child in every word (assumed: the instruction set names the fields,
+/// not what a node past them answers).
+pub(super) fn in_range<A: Arithmetic>(
+    arithmetic: &mut A,
+    descriptor: [A::Word; 4],
+    (low, high): (A::Word, A::Word),
+    long: A::Truth,
+) -> A::Truth {
+    let a = arithmetic;
+    let (one, zero) = (a.word(1), a.word(0));
+    let (three, twenty_nine) = (a.word(3), a.word(29));
+    // The pointer's 64-byte index: the pointer less its three type bits.
+    let index_low = a.word_op(WordOp::ShiftRight, low, three);
+    let carried = a.word_op(WordOp::ShiftLeft, high, twenty_nine);
+    let index_low = a.word_op(WordOp::Or, index_low, carried);
+    let index_high = a.word_op(WordOp::ShiftRight, high, three);
+    let step = a.choose_word(long, one, zero);
+    let last_low = a.word_op(WordOp::Add, index_low, step);
+    let wrapped = a.word_below(last_low, index_low);
+    let carry = a.choose_word(wrapped, one, zero);
+    let last_high = a.word_op(WordOp::Add, index_high, carry);
+    let mask = a.word(LAST_NODE_HIGH_MASK);
+    let bound_high = a.word_op(WordOp::And, descriptor[3], mask);
+    let below_high = a.word_below(last_high, bound_high);
+    let same_high = a.word_equal(last_high, bound_high);
+    let past_low = a.word_below(descriptor[2], last_low);
+    let within_low = a.not(past_low);
+    let within_low = a.and(same_high, within_low);
+    let within = a.or(below_high, within_low);
+    let shift = a.word(TYPE_SHIFT);
+    let kind = a.word_op(WordOp::ShiftRight, descriptor[3], shift);
+    let hierarchy = a.word(HIERARCHY_TYPE);
+    let hierarchy = a.word_equal(kind, hierarchy);
+    a.and(within, hierarchy)
 }
 
 /// Bound `axis` (0-2 the minimum's x, y, z, 3-5 the maximum's) of child `child`'s box: a float at
@@ -202,13 +285,15 @@ fn bound<A: Arithmetic>(
 /// (`radv_nir_rt_common.c:81-180`): the inverse direction clamped to the finite range so a zero
 /// direction gives no NaN, a child whose minimum x is a NaN inactive, and a hit where the ray leaves
 /// the box no earlier than it enters it, not behind the origin, and enters it before the extent.
-/// Hits are ordered by entry distance with a five-exchange sorting network.
+/// The exit is first pushed out by the descriptor's growth, that many float steps (D992). Hits are
+/// ordered by where the ray enters, from its origin for a box it starts inside, with a
+/// five-exchange sorting network that keeps the node's order between equal distances.
 fn box_test<A: Arithmetic>(
     arithmetic: &mut A,
     node: &[A::Word; NODE_WORDS],
     ray: &Ray<A::Float>,
     half: bool,
-    sorted: A::Truth,
+    (sorted, grow): (A::Truth, A::Word),
 ) -> [A::Word; 4] {
     let (largest, smallest) = (arithmetic.float(f32::MAX), arithmetic.float(-f32::MAX));
     let (zero, infinity) = (arithmetic.float(0.0), arithmetic.float(f32::INFINITY));
@@ -248,12 +333,25 @@ fn box_test<A: Arithmetic>(
         let low_x = bound(arithmetic, node, half, (child, 0));
         let inactive = arithmetic.is_nan(low_x);
         let active = arithmetic.not(inactive);
-        let ahead = arithmetic.float_op(FloatOp::Max, zero, near);
-        let ahead = arithmetic.at_least(far, ahead);
+        // The exit pushed out by the descriptor's growth, in float steps, short of infinity: a
+        // non-negative exit's bits order as its values, a negative zero's sign cleared.
+        let exit = arithmetic.bits_of(far);
+        let magnitude = arithmetic.word(0x7fff_ffff);
+        let exit = arithmetic.word_op(WordOp::And, exit, magnitude);
+        let grown = arithmetic.word_op(WordOp::Add, exit, grow);
+        let unbounded = arithmetic.word(f32::INFINITY.to_bits());
+        let short = arithmetic.word_below(grown, unbounded);
+        let grown = arithmetic.choose_word(short, grown, unbounded);
+        let grown = arithmetic.float_of(grown);
+        let ahead = arithmetic.at_least(far, zero);
+        let before_exit = arithmetic.at_least(grown, near);
+        let ahead = arithmetic.and(ahead, before_exit);
         let within = arithmetic.below(near, ray.extent);
         let entered = arithmetic.and(ahead, within);
         let hit = arithmetic.and(active, entered);
-        distances[child] = arithmetic.choose_float(hit, near, infinity);
+        // Ordered by where the ray enters, from its origin where it starts inside.
+        let depth = arithmetic.float_op(FloatOp::Max, near, zero);
+        distances[child] = arithmetic.choose_float(hit, depth, infinity);
         children[child] = arithmetic.choose_word(hit, node[child], missed);
     }
 
@@ -306,17 +404,27 @@ fn reorder<A: Arithmetic>(
 /// `w`, the scaled barycentrics of the three vertices, hit where none has a sign the others lack,
 /// their sum is not zero, and the distance is not behind the origin.
 ///
-/// A hit answers `{t, det, v, w}` in return mode 1, whose quotients by `det` are the distance and
-/// the second and third vertices' weights (Mesa divides them so, `radv_nir_rt_common.c:631-675`), or
-/// `{t, det, id, 1}` in mode 0 where the distance is also within the extent. A miss answers
-/// `{inf, 1.0, 0, 0}` or `{inf, 1.0, id, 0}`, a distance no extent admits (Mesa's software miss,
-/// `radv_nir_rt_common.c:226`). A shared edge or vertex hits both triangles; Mesa's tie-break for it
+/// The triangle is the one of the node's four the type bits name (`which`, [`TRIANGLE_VERTICES`]).
+/// Its weights `u`, `v`, `w` are its vertices' in its own order, and `det` their sum. The distance
+/// `t` is their sum weighted by each vertex's sheared depth, so `t / det` is the hit's distance in
+/// units of the direction. A hit's `t` and `det` share a sign, the triangle's facing: positive where
+/// it is wound counter-clockwise as the ray sees it, negative where clockwise (D992). A shader that
+/// culls a facing tests that sign; the instruction culls nothing.
+///
+/// Return mode 1 answers `{t, det, I, J}`: `I` and `J` the weights of the vertices the triangle's
+/// flags byte names ([`TRIANGLE_FLAGS_WORD`]), the second and third for the usual `9`, whose
+/// quotients by `det` are the hit's barycentrics (Mesa divides them so,
+/// `radv_nir_rt_common.c:631-675`). Mode 0 answers `{t, det, flags, hit}`, the flags word whole and
+/// one where the ray hits. A miss answers an infinite `t` over a `det` of one, a distance no extent
+/// admits (Mesa's software miss, `radv_nir_rt_common.c:226`), with the same last two words, and a
+/// hit flag of zero. The extent is not the instruction's to apply to a triangle: the shader
+/// compares `t / det` with it. A shared edge or vertex hits both triangles; Mesa's tie-break for it
 /// is a Vulkan rule, not the instruction's.
 fn triangle_test<A: Arithmetic>(
     arithmetic: &mut A,
     node: &[A::Word; NODE_WORDS],
     ray: &Ray<A::Float>,
-    barycentrics: A::Truth,
+    (barycentrics, which): (A::Truth, [A::Truth; 3]),
 ) -> [A::Word; 4] {
     let zero = arithmetic.float(0.0);
     let [along_x, along_y, along_z] = ray
@@ -339,12 +447,21 @@ fn triangle_test<A: Arithmetic>(
     let shear_x = arithmetic.float_op(FloatOp::Mul, direction[0], scale);
     let shear_y = arithmetic.float_op(FloatOp::Mul, direction[1], scale);
 
+    // A word of the named triangle's vertex: the first triangle's unless a later one is named.
+    let vertex_word = |arithmetic: &mut A, vertex: usize, axis: usize| {
+        let words = TRIANGLE_VERTICES.map(|triangle| node[3 * triangle[vertex] + axis]);
+        let chosen = arithmetic.choose_word(which[0], words[1], words[0]);
+        let chosen = arithmetic.choose_word(which[1], words[2], chosen);
+        arithmetic.choose_word(which[2], words[3], chosen)
+    };
+
     // Each vertex relative to the origin, sheared: x, y in the ray's plane and z along it.
     let mut sheared = [[zero; 3]; 3];
     for (vertex, place) in sheared.iter_mut().enumerate() {
         let mut relative = [zero; 3];
         for (axis, component) in relative.iter_mut().enumerate() {
-            let coordinate = arithmetic.float_of(node[3 * vertex + axis]);
+            let word = vertex_word(arithmetic, vertex, axis);
+            let coordinate = arithmetic.float_of(word);
             *component = arithmetic.float_op(FloatOp::Sub, coordinate, ray.origin[axis]);
         }
         let [x, y, z] = reorder(arithmetic, relative, order);
@@ -401,27 +518,62 @@ fn triangle_test<A: Arithmetic>(
     let hit = arithmetic.and(inside, facing);
     let hit = arithmetic.and(hit, ahead);
 
-    let quotient = arithmetic.float_op(FloatOp::Div, distance, determinant);
-    let within = arithmetic.below(quotient, ray.extent);
-    let counted = arithmetic.and(hit, within);
+    triangle_answer(
+        arithmetic,
+        node,
+        (hit, distance, determinant, weights),
+        (barycentrics, which),
+    )
+}
 
+/// A triangle test's four words from its result ([`triangle_test`]): `t` and `det`, an infinite
+/// `t` over one for a miss, then in return mode 1 the two weights the flags byte of the triangle
+/// `which` names, in mode 0 the flags word and the hit flag.
+fn triangle_answer<A: Arithmetic>(
+    arithmetic: &mut A,
+    node: &[A::Word; NODE_WORDS],
+    (hit, distance, determinant, weights): (A::Truth, A::Float, A::Float, [A::Float; 3]),
+    (barycentrics, which): (A::Truth, [A::Truth; 3]),
+) -> [A::Word; 4] {
     let (infinity, one) = (arithmetic.float(f32::INFINITY), arithmetic.float(1.0));
     let distance = arithmetic.choose_float(hit, distance, infinity);
     let distance = arithmetic.bits_of(distance);
     let denominator = arithmetic.choose_float(hit, determinant, one);
     let denominator = arithmetic.bits_of(denominator);
-    let (nought, set) = (arithmetic.word(0), arithmetic.word(1));
-    let weight_second = arithmetic.bits_of(weight_second);
-    let weight_third = arithmetic.bits_of(weight_third);
-    let second = arithmetic.choose_word(hit, weight_second, nought);
-    let third = arithmetic.choose_word(hit, weight_third, nought);
-    let flag = arithmetic.choose_word(counted, set, nought);
-    let id = node[TRIANGLE_ID_WORD];
+
+    // The flags byte of the named triangle, and the weights it names: 1 the second vertex's, 2
+    // the third's, else the first's.
+    let flags = node[TRIANGLE_FLAGS_WORD];
+    let (zero_word, eight, sixteen, twenty_four) = (
+        arithmetic.word(0),
+        arithmetic.word(8),
+        arithmetic.word(16),
+        arithmetic.word(24),
+    );
+    let shift = arithmetic.choose_word(which[0], eight, zero_word);
+    let shift = arithmetic.choose_word(which[1], sixteen, shift);
+    let shift = arithmetic.choose_word(which[2], twenty_four, shift);
+    let byte = arithmetic.word_op(WordOp::ShiftRight, flags, shift);
+    let weights = weights.map(|weight| arithmetic.bits_of(weight));
+    let (two, three) = (arithmetic.word(2), arithmetic.word(3));
+    let named = |arithmetic: &mut A, at: A::Word| {
+        let index = arithmetic.word_op(WordOp::ShiftRight, byte, at);
+        let index = arithmetic.word_op(WordOp::And, index, three);
+        let one_word = arithmetic.word(1);
+        let second = arithmetic.word_equal(index, one_word);
+        let third = arithmetic.word_equal(index, two);
+        let chosen = arithmetic.choose_word(second, weights[1], weights[0]);
+        arithmetic.choose_word(third, weights[2], chosen)
+    };
+    let first_named = named(arithmetic, zero_word);
+    let second_named = named(arithmetic, two);
+    let set = arithmetic.word(1);
+    let flag = arithmetic.choose_word(hit, set, zero_word);
     [
         distance,
         denominator,
-        arithmetic.choose_word(barycentrics, second, id),
-        arithmetic.choose_word(barycentrics, third, flag),
+        arithmetic.choose_word(barycentrics, first_named, flags),
+        arithmetic.choose_word(barycentrics, second_named, flag),
     ]
 }
 
@@ -456,7 +608,6 @@ impl Arithmetic for Host {
             FloatOp::Add => lhs + rhs,
             FloatOp::Sub => lhs - rhs,
             FloatOp::Mul => lhs * rhs,
-            FloatOp::Div => lhs / rhs,
             FloatOp::Min => lhs.min(rhs),
             FloatOp::Max => lhs.max(rhs),
         }
@@ -488,6 +639,21 @@ impl Arithmetic for Host {
     fn choose_word(&mut self, condition: bool, when_true: u32, when_false: u32) -> u32 {
         if condition { when_true } else { when_false }
     }
+    fn word_op(&mut self, operation: WordOp, lhs: u32, rhs: u32) -> u32 {
+        match operation {
+            WordOp::And => lhs & rhs,
+            WordOp::Or => lhs | rhs,
+            WordOp::Add => lhs.wrapping_add(rhs),
+            WordOp::ShiftLeft => lhs << (rhs & 31),
+            WordOp::ShiftRight => lhs >> (rhs & 31),
+        }
+    }
+    fn word_below(&mut self, lhs: u32, rhs: u32) -> bool {
+        lhs < rhs
+    }
+    fn word_equal(&mut self, lhs: u32, rhs: u32) -> bool {
+        lhs == rhs
+    }
 }
 
 /// An IEEE half widened to a single: exponent 31 is infinity or NaN, exponent 0 a subnormal.
@@ -505,17 +671,19 @@ fn half_to_float(bits: u16) -> f32 {
 }
 
 /// The node test's type and descriptor bits on the host, for a pointer's low word and a descriptor.
-fn host_selectors(pointer: u32, descriptor: [u32; 4]) -> (Kind<bool>, Options<bool>) {
+fn host_selectors(pointer: u32, descriptor: [u32; 4]) -> (Kind<bool>, Options<bool, u32>) {
     let kind = pointer & NODE_TYPE_MASK;
     (
         Kind {
             triangle: kind < TRIANGLE_TYPES,
+            which: [kind == 1, kind == 2, kind == 3],
             box16: kind == BOX16,
             box32: kind == BOX32,
         },
         Options {
             sorted: descriptor[1] & BOX_SORTING != 0,
             barycentrics: descriptor[3] & BARYCENTRIC_RETURN != 0,
+            grow: descriptor[1] >> GROW_SHIFT & GROW_MASK,
         },
     )
 }
@@ -618,7 +786,6 @@ impl<M: Model + ?Sized> Arithmetic for Emit<'_, M> {
             FloatOp::Add => self.float_instruction(op::FADD, lhs, rhs),
             FloatOp::Sub => self.float_instruction(op::FSUB, lhs, rhs),
             FloatOp::Mul => self.float_instruction(op::FMUL, lhs, rhs),
-            FloatOp::Div => self.float_instruction(op::FDIV, lhs, rhs),
             FloatOp::Min => self.extended(GLSL_NMIN, &[lhs, rhs]),
             FloatOp::Max => self.extended(GLSL_NMAX, &[lhs, rhs]),
         }
@@ -656,6 +823,22 @@ impl<M: Model + ?Sized> Arithmetic for Emit<'_, M> {
     }
     fn choose_word(&mut self, condition: Id, when_true: Id, when_false: Id) -> Id {
         self.model.select(condition, when_true, when_false)
+    }
+    fn word_op(&mut self, operation: WordOp, lhs: Id, rhs: Id) -> Id {
+        let opcode = match operation {
+            WordOp::And => op::BITWISE_AND,
+            WordOp::Or => op::BITWISE_OR,
+            WordOp::Add => op::IADD,
+            WordOp::ShiftLeft => op::SHIFT_LEFT_LOGICAL,
+            WordOp::ShiftRight => op::SHIFT_RIGHT_LOGICAL,
+        };
+        self.model.binary(opcode, lhs, rhs)
+    }
+    fn word_below(&mut self, lhs: Id, rhs: Id) -> Id {
+        self.model.compare(op::ULESS_THAN, lhs, rhs)
+    }
+    fn word_equal(&mut self, lhs: Id, rhs: Id) -> Id {
+        self.model.compare(op::IEQUAL, lhs, rhs)
     }
 }
 
@@ -777,6 +960,7 @@ pub(super) fn intersect_ray<M: Model + ?Sized>(
         let rest = &values[if operands.wide_pointer { 2 } else { 1 }..];
         let (low, high) = node_address_words(model, descriptor, (values[0], pointer_high));
         let kind = pointer_kind(model, values[0]);
+        let high_word = pointer_high.unwrap_or_else(|| model.constant(0));
         // A device-addressed dispatch reads the node where it lies in guest memory (D964).
         if model.device_addressed() {
             let (node, placed) = device_node(model, (low, high), kind.box32, lane)?;
@@ -785,7 +969,13 @@ pub(super) fn intersect_ray<M: Model + ?Sized>(
                 floats: Vec::new(),
             };
             let ray = ray_from(&mut arithmetic, rest, operands.a16);
-            let result = intersect(&mut arithmetic, &node, &ray, (kind, selectors));
+            let valid = in_range(
+                &mut arithmetic,
+                descriptor,
+                (values[0], high_word),
+                kind.box32,
+            );
+            let result = intersect(&mut arithmetic, &node, &ray, (kind, selectors, valid));
             let missed = model.constant(NO_CHILD);
             for (register, value) in (operands.destination..).zip(result) {
                 let value = model.select(placed, value, missed);
@@ -808,7 +998,13 @@ pub(super) fn intersect_ray<M: Model + ?Sized>(
             floats: Vec::new(),
         };
         let ray = ray_from(&mut arithmetic, rest, operands.a16);
-        let result = intersect(&mut arithmetic, &node, &ray, (kind, selectors));
+        let valid = in_range(
+            &mut arithmetic,
+            descriptor,
+            (values[0], high_word),
+            kind.box32,
+        );
+        let result = intersect(&mut arithmetic, &node, &ray, (kind, selectors, valid));
         // A node the window does not hold reads as zeros, and a box of zeros can name child 0, so a
         // traversal loop in the guest's shader would revisit the root forever and the device
         // would be lost to its watchdog. An unreadable node answers no hit, which ends the loop.
@@ -866,7 +1062,9 @@ pub(crate) fn host_intersect_ray(
         *word = read(address.wrapping_add(u64::from(byte)))?;
     }
     let ray = ray_from(&mut Host, rest, operands.a16);
-    Some(intersect(&mut Host, &node, &ray, (kind, options)))
+    let high = if operands.wide_pointer { values[1] } else { 0 };
+    let valid = in_range(&mut Host, descriptor, (values[0], high), kind.box32);
+    Some(intersect(&mut Host, &node, &ray, (kind, options, valid)))
 }
 
 /// The ray from the address registers after the node pointer: extent and origin as floats, then
@@ -895,16 +1093,21 @@ fn ray_from<A: Arithmetic>(arithmetic: &mut A, registers: &[A::Word], a16: bool)
 }
 
 /// The descriptor's box-sorting and return-mode bits as booleans.
-fn descriptor_selectors<M: Model + ?Sized>(model: &mut M, descriptor: [Id; 4]) -> Options<Id> {
+fn descriptor_selectors<M: Model + ?Sized>(model: &mut M, descriptor: [Id; 4]) -> Options<Id, Id> {
     let sorting = model.constant(BOX_SORTING);
     let sorted = model.binary(op::BITWISE_AND, descriptor[1], sorting);
     let sorted = model.is_not_zero(sorted);
     let mode = model.constant(BARYCENTRIC_RETURN);
     let barycentrics = model.binary(op::BITWISE_AND, descriptor[3], mode);
     let barycentrics = model.is_not_zero(barycentrics);
+    let shift = model.constant(GROW_SHIFT);
+    let grow = model.binary(op::SHIFT_RIGHT_LOGICAL, descriptor[1], shift);
+    let mask = model.constant(GROW_MASK);
+    let grow = model.binary(op::BITWISE_AND, grow, mask);
     Options {
         sorted,
         barycentrics,
+        grow,
     }
 }
 
@@ -918,8 +1121,13 @@ fn pointer_kind<M: Model + ?Sized>(model: &mut M, pointer: Id) -> Kind<Id> {
     let box16 = model.compare(op::IEQUAL, kind, box16);
     let box32 = model.constant(BOX32);
     let box32 = model.compare(op::IEQUAL, kind, box32);
+    let which = [1, 2, 3].map(|index| {
+        let index = model.constant(index);
+        model.compare(op::IEQUAL, kind, index)
+    });
     Kind {
         triangle,
+        which,
         box16,
         box32,
     }
@@ -1025,7 +1233,8 @@ fn node_placed<M: Model + ?Sized>(model: &mut M, (low, high): (Id, Id), long: Id
 #[cfg(test)]
 mod tests {
     use super::{
-        Host, NO_CHILD, NODE_WORDS, Ray, half_to_float, host_selectors, intersect, node_address,
+        Host, NO_CHILD, NODE_WORDS, Ray, half_to_float, host_selectors, in_range, intersect,
+        node_address,
     };
 
     /// Box sorting on, return mode 1 (barycentrics): the descriptor Mesa builds
@@ -1055,15 +1264,18 @@ mod tests {
         node
     }
 
-    /// A triangle node: three vertices and a triangle id.
-    fn triangle(vertices: [[f32; 3]; 3], id: u32) -> [u32; NODE_WORDS] {
+    /// The flags word of a node of one triangle: the second and third vertices' weights.
+    const ONE_TRIANGLE: u32 = 9;
+
+    /// A triangle node: its vertices, the first of the five a node holds, and its flags word.
+    fn triangle(vertices: &[[f32; 3]], flags: u32) -> [u32; NODE_WORDS] {
         let mut node = [0; NODE_WORDS];
         for (vertex, coordinates) in vertices.iter().enumerate() {
             for (axis, value) in coordinates.iter().enumerate() {
                 node[3 * vertex + axis] = value.to_bits();
             }
         }
-        node[12] = id;
+        node[15] = flags;
         node
     }
 
@@ -1073,7 +1285,9 @@ mod tests {
         ray: &Ray<f32>,
         descriptor: [u32; 4],
     ) -> [u32; 4] {
-        intersect(&mut Host, node, ray, host_selectors(pointer, descriptor))
+        let (kind, options) = host_selectors(pointer, descriptor);
+        let valid = in_range(&mut Host, descriptor, (pointer, 0), kind.box32);
+        intersect(&mut Host, node, ray, (kind, options, valid))
     }
 
     /// The node at 0x2000 with base 0x100 (256-byte units) and a pointer of offset 0x400 in
@@ -1166,7 +1380,11 @@ mod tests {
     /// 16 and `t` 32.
     #[test]
     fn a_triangle_hit_answers_its_distance_and_barycentrics() {
-        let node = triangle([[0.0, 0.0, -2.0], [4.0, 0.0, -2.0], [0.0, 4.0, -2.0]], 77);
+        let flags = ONE_TRIANGLE | 0x5500_0000;
+        let node = triangle(
+            &[[0.0, 0.0, -2.0], [4.0, 0.0, -2.0], [0.0, 4.0, -2.0]],
+            flags,
+        );
         let down = ray([1.0, 1.0, 0.0], [0.0, 0.0, -1.0], 100.0);
         let answer = run(&node, 0, &down, DESCRIPTOR);
         assert_eq!(answer, [32.0f32, 16.0, 4.0, 4.0].map(f32::to_bits));
@@ -1178,25 +1396,156 @@ mod tests {
 
         let mode_zero = [DESCRIPTOR[0], DESCRIPTOR[1], DESCRIPTOR[2], 0x8000_03ff];
         let answer = run(&node, 0, &down, mode_zero);
-        assert_eq!(answer[2..], [77, 1], "return mode 0: the id and a hit");
+        assert_eq!(
+            answer[2..],
+            [flags, 1],
+            "return mode 0: the flags word whole and a hit"
+        );
         let near = ray([1.0, 1.0, 0.0], [0.0, 0.0, -1.0], 1.5);
         assert_eq!(
             run(&node, 0, &near, mode_zero)[2..],
-            [77, 0],
-            "past the extent mode 0 flags no hit"
+            [flags, 1],
+            "the extent is the shader's to apply to a triangle"
         );
     }
 
     /// A ray beside the triangle, and one pointing away from it, miss: an infinite distance over
-    /// one, and zero barycentrics.
+    /// one, and the weights the flags name all the same. Beside it at (3,3) down -z, the vertices
+    /// less the origin, x and y exchanged, are (-3,-3), (-3,1), (1,-3): weights -8, 12 and 12, of
+    /// mixed signs. Away from it up +z from (1,1), x and y kept, they are (-1,-1), (3,-1), (-1,3) at
+    /// sheared depth -2: weights -8, -4 and -4, and `t` 32 against a `det` of -16, behind the origin.
     #[test]
     fn a_triangle_miss_answers_an_infinite_distance() {
-        let node = triangle([[0.0, 0.0, -2.0], [4.0, 0.0, -2.0], [0.0, 4.0, -2.0]], 77);
-        let miss = [f32::INFINITY.to_bits(), 1.0f32.to_bits(), 0, 0];
+        let node = triangle(
+            &[[0.0, 0.0, -2.0], [4.0, 0.0, -2.0], [0.0, 4.0, -2.0]],
+            ONE_TRIANGLE,
+        );
+        let miss = |i: f32, j: f32| [f32::INFINITY, 1.0, i, j].map(f32::to_bits);
         let beside = ray([3.0, 3.0, 0.0], [0.0, 0.0, -1.0], 100.0);
-        assert_eq!(run(&node, 0, &beside, DESCRIPTOR), miss);
+        assert_eq!(run(&node, 0, &beside, DESCRIPTOR), miss(12.0, 12.0));
         let away = ray([1.0, 1.0, 0.0], [0.0, 0.0, 1.0], 100.0);
-        assert_eq!(run(&node, 0, &away, DESCRIPTOR), miss);
+        assert_eq!(run(&node, 0, &away, DESCRIPTOR), miss(-4.0, -4.0));
+        let mode_zero = [DESCRIPTOR[0], DESCRIPTOR[1], DESCRIPTOR[2], 0x8000_03ff];
+        assert_eq!(run(&node, 0, &away, mode_zero)[2..], [ONE_TRIANGLE, 0]);
+    }
+
+    /// Seen from behind - up +z from (1,1,-4), wound clockwise as the ray sees it - the triangle is
+    /// hit with `t` and `det` both negative: the vertices less the origin, x and y kept, are
+    /// (-1,-1), (3,-1), (-1,3) at sheared depth 2, weights -8, -4 and -4, `det` -16 and `t` -32.
+    /// The quotients are the distance and barycentrics as from the front; the sign is the facing a
+    /// shader culls by.
+    #[test]
+    fn a_triangle_seen_from_behind_answers_negative_distance_and_denominator() {
+        let node = triangle(
+            &[[0.0, 0.0, -2.0], [4.0, 0.0, -2.0], [0.0, 4.0, -2.0]],
+            ONE_TRIANGLE,
+        );
+        let up = ray([1.0, 1.0, -4.0], [0.0, 0.0, 1.0], 100.0);
+        let answer = run(&node, 0, &up, DESCRIPTOR);
+        assert_eq!(answer, [-32.0f32, -16.0, -4.0, -4.0].map(f32::to_bits));
+        let mode_zero = [DESCRIPTOR[0], DESCRIPTOR[1], DESCRIPTOR[2], 0x8000_03ff];
+        assert_eq!(run(&node, 0, &up, mode_zero)[3], 1, "a hit either way");
+    }
+
+    /// A node's five vertices hold four triangles, the pointer's type bits naming which:
+    /// (0,1,2), (1,3,2), (2,3,4) and (2,4,0). With vertices (0,0), (4,0), (0,4), (4,4) and (-4,8)
+    /// at z = -2, a ray down -z at (3,3) lies in the second only. Its vertices less the origin, x and
+    /// y exchanged, are (-3,1), (1,1), (1,-3): weights 4, 8 and 4, `det` 16 and `t` 32. Its flags
+    /// byte, the word's second, `0x06` names the third vertex's weight first and the second's next.
+    /// At (0.5,5) the ray lies in the third alone, at (-1,4) in the fourth alone, each at distance 2.
+    #[test]
+    fn a_pointer_s_type_names_one_of_four_triangles() {
+        let vertices = [
+            [0.0, 0.0, -2.0],
+            [4.0, 0.0, -2.0],
+            [0.0, 4.0, -2.0],
+            [4.0, 4.0, -2.0],
+            [-4.0, 8.0, -2.0],
+        ];
+        let node = triangle(&vertices, 0x0909_0609);
+        let down = |x: f32, y: f32| ray([x, y, 0.0], [0.0, 0.0, -1.0], 100.0);
+        let hits = |at: &Ray<f32>| {
+            (0..4)
+                .filter(|&kind| f32::from_bits(run(&node, kind, at, DESCRIPTOR)[0]).is_finite())
+                .collect::<Vec<u32>>()
+        };
+        assert_eq!(hits(&down(3.0, 3.0)), [1]);
+        assert_eq!(
+            run(&node, 1, &down(3.0, 3.0), DESCRIPTOR),
+            [32.0f32, 16.0, 4.0, 8.0].map(f32::to_bits),
+            "the flags byte orders the weights"
+        );
+        assert_eq!(hits(&down(1.0, 1.0)), [0]);
+        assert_eq!(hits(&down(0.5, 5.0)), [2]);
+        assert_eq!(hits(&down(-1.0, 4.0)), [3]);
+        for (kind, at) in [(2, down(0.5, 5.0)), (3, down(-1.0, 4.0))] {
+            let [t, det, ..] = run(&node, kind, &at, DESCRIPTOR).map(f32::from_bits);
+            assert_eq!((t / det).to_bits(), 2.0f32.to_bits(), "triangle {kind}");
+        }
+    }
+
+    /// The descriptor's growth pushes each box's exit out by that many float steps. A ray along
+    /// (1,1,0) from the origin enters the box x [2,3], y [0, 2 - 2^-23] at 2 (its x slab) and leaves
+    /// one step before 2 (its y slab): a miss, and a hit once the exit is grown by a step.
+    #[test]
+    fn a_box_s_exit_grows_by_the_descriptor_s_steps() {
+        let below_two = f32::from_bits(2.0f32.to_bits() - 1);
+        let far = [5.0, 5.0, 5.0];
+        let node = box32([
+            (0x11, [2.0, 0.0, -1.0], [3.0, below_two, 1.0]),
+            (0x22, far, [6.0, 6.0, 6.0]),
+            (0x33, far, [6.0, 6.0, 6.0]),
+            (0x44, far, [6.0, 6.0, 6.0]),
+        ]);
+        let diagonal = ray([0.0, 0.0, 0.0], [1.0, 1.0, 0.0], 100.0);
+        let unsorted = [DESCRIPTOR[0], 0, DESCRIPTOR[2], DESCRIPTOR[3]];
+        assert_eq!(run(&node, 5, &diagonal, unsorted)[0], NO_CHILD);
+        let grown = [DESCRIPTOR[0], 1 << 23, DESCRIPTOR[2], DESCRIPTOR[3]];
+        assert_eq!(run(&node, 5, &diagonal, grown)[0], 0x11);
+    }
+
+    /// Sorted, two boxes the ray starts inside both enter at the origin, and keep the node's order;
+    /// one the ray enters ahead of the origin comes after them.
+    #[test]
+    fn boxes_the_ray_starts_inside_sort_from_the_origin() {
+        let node = box32([
+            (0x11, [-1.0, -1.0, 4.0], [1.0, 1.0, 5.0]),
+            (0x22, [-1.0, -1.0, -3.0], [1.0, 1.0, 3.0]),
+            (0x33, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
+            (0x44, [5.0, 5.0, 5.0], [6.0, 6.0, 6.0]),
+        ]);
+        let along_z = ray([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 100.0);
+        assert_eq!(
+            run(&node, 5, &along_z, DESCRIPTOR),
+            [0x22, 0x33, 0x11, NO_CHILD]
+        );
+    }
+
+    /// A node past the descriptor's last node index, or a descriptor not a hierarchy's, answers no
+    /// child in every word. The last index counts 64-byte slots: a box of floats at the last slot
+    /// runs one past it.
+    #[test]
+    fn a_node_the_descriptor_does_not_hold_answers_no_children() {
+        let far = [5.0, 5.0, 5.0];
+        let node = box32([
+            (0x11, [-1.0, -1.0, 2.0], [1.0, 1.0, 3.0]),
+            (0x22, far, [6.0, 6.0, 6.0]),
+            (0x33, far, [6.0, 6.0, 6.0]),
+            (0x44, far, [6.0, 6.0, 6.0]),
+        ]);
+        let along_z = ray([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 100.0);
+        // The last node index 3: a box of floats at slot 2 fits, at slot 3 runs past it.
+        let three = [DESCRIPTOR[0], DESCRIPTOR[1], 3, 0x8100_0000];
+        assert_eq!(run(&node, 2 << 3 | 5, &along_z, three)[0], 0x11);
+        assert_eq!(run(&node, 3 << 3 | 5, &along_z, three), [NO_CHILD; 4]);
+        let not_a_hierarchy = [DESCRIPTOR[0], DESCRIPTOR[1], DESCRIPTOR[2], 0x0100_03ff];
+        assert_eq!(run(&node, 5, &along_z, not_a_hierarchy), [NO_CHILD; 4]);
+        let ahead = triangle(
+            &[[-1.0, -1.0, 2.0], [4.0, 0.0, 2.0], [0.0, 4.0, 2.0]],
+            ONE_TRIANGLE,
+        );
+        assert_eq!(run(&ahead, 4 << 3, &along_z, three), [NO_CHILD; 4]);
+        assert!(f32::from_bits(run(&ahead, 3 << 3, &along_z, three)[0]).is_finite());
     }
 
     /// An instance or procedural node answers no children: its result is not a test's.
