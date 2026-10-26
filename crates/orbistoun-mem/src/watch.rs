@@ -107,6 +107,14 @@ pub fn allow_guards(base: u64, len: u64) {
     }
 }
 
+/// Whether any page of `[base, base + len)` lies in memory the device maps, which [`forbid_guards`]
+/// keeps every guard off (D974): a deferred write guarding those pages would lose the device the
+/// same way.
+#[must_use]
+pub fn guards_kept_off(base: u64, len: u64) -> bool {
+    guards_forbidden(pages_of(base, len))
+}
+
 /// Whether any of `[first, end)` lies in a range [`forbid_guards`] keeps guards off.
 fn guards_forbidden((first, end): (u64, u64)) -> bool {
     unguardable()
@@ -308,9 +316,58 @@ impl Record {
     }
 }
 
+/// Ranges a device has written that guest memory does not hold yet - a write deferred until
+/// something reads them (D990) - by base, with their lengths. Every question of a range overlapping
+/// one answers that it was written: a reader that would answer from a cache reads it again, and
+/// its read makes the deferred write first.
+fn owed() -> &'static Mutex<BTreeMap<u64, u64>> {
+    static OWED: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+    &OWED
+}
+
+/// How many ranges [`owed`] holds, so a question with none to find takes no lock.
+static OWED_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Records `[base, base + len)` as written by a device, its bytes owed to guest memory until
+/// [`settled`] of it: every [`written_since`] and [`recorded_since`] over it answers written.
+pub fn owed_to(base: u64, len: u64) {
+    let mut owed = owed()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if owed.insert(base, len).is_none() {
+        OWED_COUNT.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Ends an [`owed_to`] of the range at `base`: guest memory holds what the device wrote.
+pub fn settled(base: u64) {
+    let mut owed = owed()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if owed.remove(&base).is_some() {
+        OWED_COUNT.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Whether any of `[base, base + len)` is owed by a device ([`owed_to`]).
+fn owed_over(base: u64, len: u64) -> bool {
+    if OWED_COUNT.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    let end = base.saturating_add(len);
+    owed()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .range(..end)
+        .any(|(&at, &bytes)| base < at.saturating_add(bytes))
+}
+
 /// Whether any page of `[base, base + len)` was written after `since`, a [`mark`] of it. `None`
 /// when the host cannot say.
 pub fn written_since(base: u64, len: u64, since: u64) -> Option<bool> {
+    if owed_over(base, len) {
+        return Some(true);
+    }
     let mut record = record()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -335,6 +392,9 @@ pub fn written_since(base: u64, len: u64, since: u64) -> Option<bool> {
 /// range cost one walk of the host's pages this way, not one each (D974).
 #[must_use]
 pub fn recorded_since(base: u64, len: u64, since: u64) -> bool {
+    if owed_over(base, len) {
+        return true;
+    }
     let record = record()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -589,6 +589,10 @@ mod imp {
         (0, false)
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the Windows one, whose protection call can fail"
+    )]
     pub(super) const fn protect_committed(
         _from: u64,
         _to: u64,
