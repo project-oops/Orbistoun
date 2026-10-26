@@ -51,6 +51,7 @@ depend on how many hashes it looks for (D213).
 | `--calls <n>` | 20000000 | Imports the guest may call; the deterministic limit, `0` removes it |
 | `--profile <name>` | `shell.toml` | Present a named hardware profile, e.g. `prospero-cex-12.40` |
 | `--input <script>` | none | Play this pad script on player 1 (D721) |
+| `--capture-input <script>` | none | Capture what the guest reads from its pad, a step per change (D721); `orbistoun-cli motion` reads it beside the kept frames (D988) |
 | `--staged` | off | Run a loose build as a staged title with a writable `/app0` (D722) |
 | `--relink` | off | Replace the title's stored link plan with this run's and print what differed (D724) |
 

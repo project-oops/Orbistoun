@@ -20,3 +20,7 @@ by name.
 The alternative, deciding the format in the module at run time, would emit every format's
 conversion for every lane of every load and choose among them; the per-draw module is exact and
 costs one translation per vertex layout.
+
+**Amended 2026-10-26:** a pixel shader whose format loads need its draw's descriptors takes
+them too, traced with its own user-data layout and words, and is translated for them; before, only
+a vertex shader was given them, and Grand Theft Auto V's pixel shader at `0x74005b708000` was refused.

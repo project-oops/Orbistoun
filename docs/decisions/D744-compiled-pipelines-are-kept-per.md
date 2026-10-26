@@ -9,6 +9,9 @@ backend creates, and written back after each one it had to compile. Data whose h
 another vendor, device or pipeline-cache UUID is not handed to the driver; the cache starts
 empty instead.
 
+Amended by D994: kept one checked entry a pipeline, each its own cache's data, under a directory
+for the device and driver that made it; the single cache file is dropped unread.
+
 **Why:** a translated module simulates every lane of a wave, so one is megabytes of SPIR-V and
 the driver takes seconds to compile it. CRFT00001 spent 68 to 128 s of a 120 s run compiling 29
 pipelines whose modules were byte-identical to the previous run's, while the guest waited on its

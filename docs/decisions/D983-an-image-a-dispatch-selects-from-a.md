@@ -62,7 +62,14 @@ program selects per lane: it builds both before its loop over lights, from const
 (`s_bitreplicate_b64_b32`, `s_mov_b64`), and the loop writes neither. The trace had stopped at the
 bit reversal and the replication. Folded, both are traced: compare function 3, filtered, for the flat
 map at `0x299c`, and the cube's at `0x291c`. Every one of the program's seven selecting slots now
-has its sampler. RUN2
+has its sampler.
+
+A second 480 s run, with both changes: `0x74005b858800` passes its samplers and is refused, like
+`0x74005b854a00`, by the bound on its images. Their table that frame held 65536 records, 65535 of
+them non-zero: 61626 of type 0 - not an image - and about 3,700 images, whose base levels would take
+5.8 to 6.0 GiB as texels. Neither preparation took long enough to be noted (the run notes one
+taking 500 ms or more; the first run's took 2.2 to 2.4 s). The run's verdict was `FURTHER`, though it
+measured a change of time limit from the record's.
 
 **The tests.** `selected_images.rs` in the backend runs the waterfall over four records on the
 device, each lane's record its id's low two bits, and checks every lane's texel, fetched and sampled.
@@ -105,3 +112,12 @@ host cannot know is refused by name; no program met so far does.
   program that selects its sampler at run time, which then says where the candidates lie.
 - A rule per instruction for the forms a sampler is built with (`s_bfm`, `s_brev`, ...): the
   translator's semantics already run them, and untraced forms keep arriving (D960).
+
+**Amended 2026-10-26 (D995):** the walk that traces a selected image's sampler is now shared with
+every dispatch sample. A dispatch image that no table record or user-data word pairs with a
+sampler takes the sampler words the trace names at its slot's first sample
+(`TextureSource::sampler_words`). The host reads and binds that sampler the way it reads a selected
+slot's. A sampler the trace cannot name is compared by the words in its registers as the module
+runs, and sampled through the default sampler. The sampler table rejected above is still rejected.
+The program that seemed to select its sampler at run time, `0x74005b858800` at `0x24f8`, builds it
+from constants instead.

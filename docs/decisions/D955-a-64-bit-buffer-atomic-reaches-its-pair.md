@@ -27,3 +27,6 @@ sum as one pair with `buffer_atomic_swap_x2`, and later groups poll the pair wit
   beside its old sum, whichever order the words are written in, and add the wrong sum.
 - A lock around the two words. A wave spinning on a lock another wave of the same dispatch holds
   needs forward progress across workgroups that Vulkan does not promise.
+
+**Amended 2026-10-26:** the same 64-bit pair atomics (`buffer_atomic_swap_x2`,
+`buffer_atomic_or_x2`) also run by device address (D964), as one 64-bit device atomic.

@@ -23,3 +23,8 @@ every program at once.
 - Reading sizes from the kept modules: they are the build that made them, not this one.
 - Compiling draws' full pipelines: the store does not keep the render state a draw pipeline needs,
   and inventing it would time a pipeline no run builds.
+
+**Amended 2026-10-26:** the census also tries each kept compute program as a run would on the
+device-addressed route (D964), its slots' formats and flags renumbered as that route binds them,
+and gives every refusal a class: its category, the decisions it cites, its offset and instruction,
+ranked by how many programs each reaches.
