@@ -39,6 +39,9 @@ pub(crate) struct TraceRequest<'a> {
     /// The groups whose first wave runs on the host, each `[x, y]`; the first is the one `--points`
     /// shows.
     pub groups: Vec<[u32; 2]>,
+    /// Every group of the dispatch instead of `groups`, so the device's stored images are compared
+    /// whole.
+    pub every_group: bool,
     pub against: Option<&'a Path>,
     /// Where `--device` writes what the device left, named as `replay-dispatch --out` names it.
     pub out: Option<&'a Path>,
@@ -56,6 +59,22 @@ pub(crate) struct TraceRequest<'a> {
 }
 
 impl Shape {
+    /// The waves of group `[x, y]`, each its threads' ids.
+    fn waves(&self, group: [u32; 2]) -> Vec<WaveEntry> {
+        let [x, y, z] = self.threads;
+        let threads = x * y * z;
+        let width = self.width.max(1);
+        (0..threads.div_ceil(width))
+            .map(|wave| WaveEntry {
+                group_ids: self.group_ids(group),
+                threads: (wave * width..((wave + 1) * width).min(threads))
+                    .map(|t| Some([t % x, t / x % y, t / (x * y)]))
+                    .collect(),
+                components: if y * z == 1 { 1 } else { 3 },
+            })
+            .collect()
+    }
+
     /// The workgroup ids the hardware loads after the user data for group `[x, y]`: one for each
     /// component the context enables, the first by default.
     fn group_ids(&self, group: [u32; 2]) -> Vec<u32> {
@@ -99,8 +118,7 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
     let operands = OperandTable::builtin()?;
     let shape = shape(request, &capture, (&encodings, &operands))?;
     let decode = decode_program(&shape.bytes, &encodings, &operands);
-    let [x, y, z] = shape.threads;
-    let threads = x * y * z;
+    let threads = shape.threads.iter().product::<u32>();
     let width = shape.width.max(1);
     let user_data = capture
         .push
@@ -115,19 +133,20 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
             .and_then(|context| context.user_data.dx10_clamp),
     );
     // Each group's run, its stores gathered into the first's for the comparison: groups store
-    // apart, so a later group's store never meets an earlier one's.
+    // apart, so a later group's store never meets an earlier one's. Every group of the dispatch,
+    // where asked, is listed by how its runs stopped rather than one by one.
+    let groups: Vec<[u32; 2]> = if request.every_group {
+        let [across, down, _] = capture.groups;
+        (0..down)
+            .flat_map(|y| (0..across).map(move |x| [x, y]))
+            .collect()
+    } else {
+        request.groups.clone()
+    };
+    let mut stops: BTreeMap<String, usize> = BTreeMap::new();
     let mut run: Option<WaveTrace> = None;
-    for &group in &request.groups {
-        // The group's waves, each its threads' ids.
-        let waves: Vec<WaveEntry> = (0..threads.div_ceil(width))
-            .map(|wave| WaveEntry {
-                group_ids: shape.group_ids(group),
-                threads: (wave * width..((wave + 1) * width).min(threads))
-                    .map(|t| Some([t % x, t / x % y, t / (x * y)]))
-                    .collect(),
-                components: if y * z == 1 { 1 } else { 3 },
-            })
-            .collect();
+    for &group in &groups {
+        let waves = shape.waves(group);
         let traced = wave_trace_with_images(
             &program,
             &encodings,
@@ -136,10 +155,16 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
             (TRACED_VECTORS, TRACED_SCALARS, request.lane),
             (&mut read, &mut images),
         );
-        print!(
-            "group {group:?}: {}",
-            summary(&traced, threads, waves.len())
-        );
+        let told = summary(&traced, threads, waves.len());
+        if request.every_group {
+            let stop = told
+                .lines()
+                .next()
+                .and_then(|line| line.split("stopped at ").nth(1));
+            *stops.entry(stop.unwrap_or("?").to_owned()).or_default() += 1;
+        } else {
+            print!("group {group:?}: {told}");
+        }
         match &mut run {
             None => {
                 if request.points {
@@ -154,6 +179,11 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
         }
     }
     let run = run.context("name a group to trace")?;
+    for (stop, count) in &stops {
+        println!("{count} groups stopped at {stop}");
+    }
+    // Every group traced: a texel the device changed that no host store wrote is a difference too.
+    let complete = request.every_group;
     if request.device {
         let Some(context) = shape.context else {
             bail!("--device needs the translation context: name the title with --kept");
@@ -169,7 +199,7 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
         }
         let device = |name: &str| files.get(name).cloned();
         print!("{}", compare(&capture, &run, &device));
-        print!("{}", compare_texels(&capture, &run, &device));
+        print!("{}", compare_texels(&capture, &run, &device, complete));
     } else if let Some(against) = request.against {
         let read_file = |name: &str| -> Option<Vec<u32>> {
             let bytes = std::fs::read(against.join(name)).ok()?;
@@ -181,7 +211,7 @@ pub(crate) fn cmd_trace_dispatch(request: &TraceRequest<'_>) -> Result<()> {
             )
         };
         print!("{}", compare(&capture, &run, &read_file));
-        print!("{}", compare_texels(&capture, &run, &read_file));
+        print!("{}", compare_texels(&capture, &run, &read_file, complete));
     }
     Ok(())
 }
@@ -517,14 +547,18 @@ impl TraceImages for CaptureImages<'_> {
 
 /// Every texel the host's image stores wrote, against what the device left in the stored image of
 /// the same place (`stored-<n>.bin`): how many agree, differ by one step of the format, differ
-/// more, or are not known on the host, with the first that differ more listed.
+/// more, or are not known on the host, with the first that differ more listed. Where the host ran
+/// every group (`complete`), also every texel the device changed that no host store wrote.
 fn compare_texels(
     capture: &Capture<'_>,
     run: &WaveTrace,
     device: &dyn Fn(&str) -> Option<Vec<u32>>,
+    complete: bool,
 ) -> String {
     let mut text = String::new();
     let (mut agreed, mut near, mut unknown, mut unplaced, mut differ) = (0, 0, 0, 0, 0);
+    // The texels the host stored, by stored image.
+    let mut written: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
     for ((descriptor, [x, y, layer], level), (components, at)) in &run.texels {
         let Some(index) = capture.image_named(*descriptor) else {
             unplaced += 1;
@@ -550,6 +584,7 @@ fn compare_texels(
             unplaced += 1;
             continue;
         };
+        written.entry(stored).or_default().insert(place);
         let Some(host) = image.stored_word(components, before) else {
             unknown += 1;
             continue;
@@ -587,6 +622,55 @@ fn compare_texels(
         unknown = unknown,
         unplaced = unplaced,
     );
+    if complete {
+        text.push_str(&device_only_texels(capture, &written, device));
+    }
+    text
+}
+
+/// Every texel of each stored image the device changed that no host store wrote (`written`, by
+/// stored image), with the first listed: what a trace of every group must find none of.
+fn device_only_texels(
+    capture: &Capture<'_>,
+    written: &BTreeMap<usize, std::collections::BTreeSet<usize>>,
+    device: &dyn Fn(&str) -> Option<Vec<u32>>,
+) -> String {
+    let mut text = String::new();
+    let stored_images = capture
+        .images
+        .iter()
+        .enumerate()
+        .filter(|(_, image)| image.role == ImageRole::Stored);
+    for (stored, (index, image)) in stored_images.enumerate() {
+        let Some(after) = device(&format!("stored-{stored}.bin")) else {
+            continue;
+        };
+        let host = written.get(&stored);
+        let changed: Vec<usize> = after
+            .iter()
+            .zip(image.texels.iter())
+            .enumerate()
+            .filter(|(place, (left, before))| {
+                left != before && !host.is_some_and(|host| host.contains(place))
+            })
+            .map(|(place, _)| place)
+            .collect();
+        let _ = writeln!(
+            text,
+            "image {index}: {} texels the device changed that no host store wrote",
+            changed.len()
+        );
+        for place in changed.iter().take(16) {
+            let width = image.width.max(1) as usize;
+            let _ = writeln!(
+                text,
+                "  texel ({}, {}): device {:#010x}",
+                place % width,
+                place / width,
+                after[*place]
+            );
+        }
+    }
     text
 }
 

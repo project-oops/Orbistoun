@@ -71,9 +71,12 @@ fn read_blocks(
             "a block-compressed dispatch image that is not a 2D image read as one",
         ));
     }
+    // Its blocks as they are where the host samples its format so and the selects read it as it
+    // is (D990); decoded to texels otherwise.
+    let native = native_blocks(&sampled, destination_selects(words[3]));
     let (texels, (width, height), span) = base_level_texels(
         &descriptor,
-        sampled,
+        (sampled, native.is_some()),
         memory,
         (detiled, resident, source.layered),
     )
@@ -81,7 +84,10 @@ fn read_blocks(
     Ok((
         DispatchTexels {
             texels,
-            format: TexelFormat::Rgba8,
+            format: native.map_or(TexelFormat::Rgba8, |native| TexelFormat::Blocks {
+                native,
+                block_bytes: sampled.layout.element_bytes(),
+            }),
             width,
             height,
             depth: None,
@@ -98,27 +104,44 @@ fn read_blocks(
 /// to alpha. `None` for any other format or selects.
 fn decoded_blocks(format: u32, selects: [u32; 4]) -> Option<Sampled> {
     let sampled = crate::formats::sampled(format).ok()?;
-    let as_they_are = [
-        HostChannel::R,
-        HostChannel::G,
-        HostChannel::B,
-        HostChannel::A,
-    ]
-    .map(Swizzle::Channel);
     (matches!(sampled.layout, Layout::Blocks { .. })
-        && sampled.widened == Widened::Rgba8Unorm
-        && sampled.view(selects, false) == Some(as_they_are))
+        && (native_blocks(&sampled, selects).is_some()
+            || (sampled.widened == Widened::Rgba8Unorm
+                && sampled.view(selects, false) == Some(AS_THEY_ARE))))
     .then_some(sampled)
+}
+
+/// What marks a block image's blocks kept as they are among the decodes kept: no guest format code
+/// has the bit.
+const BLOCKS_AS_THEY_ARE: u32 = 1 << 31;
+
+/// Red to alpha as they are.
+const AS_THEY_ARE: [Swizzle; 4] = [
+    Swizzle::Channel(HostChannel::R),
+    Swizzle::Channel(HostChannel::G),
+    Swizzle::Channel(HostChannel::B),
+    Swizzle::Channel(HostChannel::A),
+];
+
+/// The host format a block format's blocks are bound in as they are, where it has one that
+/// `selects` read as it is (D990): sampled on the device rather than decoded on the host for every
+/// dispatch, at a quarter to an eighth of the bytes. Every block format has one on a desktop device
+/// (Vulkan's `textureCompressionBC`).
+fn native_blocks(sampled: &Sampled, selects: [u32; 4]) -> Option<crate::formats::HostFormat> {
+    let native = sampled.native?;
+    (matches!(sampled.layout, Layout::Blocks { .. })
+        && sampled.view(selects, true) == Some(AS_THEY_ARE))
+    .then_some(native)
 }
 
 /// The view's base level of a block-compressed image, decoded: its texels, its extent, and the
 /// bytes it was read from. Read as a draw's blocks are (`read_block_texture`): a standard swizzle,
 /// uncompressed, at a level whose blocks are its chain's halved elements. Where `resident` is given,
-/// its place among the images the device keeps goes there (D985), and one taken from the device is
+/// its place among the images the device keeps goes there (D990), and one taken from the device is
 /// neither read nor decoded: its texels come back empty.
 fn base_level_texels(
     descriptor: &crate::registers::ImageDescriptor,
-    sampled: Sampled,
+    (sampled, native): (Sampled, bool),
     memory: &impl GuestMemory,
     (detiled, resident, layered): (
         &mut DetiledImages,
@@ -164,8 +187,12 @@ fn base_level_texels(
     let span = surface.words() * 4;
     if let Some(slot) = resident {
         // Bound as an array of one where the program reads it as an array: another image.
-        let view = (format!("{surface:?}"), descriptor.format, "blocks", layered);
-        let bytes = u64::from(width) * u64::from(height) * 4;
+        let view = (format!("{surface:?}"), descriptor.format, native, layered);
+        let bytes = if native {
+            span as u64
+        } else {
+            u64::from(width) * u64::from(height) * 4
+        };
         *slot = super::place_resident((surface.base, span as u64), &view, bytes, memory);
         if slot.is_some_and(|used| !used.fresh) {
             return Ok((
@@ -178,24 +205,25 @@ fn base_level_texels(
     let spanned = memory
         .read(surface.base, span)
         .ok_or("a block-compressed dispatch image not in guest memory it can read")?;
+    // Kept apart from a decode of the same bytes: blocks as they are are other words.
+    let kept_as = if native {
+        descriptor.format | BLOCKS_AS_THEY_ARE
+    } else {
+        descriptor.format
+    };
     let texels = detiled
-        .decoded(
-            DispatchSurface::Tiled(surface),
-            spanned,
-            descriptor.format,
-            || {
-                let tiled: Vec<u32> = spanned
-                    .chunks_exact(4)
-                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                    .collect();
-                let blocks: Vec<u8> = surface
-                    .detile_mapped(&tiled, |word| word)
-                    .into_iter()
-                    .flat_map(u32::to_le_bytes)
-                    .collect();
-                crate::formats::decode(&sampled, &blocks, (width, height))
-            },
-        )
+        .decoded(DispatchSurface::Tiled(surface), spanned, kept_as, || {
+            let tiled: Vec<u32> = spanned
+                .chunks_exact(4)
+                .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                .collect();
+            let words = surface.detile_mapped(&tiled, |word| word);
+            if native {
+                return Some(words);
+            }
+            let blocks: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            crate::formats::decode(&sampled, &blocks, (width, height))
+        })
         .ok_or("a block-compressed dispatch image whose blocks do not decode")?;
     Ok((texels, (width, height), (surface.base, span as u64)))
 }
@@ -334,7 +362,8 @@ mod tests {
     }
 
     /// A fetched `BC1_UNORM` image (`GFX10_FORMAT_BC1_UNORM`, 169, `gfx10-rsrc.json:123`) is its
-    /// view's base level decoded to `8_8_8_8_UNORM` texels: Grand Theft Auto V's 1024 x 1024 image in
+    /// view's base level's blocks as they are, row-major, which decode to its texels (D990): Grand
+    /// Theft Auto V's 1024 x 1024 image in
     /// `64KB_S` with eleven levels, read by an in-world compute pass.
     ///
     /// addrlib lays a `BC1` surface out in elements of four by four texels and eight bytes
@@ -349,7 +378,7 @@ mod tests {
     /// addrlib's own `64KB_S` equation at eight bytes places it ([`crate::swizzle::equation`], read
     /// off addrlib by `tools/addrlib/equation`), its pitch 256 elements, a whole number of blocks.
     #[test]
-    fn a_bc1_image_is_its_base_level_decoded() {
+    fn a_bc1_image_is_its_base_level_s_blocks() {
         const LEVEL_ZERO: usize = 0x1_0000 + 0x2_0000;
         const ELEMENTS: u32 = 256;
         let equation = crate::swizzle::equation(crate::registers::SwizzleMode::Tiled64KbS, 8)
@@ -382,13 +411,26 @@ mod tests {
         )
         .expect("a block-compressed image")
         .expect("read");
+        // Bound as its blocks, as they are, for the device to sample (D990).
         assert_eq!(
             (texels.format, texels.width, texels.height, texels.layers),
-            (super::super::TexelFormat::Rgba8, 1024, 1024, None)
+            (
+                super::super::TexelFormat::Blocks {
+                    native: crate::formats::HostFormat::Bc1RgbaUnormBlock,
+                    block_bytes: 8
+                },
+                1024,
+                1024,
+                None
+            )
         );
         assert_eq!(span, (BASE + LEVEL_ZERO as u64, 256 * 256 * 8));
-        assert_eq!(texels.texels.len(), 1024 * 1024);
-        for (at, &texel) in texels.texels.iter().enumerate() {
+        let blocks: Vec<u8> = texels.texels.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert!(blocks == linear, "level 0's blocks, row-major");
+        // Each decodes to its own colour.
+        let sampled = crate::formats::sampled(169).expect("BC1");
+        let decoded = crate::formats::decode(&sampled, &blocks, (1024, 1024)).expect("decoded");
+        for (at, &texel) in decoded.iter().enumerate() {
             let (x, y) = ((at % 1024) as u32, (at / 1024) as u32);
             let want = expected_texel(colour_of((x / 4, y / 4)));
             assert_eq!(texel, want, "texel ({x}, {y})");

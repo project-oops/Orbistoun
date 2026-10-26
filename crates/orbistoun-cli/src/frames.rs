@@ -390,6 +390,259 @@ pub(crate) fn difference(
     image::RgbImage::from_raw(width, height, pixels)
 }
 
+/// A part of a frame, as fractions of its width and height: what [`region_change`] compares
+/// (D988), so one region names the same part of the picture at any resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Region {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// `x,y,width,height` as fractions, the region inside the frame and not empty.
+///
+/// # Errors
+///
+/// When it is not four numbers, or the region is empty or reaches outside the frame.
+pub(crate) fn parse_region(text: &str) -> std::result::Result<Region, String> {
+    let numbers = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f64>()
+                .map_err(|e| format!("{}: {e}", part.trim()))
+        })
+        .collect::<std::result::Result<Vec<f64>, String>>()?;
+    let [x, y, width, height] = numbers[..] else {
+        return Err(format!(
+            "{text}: give the region as four fractions, x,y,width,height"
+        ));
+    };
+    let inside = |at: f64, span: f64| at >= 0.0 && span > 0.0 && at + span <= 1.0 + 1e-9;
+    if !inside(x, width) || !inside(y, height) {
+        return Err(format!(
+            "{text}: the region must be inside the frame and not empty"
+        ));
+    }
+    Ok(Region {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+impl Region {
+    /// The pixels it covers in a `width` x `height` frame, as left, top, right and bottom with the
+    /// last two exclusive: at least one pixel each way.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "fractions in 0..=1 of a frame's extent, which fits a u32"
+    )]
+    fn pixels(self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let at = |fraction: f64, extent: u32| {
+            ((fraction * f64::from(extent)).round() as u32).min(extent)
+        };
+        let (left, top) = (
+            at(self.x, width).min(width.saturating_sub(1)),
+            at(self.y, height).min(height.saturating_sub(1)),
+        );
+        let right = at(self.x + self.width, width).max(left + 1);
+        let bottom = at(self.y + self.height, height).max(top + 1);
+        (left, top, right, bottom)
+    }
+}
+
+/// How far `region` of two `Rgba8` frames of one `width` x `height` extent differs: the mean
+/// absolute difference over its colour channels, in 8-bit steps, alpha aside (D796). `None` when
+/// either is not that extent.
+pub(crate) fn region_change(
+    (width, height): (u32, u32),
+    first: &[u8],
+    second: &[u8],
+    region: Region,
+) -> Option<f64> {
+    let expected = usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?;
+    if first.len() != expected || second.len() != expected || expected == 0 {
+        return None;
+    }
+    let (left, top, right, bottom) = region.pixels(width, height);
+    let row = usize::try_from(width).ok()? * 4;
+    let (from, to) = (
+        usize::try_from(left).ok()? * 4,
+        usize::try_from(right).ok()? * 4,
+    );
+    let (mut total, mut channels) = (0_u64, 0_u64);
+    for y in top..bottom {
+        let start = usize::try_from(y).ok()? * row;
+        let (ours, theirs) = (
+            first.get(start + from..start + to)?,
+            second.get(start + from..start + to)?,
+        );
+        for (a, b) in ours.chunks_exact(4).zip(theirs.chunks_exact(4)) {
+            total += a[..3]
+                .iter()
+                .zip(&b[..3])
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum::<u64>();
+            channels += 3;
+        }
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a mean over a frame's channels, reported to two places"
+    )]
+    Some(total as f64 / channels.max(1) as f64)
+}
+
+/// What [`motion`] found: the change of each pair of consecutive kept frames, by whether a stick
+/// was held between them.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Motion {
+    /// `(from, to, change)` for the pairs with a stick off centre at some flip after `from` and up
+    /// to `to`.
+    pub(crate) held: Vec<(u64, u64, f64)>,
+    /// The pairs with both sticks at rest throughout.
+    pub(crate) rest: Vec<(u64, u64, f64)>,
+}
+
+impl Motion {
+    /// The mean change of `pairs`; `None` for none.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a count of kept frames, far below 2^52"
+    )]
+    pub(crate) fn mean(pairs: &[(u64, u64, f64)]) -> Option<f64> {
+        (!pairs.is_empty())
+            .then(|| pairs.iter().map(|pair| pair.2).sum::<f64>() / pairs.len() as f64)
+    }
+}
+
+/// Splits each consecutive pair of `changes` (`(flip, change since the kept frame before it)`,
+/// the first entry's change unused) by whether `held(flip)` holds for any flip after the earlier
+/// frame and up to the later (D988).
+pub(crate) fn motion(changes: &[(u64, f64)], held: impl Fn(u64) -> bool) -> Motion {
+    let mut motion = Motion::default();
+    for pair in changes.windows(2) {
+        let ((from, _), (to, change)) = (pair[0], pair[1]);
+        let entry = (from, to, change);
+        if (from + 1..=to).any(&held) {
+            motion.held.push(entry);
+        } else {
+            motion.rest.push(entry);
+        }
+    }
+    motion
+}
+
+/// How far a stick must be from centre to count as held: past any title's dead zone.
+const HELD: f32 = 0.25;
+
+/// `motion` - the change between consecutive kept frames in `dir` from flip `from` on, over
+/// `region`, split by whether the captured `input` held a stick between them (D988). With
+/// `expect`, fails unless the pairs with a stick held changed more than those at rest by that
+/// factor.
+///
+/// # Errors
+///
+/// When the frames or the input cannot be read, fewer than two frames are kept, or `expect` is
+/// not met.
+pub(crate) fn cmd_motion(
+    dir: &std::path::Path,
+    input: &std::path::Path,
+    region: Region,
+    from: u64,
+    expect: Option<f64>,
+) -> Result<()> {
+    let script = orbistoun_service::read_pad_script(input)
+        .with_context(|| format!("reading the captured input {}", input.display()))?;
+    let held = |flip: u64| {
+        script
+            .at(flip)
+            .sticks
+            .iter()
+            .any(|stick| stick.x.abs() > HELD || stick.y.abs() > HELD)
+    };
+    let frames: Vec<Kept> = kept(dir)?
+        .into_iter()
+        .filter(|frame| frame.flip >= from)
+        .collect();
+    anyhow::ensure!(
+        frames.len() >= 2,
+        "{} keeps {} frame(s) from flip {from}, and a change needs two",
+        dir.display(),
+        frames.len()
+    );
+    let mut changes = Vec::with_capacity(frames.len());
+    let mut before: Option<(&Kept, Vec<u8>)> = None;
+    for frame in &frames {
+        let bytes = std::fs::read(&frame.path)
+            .with_context(|| format!("reading {}", frame.path.display()))?;
+        let change = before.as_ref().and_then(|(earlier, earlier_bytes)| {
+            ((earlier.width, earlier.height) == (frame.width, frame.height))
+                .then(|| region_change((frame.width, frame.height), earlier_bytes, &bytes, region))
+                .flatten()
+        });
+        // A frame of another extent - a loading screen's - starts the comparison afresh.
+        if let Some(change) = change {
+            changes.push((frame.flip, change));
+        } else {
+            changes.push((frame.flip, f64::NAN));
+        }
+        before = Some((frame, bytes));
+    }
+    let motion = motion(&changes, held);
+    let mut lines = Vec::new();
+    for &(from, to, change) in motion.held.iter().chain(&motion.rest) {
+        if change.is_nan() {
+            continue;
+        }
+        let what = if motion.held.iter().any(|pair| pair.0 == from) {
+            "stick held"
+        } else {
+            "at rest"
+        };
+        lines.push((from, format!("flip {from} -> {to}: {change:7.2}  {what}")));
+    }
+    lines.sort_by_key(|line| line.0);
+    for (_, line) in &lines {
+        println!("{line}");
+    }
+    let compared = |pairs: &[(u64, u64, f64)]| -> Vec<(u64, u64, f64)> {
+        pairs
+            .iter()
+            .copied()
+            .filter(|pair| !pair.2.is_nan())
+            .collect()
+    };
+    let (held_pairs, rest_pairs) = (compared(&motion.held), compared(&motion.rest));
+    let (held_mean, rest_mean) = (Motion::mean(&held_pairs), Motion::mean(&rest_pairs));
+    let show = |mean: Option<f64>| mean.map_or_else(|| "-".to_owned(), |m| format!("{m:.2}"));
+    println!(
+        "stick held: {} pair(s), mean change {}; at rest: {} pair(s), mean change {}",
+        held_pairs.len(),
+        show(held_mean),
+        rest_pairs.len(),
+        show(rest_mean)
+    );
+    let ratio = held_mean
+        .zip(rest_mean)
+        .map(|(held, rest)| held / rest.max(0.01));
+    if let Some(ratio) = ratio {
+        println!("the picture changes {ratio:.2} times as much with a stick held");
+    }
+    if let Some(factor) = expect {
+        anyhow::ensure!(
+            ratio.is_some_and(|ratio| ratio >= factor),
+            "the picture does not follow the stick: wanted {factor:.2} times the change at rest, found {}",
+            ratio.map_or_else(|| "no pairs of one kind".to_owned(), |r| format!("{r:.2}"))
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// Matching counts a pixel only when every colour channel is within the tolerance, alpha is
@@ -660,5 +913,53 @@ mod tests {
             dir.path().join("latest-drawn-frame.rgba").exists(),
             "only kept frames go"
         );
+    }
+
+    /// A region is four fractions inside the frame, and its change is the mean colour difference
+    /// over its own pixels alone, alpha aside (D988).
+    #[test]
+    fn a_regions_change_is_its_own_pixels_mean_difference() {
+        assert!(super::parse_region("0,0,1,1").is_ok());
+        assert!(
+            super::parse_region("0.5,0.5,0.6,0.1").is_err(),
+            "past the edge"
+        );
+        assert!(super::parse_region("0,0,0,1").is_err(), "empty");
+        assert!(super::parse_region("0,0,1").is_err(), "three numbers");
+
+        // 4x2: the right half of the second frame is 30 brighter in red; alpha differs everywhere.
+        let first = [10_u8, 20, 30, 0].repeat(8);
+        let mut second = [10_u8, 20, 30, 255].repeat(8);
+        for pixel in [2, 3, 6, 7] {
+            second[pixel * 4] = 40;
+        }
+        let whole = super::parse_region("0,0,1,1").expect("a region");
+        let left = super::parse_region("0,0,0.5,1").expect("a region");
+        let right = super::parse_region("0.5,0,0.5,1").expect("a region");
+        let change = |region| super::region_change((4, 2), &first, &second, region);
+        assert_eq!(change(left), Some(0.0), "alpha aside");
+        assert_eq!(change(right), Some(10.0), "30 in one channel of three");
+        assert_eq!(change(whole), Some(5.0));
+        assert_eq!(
+            super::region_change((4, 1), &first, &second, whole),
+            None,
+            "not that extent"
+        );
+    }
+
+    /// A pair of kept frames counts as held when a stick was off centre at any flip after the
+    /// earlier and up to the later, and at rest otherwise (D988).
+    #[test]
+    fn a_pair_is_held_when_a_stick_was_held_between_its_frames() {
+        let changes = [(10, f64::NAN), (12, 1.0), (14, 9.0), (16, 8.0), (18, 2.0)];
+        // Held over flips 13 and 14 only.
+        let motion = super::motion(&changes, |flip| (13..=14).contains(&flip));
+        let pairs = |list: &[(u64, u64, f64)]| -> Vec<(u64, u64)> {
+            list.iter().map(|pair| (pair.0, pair.1)).collect()
+        };
+        assert_eq!(pairs(&motion.held), [(12, 14)]);
+        assert_eq!(pairs(&motion.rest), [(10, 12), (14, 16), (16, 18)]);
+        assert_eq!(super::Motion::mean(&motion.held), Some(9.0));
+        assert_eq!(super::Motion::mean(&[]), None);
     }
 }

@@ -571,7 +571,7 @@ fn prepare_translations(service: &Service, module: &str) {
         return;
     };
     let title = orbistoun_service::linkplan::title_of(Path::new(module));
-    orbistoun_gpu_vulkan::pipeline_cache::keep_pipelines_at(paths.title_pipelines_file(&title));
+    orbistoun_gpu_vulkan::pipeline_cache::keep_pipelines_at(paths.title_pipelines_dir(&title));
     let started = std::time::Instant::now();
     let (refill, kept) = orbistoun_gpu::agc_driver::prepare_translations(
         paths.title_translations_file(&title),
@@ -592,7 +592,9 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::install_draw_executor(render::execute_draws);
     // Compute dispatches, carried out at submit over guest memory the same way.
     orbistoun_gpu::agc_driver::install_dispatch_executor(render::execute_dispatch);
-    // Its images kept on the device between dispatches (D985), but where a diagnostic copies each
+    // What a deferred write-back of an image a dispatch stored to reads off the device (D990).
+    orbistoun_gpu::agc_driver::install_kept_image_reader(render::read_kept_image);
+    // Its images kept on the device between dispatches (D990), but where a diagnostic copies each
     // dispatch's texels, which an image taken from the device does not carry.
     orbistoun_gpu::resident::set_enabled(
         orbistoun_env::CAPTURE_DISPATCH.get().is_none()
@@ -628,6 +630,8 @@ fn install_presentation() {
             .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
         orbistoun_gpu::pipeline::set_image_dump(addresses, dir);
     }
+    // A run of draws' colour targets, read back for a frame's pass dump (D986).
+    orbistoun_gpu::pass_dump::install_target_reader(render::read_pass_targets);
     // What a pixel shader stored through its buffers, read back after its draw.
     orbistoun_gpu::agc_driver::install_pixel_store_reader(render::read_pixel_stores);
     // The z-pass counters a `ZPASS_DONE` dumps, from the device's occlusion queries (D827).

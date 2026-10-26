@@ -1224,6 +1224,14 @@ pub trait GuestMemory {
     fn mapped(&self, address: u64, length: usize) -> bool {
         self.read(address, length).is_some()
     }
+
+    /// Brings into `[address, address + length)` whatever is owed to it before it is read - a
+    /// frame drawn on the device and not yet written back, a copy or fill deferred onto its pages,
+    /// a queued submission's draws over it - exactly as a [`Self::read`] of it would, without
+    /// reading it. A cache of what memory held, kept until the host sees the range written, asks
+    /// this before it answers: what is owed reaches memory as a host write, and the cache reads
+    /// again (D986). Nothing is owed by default.
+    fn settle(&self, _address: u64, _length: usize) {}
 }
 
 /// The largest shader this will read out of guest memory.
@@ -1460,6 +1468,11 @@ pub struct Submission {
     /// what carrying the submission out writes through them is worked out from these as it is
     /// queued (D876).
     pub dispatch_states: Vec<Option<crate::dispatch::DispatchState>>,
+    /// Each indirect compute dispatch's state (`DISPATCH_INDIRECT`), in stream order, as
+    /// [`Self::dispatch_states`] holds a direct one's, but for its grid, which the command processor
+    /// reads from memory as it carries the dispatch out: one group stands in for it, and what it
+    /// writes is bounded only where that does not depend on the grid (D989).
+    pub indirect_dispatch_states: Vec<Option<crate::dispatch::DispatchState>>,
     /// Whether any of its draws streams out (D861), writing buffers through a compute wave.
     pub streams_out: bool,
     /// Whether its preparation read memory a submission queued ahead of it draws into, or the frame
@@ -1596,6 +1609,24 @@ fn record_compute_work(
             };
             crate::dispatch::state_at(writes, packet.offset, [word(0), word(4), word(8)], word(12))
                 .ok()
+        })
+        .collect();
+    // An indirect dispatch's initiator is its body's last word, after the grid's address (D989).
+    submission.indirect_dispatch_states = walked
+        .packets
+        .iter()
+        .filter(|packet| {
+            packet.kind
+                == (crate::packet::PacketKind::Command {
+                    opcode: crate::packet::build::measured::DISPATCH_INDIRECT,
+                })
+        })
+        .map(|packet| {
+            let end = (packet.body_offset() + packet.body_length()) as usize;
+            let initiator = stream.get(end.checked_sub(4)?..end)?;
+            let initiator =
+                u32::from_le_bytes([initiator[0], initiator[1], initiator[2], initiator[3]]);
+            crate::dispatch::state_at(writes, packet.offset, [1, 1, 1], initiator).ok()
         })
         .collect();
     let mut sweep = crate::registers::RegisterSweep::new(writes);
@@ -2656,7 +2687,19 @@ pub struct Pipeline {
     /// their content hashes: working it out decodes both, it is a function of their bytes, and a
     /// frame draws the same pair thousands of times across its submissions.
     flat_twins_kept: BTreeMap<(Option<u64>, Option<u64>), Option<FlatTwins>>,
+    /// Where each dispatch program's stored images' descriptors come from, by the program's address
+    /// and content hash, as its translation named them (D989): a queued dispatch's image stores are
+    /// bounded from these without translating it again.
+    stored_image_sources: BTreeMap<(u64, u64), Vec<TextureSource>>,
 }
+
+/// How many programs' stored image sources [`Pipeline`] keeps before it lets them all go (D989).
+const MOST_STORED_IMAGE_PROGRAMS: usize = 4096;
+
+/// A dispatch program's stores that may write guest memory besides its images, each by its offset
+/// in the program, whether it is a global store and whether it is in the flat segment; and whether
+/// it stores to an image (D989).
+type GuestStores = (Vec<(u32, bool, bool)>, bool);
 
 /// Whether [`Pipeline::draw_buffer_formats`] keeps what it resolves, and what it kept.
 #[derive(Debug)]
@@ -2778,6 +2821,7 @@ impl Pipeline {
             formats_memo: FormatsMemo::Off,
             dispatch_buffers_kept: buffers_memo::BuffersMemo::default(),
             flat_twins_kept: BTreeMap::new(),
+            stored_image_sources: BTreeMap::new(),
         })
     }
 
@@ -2858,6 +2902,7 @@ impl Pipeline {
                 (placed, formats, compared),
                 (integer_images, (sampled, tables)),
             )?;
+            self.keep_stored_image_sources((address, program), &sources.1);
             let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
             let wanted = dispatch_wants(state, (&sources.0, &images), memory)?;
             if wanted == (integer_images, compared) {
@@ -2886,59 +2931,110 @@ impl Pipeline {
     /// that one of its buffer stores or atomics goes through, and the window over its other buffer
     /// accesses where one of those stores through it - a buffer or window it only reads, it does
     /// not write (D882), and each page of its global buffer where a global store goes through it
-    /// (D961). `None` where that does not bound it: a program that does not decode or trace, or one
-    /// that stores other than through a buffer - an image, an untraced global or a flat address.
+    /// (D961). Each image it stores to, from its descriptor, where a translation of its program
+    /// named where the descriptor comes from (D989). A dispatch the host cannot trace is traced
+    /// device-addressed, as its preparation is where the backend offers it (D982). `None` where that
+    /// does not bound it: a program that does not decode or trace, one that stores through an
+    /// untraced global or flat address or, device-addressed, through a buffer the host does not
+    /// resolve, or through an image no translation of the program has named yet.
     #[must_use]
     pub fn dispatch_write_spans(
         &self,
         state: &crate::dispatch::DispatchState,
         memory: &impl GuestMemory,
     ) -> Option<Vec<(u64, u64)>> {
-        let window = read_window(memory, guest_address_of(state.program))?;
+        self.write_spans(state, memory, false)
+    }
+
+    /// [`Self::dispatch_write_spans`] for an indirect dispatch, whose grid is read from memory as it
+    /// is carried out: `state` stands one group in for it, so only the stores that write the same
+    /// bytes whatever the grid - through a buffer's descriptor, or to an image - are bounded. A
+    /// store through the window, or the global buffer's pages, which the waves place, is not
+    /// (D989).
+    #[must_use]
+    pub fn indirect_dispatch_write_spans(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        memory: &impl GuestMemory,
+    ) -> Option<Vec<(u64, u64)>> {
+        self.write_spans(state, memory, true)
+    }
+
+    /// [`Self::dispatch_write_spans`], or, for `any_grid`,
+    /// [`Self::indirect_dispatch_write_spans`].
+    fn write_spans(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        memory: &impl GuestMemory,
+        any_grid: bool,
+    ) -> Option<Vec<(u64, u64)>> {
+        let address = guest_address_of(state.program);
+        let window = read_window(memory, address)?;
         let decoded = decode_program(window, &self.encodings, &self.operands);
         if !decoded.terminated || !decoded.is_trustworthy() {
             return None;
         }
-        let families = self.encodings.encodings();
-        // A store to scratch lands in the wave's own private memory, not the guest's (D954).
-        let scratch = crate::dispatch::scratch_accesses(state, (&decoded, &self.encodings));
-        // Where each buffer store or atomic is, by its offset in the program.
-        let mut stores = Vec::new();
-        for instruction in &decoded.instructions {
-            if scratch.contains(&instruction.offset) {
-                continue;
+        let (stores, images) = self.guest_stores(state, &decoded, address)?;
+        // A buffer found by running the groups on the host depends on the grid (D914), so with
+        // the grid unknown only a trace that runs none bounds the stores.
+        if any_grid
+            && !stores.is_empty()
+            && crate::device_addressed::host_runs_allowed()
+            && !state.inputs.device_addressed
+        {
+            unbounded(crate::perf::Span::UnboundedIndirect, (address, 0));
+            return None;
+        }
+        let program = &window[..decoded.consumed];
+        let mut spans = if images {
+            self.stored_image_write_spans(state, (address, program), memory)?
+        } else {
+            Vec::new()
+        };
+        if stores.is_empty() {
+            spans.sort_unstable();
+            spans.dedup();
+            return Some(spans);
+        }
+        // A dispatch the host cannot trace is prepared device-addressed where the backend offers it
+        // (D982): the buffers it resolves are still bound, and a store through one writes it alone;
+        // any other store reaches guest memory by device address, unbounded before it runs (D989).
+        let traced = match self.dispatch_buffers_kept(state, (&decoded, program), memory) {
+            Err(why)
+                if crate::device_addressed::host_cannot_know(&why)
+                    && crate::device_addressed::offered()
+                    && !state.inputs.device_addressed =>
+            {
+                let device = crate::dispatch::DispatchState {
+                    inputs: orbistoun_translate::wavefront::ComputeInputs {
+                        device_addressed: true,
+                        ..state.inputs
+                    },
+                    ..state.clone()
+                };
+                self.dispatch_buffers_kept(&device, (&decoded, program), memory)
+                    .map(|traced| (traced, true))
             }
-            let Some(name) = instruction
-                .encoding
-                .and_then(|e| families.get(usize::from(e)))
-                .and_then(|family| {
-                    self.encodings
-                        .mnemonic_for(&family.name, instruction.opcode)
-                })
-            else {
-                continue;
+            traced => traced.map(|traced| (traced, state.inputs.device_addressed)),
+        };
+        let ((served, buffers, _, _, (global_pages, (sampled, _), _)), device_addressed) =
+            match traced {
+                Ok(traced) => traced,
+                Err(why) if crate::device_addressed::host_cannot_know(&why) => {
+                    unbounded(crate::perf::Span::UnboundedDevice, (address, 0));
+                    return None;
+                }
+                Err(_) => return None,
             };
-            if !(name.contains("store") || name.contains("atomic")) || name.starts_with("ds_") {
-                continue;
-            }
-            // A global store writes the pages of the dispatch's global buffer, where it is traced
-            // (D961).
-            let global = name.starts_with("global_store_");
-            if !name.starts_with("buffer_") && !global {
-                crate::perf::span(crate::perf::Span::UnboundedStore, || ());
+        let mut through_window = false;
+        for &(at, global, flat) in &stores {
+            // With the grid unknown, a store whose bytes the waves place is not bounded (D989).
+            if any_grid
+                && placed_by_waves(served.get(&at).copied(), (global_pages.as_ref(), sampled))
+            {
+                unbounded(crate::perf::Span::UnboundedIndirect, (address, at));
                 return None;
             }
-            stores.push((instruction.offset, global));
-        }
-        if stores.is_empty() {
-            return Some(Vec::new());
-        }
-        let (served, buffers, _, _, (global_pages, _, _)) = self
-            .dispatch_buffers_kept(state, (&decoded, &window[..decoded.consumed]), memory)
-            .ok()?;
-        let mut spans: Vec<(u64, u64)> = Vec::new();
-        let mut through_window = false;
-        for &(at, global) in &stores {
             match (served.get(&at), &global_pages) {
                 (Some(&slot), Some(pages)) if pages.slot == slot as usize => spans.extend(
                     pages
@@ -2947,8 +3043,18 @@ impl Pipeline {
                         .map(|&page| (page, crate::global_pages::PAGE)),
                 ),
                 (Some(&slot), _) => spans.extend(buffers.get(slot as usize).copied()),
+                // No window holds what a device-addressed dispatch's untraced store reaches.
+                (None, _) if device_addressed => {
+                    unbounded(crate::perf::Span::UnboundedDevice, (address, at));
+                    return None;
+                }
                 (None, _) if global => {
-                    crate::perf::span(crate::perf::Span::UnboundedGlobal, || ());
+                    let why = if flat {
+                        crate::perf::Span::UnboundedFlat
+                    } else {
+                        crate::perf::Span::UnboundedGlobal
+                    };
+                    unbounded(why, (address, at));
                     return None;
                 }
                 (None, _) => through_window = true,
@@ -2968,6 +3074,137 @@ impl Pipeline {
             spans.extend(placed.map(|window| (window.address(), u64::from(window.words()) * 4)));
         }
         Some(spans)
+    }
+
+    /// The stores of a dispatch's program that may write guest memory, besides its images: each
+    /// buffer, global or flat store by its offset in the program, whether it is a global one, and
+    /// whether it is in the flat segment; and whether it stores to an image (D989). Stores to the
+    /// wave's own memory are left out. `None`, the program counted unbounded, for a store through
+    /// anything else.
+    fn guest_stores(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        decoded: &orbistoun_shader::Decode,
+        address: u64,
+    ) -> Option<GuestStores> {
+        let families = self.encodings.encodings();
+        // A store to scratch lands in the wave's own private memory, not the guest's (D954).
+        let scratch = crate::dispatch::scratch_accesses(state, (decoded, &self.encodings));
+        // Where each buffer store or atomic is, by its offset in the program.
+        let mut stores = Vec::new();
+        // Whether it stores to or makes an atomic of an image.
+        let mut images = false;
+        // Its flat stores that reach no guest memory, found at the first flat store.
+        let mut flat_beyond: Option<std::collections::BTreeSet<u32>> = None;
+        for instruction in &decoded.instructions {
+            if scratch.contains(&instruction.offset) {
+                continue;
+            }
+            let Some((family, name)) = instruction
+                .encoding
+                .and_then(|e| families.get(usize::from(e)))
+                .and_then(|family| {
+                    self.encodings
+                        .mnemonic_for(&family.name, instruction.opcode)
+                        .map(|name| (family.name.as_str(), name))
+                })
+            else {
+                continue;
+            };
+            if !(name.contains("store") || name.contains("atomic")) || name.starts_with("ds_") {
+                continue;
+            }
+            // A flat-encoded access in the scratch segment reaches the lane's private memory (D954).
+            if family == "FLAT" && (instruction.word >> 14) & 3 == 1 {
+                continue;
+            }
+            // An image's whole range is known from its descriptor (D989).
+            if name.starts_with("image_") {
+                images = true;
+                continue;
+            }
+            // A store in the flat segment whose high word is past every guest mapping reaches the
+            // wave's own memory (D989); any other is taken as a global one.
+            let flat = orbistoun_translate::draw_buffers::flat_segment_store(
+                instruction,
+                Some((family, name)),
+            );
+            if flat {
+                let beyond = flat_beyond.get_or_insert_with(|| {
+                    orbistoun_translate::draw_buffers::flat_stores_beyond_guest(
+                        decoded,
+                        &self.encodings,
+                        (0, u32::try_from(state.user_data.len()).unwrap_or(u32::MAX)),
+                    )
+                });
+                if beyond.contains(&instruction.offset) {
+                    continue;
+                }
+            }
+            // A global store writes the pages of the dispatch's global buffer, where it is traced
+            // (D961).
+            let global = name.starts_with("global_store_");
+            if !name.starts_with("buffer_") && !global {
+                unbounded(
+                    crate::perf::Span::UnboundedStore,
+                    (address, instruction.offset),
+                );
+                return None;
+            }
+            stores.push((instruction.offset, global, flat));
+        }
+        Some((stores, images))
+    }
+
+    /// What a dispatch of the program at `address`, holding `program`, writes to the images it
+    /// stores to, from the sources its translation named (D989). `None`, counted unbounded, where no
+    /// translation has named them yet or a descriptor does not place its image.
+    fn stored_image_write_spans(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        (address, program): (u64, &[u8]),
+        memory: &impl GuestMemory,
+    ) -> Option<Vec<(u64, u64)>> {
+        let Some(sources) = self
+            .stored_image_sources
+            .get(&(address, content_hash(program)))
+        else {
+            unbounded(crate::perf::Span::UnboundedImage, (address, 0));
+            return None;
+        };
+        let mut spans = Vec::new();
+        for source in sources {
+            let Some(level) = stored_image_spans(state, source, memory) else {
+                unbounded(crate::perf::Span::UnboundedImage, (address, 1));
+                return None;
+            };
+            spans.extend(level);
+        }
+        Some(spans)
+    }
+
+    /// Keeps where the images the program at `address`, holding `program`, stores to take their
+    /// descriptors from, as its translation named them (D989), for [`Self::dispatch_write_spans`].
+    fn keep_stored_image_sources(
+        &mut self,
+        (address, program): (u64, &[u8]),
+        stored: &[TextureSource],
+    ) {
+        if stored.is_empty() {
+            return;
+        }
+        let key = (address, content_hash(program));
+        if self
+            .stored_image_sources
+            .get(&key)
+            .is_some_and(|kept| kept == stored)
+        {
+            return;
+        }
+        if self.stored_image_sources.len() >= MOST_STORED_IMAGE_PROGRAMS {
+            self.stored_image_sources.clear();
+        }
+        self.stored_image_sources.insert(key, stored.to_vec());
     }
 
     /// [`Self::dispatch_buffers`] for the program whose bytes are `program`, kept with the guest
@@ -3657,7 +3894,7 @@ pub struct DispatchImages {
     /// directory its module finds them in (D983); `None` where it selects none.
     pub selected: Option<SelectedImages>,
     /// Each fetched and stored image's place among the images the device keeps, where it has one
-    /// (D985): one taken from the device has no texels here.
+    /// (D990): one taken from the device has no texels here.
     pub resident: crate::resident::Uses,
 }
 
@@ -3724,8 +3961,17 @@ pub struct KeysToExpand {
 
 /// A dispatch image's texel format: the guest's `8_8_8_8_UNORM`, its single-channel `8_UNORM`, or
 /// `32_32_32_32_UINT`, as which radeonsi copies a block-compressed image's blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TexelFormat {
+    /// Four-by-four blocks as the guest's block format holds them, bound in the host format that
+    /// holds their bits as they are (D990): the image's words are its blocks', row-major by block,
+    /// `block_bytes` a block. Only a dispatch's fetched image is ever one.
+    Blocks {
+        /// The host format.
+        native: crate::formats::HostFormat,
+        /// Bytes a block.
+        block_bytes: u32,
+    },
     /// Four eight-bit normalised channels, a texel a word.
     Rgba8,
     /// One eight-bit normalised channel, a texel a byte.
@@ -3783,7 +4029,9 @@ impl TexelFormat {
             | Self::Rg16Float
             | Self::Rgba8Uint
             | Self::Rgba8Snorm => 4,
-            Self::R8 | Self::R8Uint => 1,
+            // At most a byte a texel in every block format: eight or sixteen bytes a block of
+            // sixteen. What a block image holds is counted by its blocks ([`Self::image_bytes`]).
+            Self::R8 | Self::R8Uint | Self::Blocks { .. } => 1,
             Self::R16Uint | Self::R16Unorm | Self::R16Float | Self::Rg8Unorm => 2,
             Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
@@ -3794,6 +4042,17 @@ impl TexelFormat {
     #[must_use]
     pub const fn words(self) -> u32 {
         self.bytes().div_ceil(4)
+    }
+
+    /// Bytes a `width` x `height` image of it holds: its texels', or its blocks'.
+    #[must_use]
+    pub const fn image_bytes(self, width: u32, height: u32) -> u64 {
+        match self {
+            Self::Blocks { block_bytes, .. } => {
+                width.div_ceil(4) as u64 * height.div_ceil(4) as u64 * block_bytes as u64
+            }
+            _ => width as u64 * height as u64 * self.bytes() as u64,
+        }
     }
 
     /// Whether the format's channels are unsigned integers, which a shader declares as such.
@@ -4246,7 +4505,7 @@ fn dispatch_images(
         ));
     }
     let mut images = DispatchImages::default();
-    // Each image takes one place among those the device keeps (D985).
+    // Each image takes one place among those the device keeps (D990).
     if crate::resident::enabled() {
         crate::resident::with_registry(crate::resident::Registry::begin);
     }
@@ -4414,8 +4673,22 @@ fn host_stored_image(
     )))
 }
 
+/// Refuses a 2D array store to a view of several layers from a later one (D910).
+fn refuse_later_layers(source: &TextureSource, words: [u32; 8]) -> Result<(), String> {
+    if source.layered
+        && words[4] & BASE_ARRAY_FIELD != 0
+        && one_later_layer(source, words).is_none()
+    {
+        return Err(format!(
+            "a 2D array store to a view of several layers from a later one (D910): format {}",
+            describe_dispatch_image(&decode_image_descriptor(words), words)
+        ));
+    }
+    Ok(())
+}
+
 /// One image a dispatch stores to, as it was before the dispatch and where it lies. Where
-/// `resident` is given, its place among the images the device keeps goes there (D985): one the
+/// `resident` is given, its place among the images the device keeps goes there (D990): one the
 /// device keeps comes with no texels before.
 fn stored_image(
     state: &crate::dispatch::DispatchState,
@@ -4428,15 +4701,7 @@ fn stored_image(
     if let Some(held) = host_stored_image(words, source) {
         return held;
     }
-    if source.layered
-        && words[4] & BASE_ARRAY_FIELD != 0
-        && one_later_layer(source, words).is_none()
-    {
-        return Err(format!(
-            "a 2D array store to a view of several layers from a later one (D910): format {}",
-            describe_dispatch_image(&decode_image_descriptor(words), words)
-        ));
-    }
+    refuse_later_layers(source, words)?;
     let (surface, descriptor, format, order) =
         dispatch_image_surface(state, (source, false), memory)?;
     let layers = if source.layered {
@@ -4444,9 +4709,9 @@ fn stored_image(
     } else {
         None
     };
-    // An image the device keeps, unwritten since, is stored to where it is kept (D985): its bytes
+    // An image the device keeps, unwritten since, is stored to where it is kept (D990): its bytes
     // are still read, what it stored being found against them, but not detiled.
-    let mut taken = false;
+    let (mut taken, mut deferred) = (false, false);
     if let Some(slot) = resident
         && descriptor.compression.is_none()
     {
@@ -4457,9 +4722,16 @@ fn stored_image(
             memory,
         );
         taken = slot.is_some_and(|used| !used.fresh);
+        deferred = slot.is_some_and(|used| used.deferred);
     }
-    // Kept whole: what the dispatch stored is found against it.
-    let spanned = read_spanned(&surface, memory)?.to_vec();
+    // Kept whole: what the dispatch stored is found against it. Not read where the image's
+    // write-back is deferred: reading would make it, and what it stores is written back from the
+    // device, over the bytes memory holds then (D990).
+    let spanned = if deferred {
+        Vec::new()
+    } else {
+        read_spanned(&surface, memory)?.to_vec()
+    };
     let (width, height) = surface.extent();
     let mut keys_to_expand = None;
     let texels = match surface_keys(&descriptor, format, memory)? {
@@ -4526,6 +4798,72 @@ fn stored_image(
     })
 }
 
+/// The guest memory a dispatch's store to the image `source` names can write, as (first byte,
+/// bytes), from its descriptor alone, before the dispatch runs (D989): the level its view names,
+/// where its descriptor places it, which is all [`stored_image`]'s write-back reaches - and under
+/// compression the whole chain, which cleared keys expand to zeros, and its keys, which the
+/// write-back marks uncompressed. None for a depth target or its stencil plane the host holds
+/// (D894), which is written back to the host. `None` where the descriptor does not place it.
+fn stored_image_spans(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+) -> Option<Vec<(u64, u64)>> {
+    let words = dispatch_descriptor_words(state, source, memory).ok()?;
+    match host_stored_image(words, source) {
+        Some(Ok(_)) => return Some(Vec::new()),
+        Some(Err(_)) => return None,
+        None => {}
+    }
+    let (surface, descriptor, format, _) =
+        dispatch_image_surface(state, (source, false), memory).ok()?;
+    let mut spans = vec![(surface.base(), surface.bytes() as u64)];
+    if let Some(dcc) = descriptor.compression {
+        let chain = surface_layout(&descriptor, format)?.chain_bytes(
+            descriptor.width,
+            descriptor.height,
+            descriptor.levels,
+        );
+        let keys = surface_key_bytes(&descriptor, format)?;
+        spans.push((descriptor.base, chain));
+        spans.push((crate::dcc::meta_start(dcc), keys as u64));
+    }
+    Some(spans)
+}
+
+/// Whether a store served by `slot`, `None` for one through the window, writes bytes the waves
+/// place, which an indirect dispatch's grid decides (D989): through the window, the global
+/// buffer's pages, or a buffer placed from a sample of the waves (D951).
+fn placed_by_waves(
+    slot: Option<u32>,
+    (global_pages, sampled): (Option<&crate::global_pages::GlobalPages>, u32),
+) -> bool {
+    slot.is_none_or(|slot| {
+        global_pages.is_some_and(|pages| pages.slot == slot as usize)
+            || slot >= 32
+            || sampled & (1 << slot) != 0
+    })
+}
+
+/// Counts a queued dispatch whose writes are not bounded before it runs under `span`, and names
+/// the program, and where in it, the first time it is for that reason (D989): the per-flip count
+/// says how often, the line says which programs to bound next.
+fn unbounded(span: crate::perf::Span, (program, at): (u64, u32)) {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<(u64, String)>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    crate::perf::span(span, || ());
+    let why = format!("{span:?}");
+    let first = SAID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((program, why.clone()));
+    if first {
+        tracing::info!(
+            "queued writes: the dispatch program at {program:#x} is not bounded before it runs ({why}, at {at:#x})"
+        );
+    }
+}
+
 /// Whether the images a dispatch stores to hold integers, which its module's storage images are
 /// declared as; refused where some do and some do not, since the module types them all one way
 /// (D893).
@@ -4567,7 +4905,11 @@ fn dispatch_sampling(
         .map(|word| word.unwrap_or(0))
         .collect();
     match user_data_sampler(source, &words, memory) {
-        NamedSampler::NoneNamed => Ok(None),
+        // A sampler the program builds from what the trace names (D995).
+        NamedSampler::NoneNamed => source
+            .sampler_words
+            .map(|sampler| selected_images::traced_sampling(state, sampler, memory))
+            .transpose(),
         NamedSampler::Unreadable => Err("its sampler is not readable".to_owned()),
         NamedSampler::Read(sampling)
             if matches!(sampling.border, crate::registers::BorderColour::Table(_)) =>
@@ -4684,7 +5026,8 @@ fn compared_salt(compared: [u8; MAX_TEXTURES]) -> u64 {
 ///
 /// # Errors
 ///
-/// A compared slot whose sampler cannot be read, or that names none.
+/// A compared slot whose sampler cannot be read. One that names none in a table or the user data
+/// is compared by the sampler its registers hold as the module runs.
 fn dispatch_compared(
     state: &crate::dispatch::DispatchState,
     textures: &[TextureSource],
@@ -4693,8 +5036,16 @@ fn dispatch_compared(
     let mut compared = [0u8; MAX_TEXTURES];
     for source in textures.iter().filter(|source| source.compare) {
         let sampling = dispatch_sampling(state, source, memory)
-            .map_err(|why| format!("compared image {}: {why}", source.slot))?
-            .ok_or_else(|| format!("compared image {} names no sampler", source.slot))?;
+            .map_err(|why| format!("compared image {}: {why}", source.slot))?;
+        // A sampler no table or user-data word names is in the program's registers at the sample:
+        // the module reads its function and filter there as it runs (D995).
+        let Some(sampling) = sampling else {
+            if let Some(how) = compared.get_mut(source.slot as usize) {
+                *how = orbistoun_translate::wavefront::SHADER_COMPARE
+                    | orbistoun_translate::wavefront::SHADER_COMPARE_RUNNING;
+            }
+            continue;
+        };
         let linear = if sampling.magnify == crate::registers::TextureFilter::Linear {
             orbistoun_translate::wavefront::SHADER_COMPARE_LINEAR
         } else {
@@ -4736,7 +5087,7 @@ fn unmodelled_keys(
 }
 
 /// One fetched image's texels, read through `source`'s descriptor, and where they were read. Where
-/// `resident` is given, the image's place among those the device keeps goes there (D985): one
+/// `resident` is given, the image's place among those the device keeps goes there (D990): one
 /// taken from the device comes with no texels.
 fn fetched_image(
     state: &crate::dispatch::DispatchState,
@@ -4769,7 +5120,7 @@ fn fetched_image(
         None
     };
     let span = (surface.base(), surface.bytes() as u64);
-    // An image the device keeps, unwritten since, is taken from it rather than read (D985).
+    // An image the device keeps, unwritten since, is taken from it rather than read (D990).
     if let Some(slot) = resident
         && descriptor.compression.is_none()
     {
@@ -4852,7 +5203,7 @@ fn fetched_image(
     ))
 }
 
-/// What names a kept image beside where it lies (D985): how its bytes are laid out and read - the
+/// What names a kept image beside where it lies (D990): how its bytes are laid out and read - the
 /// surface, the texel format and channel order, the layers from the first read - and whether it
 /// is seen as a cube. Not the descriptor's other words: an image one dispatch stores to through a
 /// storage descriptor is the image the next fetches through a sampled one.
@@ -4861,15 +5212,8 @@ fn resident_view(
     (format, order): (TexelFormat, Option<[u8; 4]>),
     (layers, first): (Option<u32>, u32),
     cube: bool,
-) -> (String, u32, Option<[u8; 4]>, Option<u32>, u32, bool) {
-    (
-        format!("{surface:?}"),
-        format as u32,
-        order,
-        layers,
-        first,
-        cube,
-    )
+) -> (String, TexelFormat, Option<[u8; 4]>, Option<u32>, u32, bool) {
+    (format!("{surface:?}"), format, order, layers, first, cube)
 }
 
 /// Bytes of texels an image of `surface`, of `format` with `layers`, takes on the device.
@@ -4883,7 +5227,7 @@ fn texel_bytes(surface: &DispatchSurface, format: TexelFormat, layers: Option<u3
 }
 
 /// The place in the dispatch being prepared of the image over `span` viewed as `view`, `bytes` of
-/// texels on the device (D985): its bytes settled first - a frame pending over them written back,
+/// texels on the device (D990): its bytes settled first - a frame pending over them written back,
 /// a deferred copy carried out - so the write-watch sees every write before it is asked. `None`
 /// where images are not kept or its bytes cannot be read.
 fn place_resident(
@@ -4895,8 +5239,15 @@ fn place_resident(
     if !crate::resident::enabled() {
         return None;
     }
-    memory.read(span.0, usize::try_from(span.1).ok()?)?;
     let key = crate::resident::key(span, view);
+    // One whose write-back is deferred is taken unsettled: settling its bytes would make the
+    // write-back the keeping exists to spare.
+    let deferred = crate::resident::with_registry(|registry| registry.take_deferred(key));
+    if deferred.is_some() {
+        crate::perf::span(crate::perf::Span::ResidentTaken, || ());
+        return deferred;
+    }
+    memory.read(span.0, usize::try_from(span.1).ok()?)?;
     let used = crate::resident::with_registry(|registry| {
         registry.place(&crate::resident::HostWatch, (key, span, bytes))
     });
@@ -5944,6 +6295,27 @@ enum Prepared {
 }
 
 impl Pipeline {
+    /// Counts a draw whose shaders are looked up, by the primitive type its registers name and the
+    /// primitive it is drawn as, in the submission's report.
+    fn note_draw_primitive(
+        &self,
+        sweep: &mut crate::registers::RegisterSweep<'_>,
+        packet_offset: u32,
+        submission: &mut Submission,
+    ) {
+        let pair = (
+            sweep
+                .latest(packet_offset, VGT_PRIMITIVE_TYPE)
+                .map(|value| value & 0x3F),
+            self.draw_primitive,
+        );
+        let primitives = &mut submission.report.draw_primitives;
+        match primitives.iter_mut().find(|(held, ..)| *held == pair) {
+            Some((_, draws, _)) => *draws += 1,
+            None => primitives.push((pair, 1, packet_offset)),
+        }
+    }
+
     /// Prepares the reconciled candidates and binds them, then finds the shader each draw ran: the
     /// program addresses in force at its packet, translated where the first pass did not, so a
     /// stream that swaps a stage's program between draws binds each draw's own. A registered stage
@@ -6006,17 +6378,7 @@ impl Pipeline {
                 .then(|| self.draw_key((&mut sweep, draw.packet_offset), &shader_registers, terms))
                 .filter(|key| !same_terms || previous_writes.as_ref() != Some(&key.written));
             if key.is_some() {
-                let pair = (
-                    sweep
-                        .latest(draw.packet_offset, VGT_PRIMITIVE_TYPE)
-                        .map(|value| value & 0x3F),
-                    self.draw_primitive,
-                );
-                let primitives = &mut submission.report.draw_primitives;
-                match primitives.iter_mut().find(|(held, ..)| *held == pair) {
-                    Some((_, draws, _)) => *draws += 1,
-                    None => primitives.push((pair, 1, draw.packet_offset)),
-                }
+                self.note_draw_primitive(&mut sweep, draw.packet_offset, submission);
             }
             let Some(DrawKey {
                 written,
@@ -6048,9 +6410,16 @@ impl Pipeline {
             );
             for candidate in draw_candidates {
                 let stage = candidate.stage;
+                // Each stage's own user data: a pixel shader's format loads resolve their
+                // descriptors from its words (D738).
+                let words = if stage == ShaderStage::Fragment {
+                    &fragment_words
+                } else {
+                    &vertex_words
+                };
                 let resource = self.bind_chunked(
                     candidate,
-                    (memory, &geometry, &plans, window_space, &vertex_words),
+                    (memory, &geometry, &plans, window_space, words),
                     (&mut by_geometry, &mut chunked),
                     submission,
                 );
@@ -6871,8 +7240,8 @@ impl Pipeline {
             }
         }
         let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
-        let buffer_formats = (candidate.stage == ShaderStage::Vertex)
-            .then(|| {
+        let buffer_formats = match candidate.stage {
+            ShaderStage::Vertex => {
                 let system = geometry.as_ref().map_or(Vec::new(), |inputs| {
                     orbistoun_translate::wavefront::geometry_system_scalars(
                         inputs.vertices,
@@ -6880,10 +7249,19 @@ impl Pipeline {
                     )
                     .to_vec()
                 });
-                self.draw_buffer_formats(candidate.address, (words, &system), memory)
-            })
-            .flatten();
-        note_vertex_formats(candidate.address, buffer_formats.as_ref());
+                let formats = self.draw_buffer_formats(candidate.address, (words, &system), memory);
+                note_vertex_formats(candidate.address, formats.as_ref());
+                formats
+            }
+            // A pixel shader whose format loads convert by its draw's descriptors (D738), resolved
+            // from its own words; only one its plain preparation found needing the draw.
+            ShaderStage::Fragment if !needs.is_empty() => self.stage_buffer_formats(
+                (candidate.address, ShaderStage::Fragment),
+                (words, &[]),
+                memory,
+            ),
+            _ => None,
+        };
         self.prepare_with_geometry(
             candidate,
             (memory, Some(geometry.clone()), needs, window_space),
@@ -6900,6 +7278,18 @@ impl Pipeline {
     fn draw_buffer_formats(
         &mut self,
         address: u64,
+        draw: (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
+        memory: &impl GuestMemory,
+    ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
+        self.stage_buffer_formats((address, ShaderStage::Vertex), draw, memory)
+    }
+
+    /// [`Self::draw_buffer_formats`] for the shader of `stage` at `address`, from that stage's
+    /// user-data words: a pixel shader's format loads convert by its draw's descriptors as a vertex
+    /// shader's do (D738).
+    fn stage_buffer_formats(
+        &mut self,
+        (address, stage): (u64, ShaderStage),
         (words, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
         memory: &impl GuestMemory,
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
@@ -6911,7 +7301,7 @@ impl Pipeline {
         {
             return *formats;
         }
-        let formats = self.format_words(address).map(|traced| {
+        let formats = self.stage_format_words(address, stage).map(|traced| {
             let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
             for (slot, source) in traced.iter().enumerate() {
                 let word = crate::draw_buffers::fourth_word_or_why(source, (words, system), memory);
@@ -6929,18 +7319,28 @@ impl Pipeline {
         formats
     }
 
-    /// Where each of a primitive shader's buffers' fourth descriptor word comes from, by slot, for
-    /// the vertex stage's layout now; `None` for a shader that makes no format load, whose formats
-    /// no draw needs. Traced once per program and layout and kept: a draw only resolves the words,
-    /// and a frame draws one program thousands of times. A program rewritten in place is traced
-    /// again.
-    fn format_words(&mut self, address: u64) -> Option<FormatWords> {
+    /// Where each of the buffers' fourth descriptor word comes from, by slot, for the shader of
+    /// `stage` at `address` and that stage's layout now - a primitive shader's or a pixel shader's
+    /// (D738); `None` for a shader that makes no format load, whose formats no draw needs. Traced
+    /// once per program and layout and kept: a draw only resolves the words, and a frame draws one
+    /// program thousands of times. A program rewritten in place is traced again.
+    fn stage_format_words(&mut self, address: u64, stage: ShaderStage) -> Option<FormatWords> {
         let Some(shader) = self.decoded.get(address) else {
             self.untraced_formats
                 .insert(address, "its program was not decoded".to_owned());
             return None;
         };
-        let key = (address, self.user_data[0].count);
+        let layout = if stage == ShaderStage::Fragment {
+            self.user_data[1]
+        } else {
+            self.user_data[0]
+        };
+        // The layout's count, and the stage in its top bit: one address traced for two stages is
+        // two traces.
+        let key = (
+            address,
+            layout.count | u32::from(stage == ShaderStage::Fragment) << 31,
+        );
         // The whole program's hash: a rewrite can change one word in the middle.
         let content = content_hash(shader);
         if let Some((held, traced)) = self.format_words.get(&key)
@@ -6960,12 +7360,12 @@ impl Pipeline {
             .then(|| {
                 let user_data = UserData {
                     draw_buffers: true,
-                    ..self.user_data[0]
+                    ..layout
                 };
                 orbistoun_translate::wavefront::draw_buffers_for(
                     &decoded,
                     &self.encodings,
-                    host_stage(ShaderStage::Vertex),
+                    host_stage(stage),
                     user_data,
                 )
                 .map_err(|why| self.untraced_formats.insert(address, why.to_string()))
@@ -7339,6 +7739,7 @@ impl Pipeline {
                 ..self.user_data[0]
             },
             ShaderStage::Fragment => UserData {
+                buffer_formats: for_draw.buffer_formats,
                 flat_twins: for_draw.flat_twins,
                 saturated: for_draw.saturated,
                 mirrored: for_draw.mirrored,
@@ -10151,6 +10552,10 @@ impl<M: GuestMemory> GuestMemory for ExpandedSurface<'_, M> {
             _ => self.inner.read(address, length),
         }
     }
+
+    fn settle(&self, address: u64, length: usize) {
+        self.inner.settle(address, length);
+    }
 }
 
 /// A fast-cleared image a sample reads exactly once its clears are expanded, and its descriptor's
@@ -10561,6 +10966,8 @@ fn texel_texture(
         descriptor.height,
         pitch | u32::from(shape.0) << 24 | u32::from(shape.1) << 25,
     );
+    // What is owed to it reaches memory first, so the cache sees it written (D986).
+    memory.settle(descriptor.base, span);
     if let Some(cached) = kept_texels(texels, key, span as u64) {
         return linear_bind(
             block_bind(
@@ -11101,7 +11508,9 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         | TexelFormat::Rg16Float
         | TexelFormat::Rg8Unorm
         | TexelFormat::Rg32Uint
-        | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
+        | TexelFormat::R32Float
+        // Blocks only a dispatch binds; a draw's block texture has encodings of its own.
+        | TexelFormat::Blocks { .. } => crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -11488,8 +11897,10 @@ fn swizzle_texels_by_channel(
         .map(|&texel| {
             let channels = match format {
                 // A draw's texture is never a sixteen- or eight-byte one: `sampled_format` reads no
-                // such format, so its arm is the four-byte one's.
+                // such format, so its arm is the four-byte one's; nor blocks, which only a dispatch
+                // binds.
                 TexelFormat::Rgba8
+                | TexelFormat::Blocks { .. }
                 | TexelFormat::Rgba8Uint
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::Rgba16Float
@@ -11726,6 +12137,8 @@ fn kept_chain(
             .hash(&mut hasher);
         hasher.finish()
     };
+    // What is owed to the chain reaches memory first, so the kept levels see it written (D986).
+    memory.settle(span.0, usize::try_from(span.1).unwrap_or(usize::MAX));
     let mut kept = kept_levels()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11893,6 +12306,8 @@ fn read_tiled_base(
         tag,
     } = base_read(&surface, format, cleared);
     let key = (surface.base, width, height, tag);
+    // What is owed to it reaches memory first, so the cache sees it written (D986).
+    memory.settle(surface.base, span);
     if let Some(cached) = texels.get(&key)
         && cached
             .since
@@ -13242,6 +13657,7 @@ mod tests {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             }],
         )]);
         let mut commands = vec![
@@ -13330,6 +13746,7 @@ mod tests {
                     buffer_offset: None,
                     layered: false,
                     computed: None,
+                    sampler_words: None,
                 }],
             )]);
             let mut commands = vec![
@@ -13543,6 +13960,7 @@ mod tests {
                     buffer_offset: None,
                     layered: false,
                     computed: None,
+                    sampler_words: None,
                 }],
             )]);
             let mut commands = vec![
@@ -13623,6 +14041,7 @@ mod tests {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             }],
         )]);
         let mut commands = vec![
@@ -13713,6 +14132,7 @@ mod tests {
                     buffer_offset: None,
                     layered: false,
                     computed: None,
+                    sampler_words: None,
                 }],
             )]);
             let mut commands = vec![
@@ -14070,6 +14490,7 @@ mod tests {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         };
         let bound = user_data_texture(&source, 8, &user, &Memory, &mut super::TexelCache::new());
         let Some(RenderCommand::BindDepthTexture {
@@ -14177,6 +14598,7 @@ mod tests {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             }],
         )]);
         let draw = RenderCommand::Draw {
@@ -14266,6 +14688,7 @@ mod tests {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         };
         let bound = user_data_texture(
             &source,
@@ -14629,6 +15052,80 @@ mod tests {
             expected.extend(std::iter::repeat_n(0x1111_1111 * (level + 1), side * side));
         }
         assert_eq!(texels[..], expected[..], "each level after the one before");
+    }
+
+    /// A tiled texture is settled before it is read or answered from the cache, every time it is
+    /// bound: a level a draw left on the device, or a copy deferred onto its pages, reaches memory
+    /// first, and the host sees it written (D986). Grand Theft Auto V's reflection chain is drawn a
+    /// level at a time, each level sampling the one before; answered from the cache, each level
+    /// read the zeros the chain held before any was drawn, and its last levels the garbage the tail
+    /// held, which the lighting turned into NaN.
+    #[test]
+    fn a_tiled_texture_is_settled_before_it_is_read_or_kept() {
+        use super::{RenderCommand, texture_from_words};
+        use std::cell::RefCell;
+        struct Memory {
+            bytes: Vec<u8>,
+            seen: RefCell<Vec<(&'static str, u64, usize)>>,
+        }
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                self.seen.borrow_mut().push(("read", address, length));
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.bytes.get(start..start.checked_add(length)?)
+            }
+            fn settle(&self, address: u64, length: usize) {
+                self.seen.borrow_mut().push(("settle", address, length));
+            }
+        }
+        let memory = Memory {
+            bytes: vec![0x5A; 1 << 20],
+            seen: RefCell::new(Vec::new()),
+        };
+        let (width, height) = (256u32, 128u32);
+        // GTA V's reflection chain's view of its first level, shrunk: 8_8_8_8_UNORM in
+        // `64KB_R_X`, eight levels, base and last level zero.
+        let words = [
+            0x100,
+            (56 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            0x91b0_03ac,
+            0,
+            0x0070_0070,
+            0,
+            0,
+        ];
+        let mut cache = super::TexelCache::new();
+        for bind in 0..2 {
+            memory.seen.borrow_mut().clear();
+            let bound = texture_from_words(words, 0, &memory, &mut cache).ok();
+            assert!(
+                matches!(bound, Some(RenderCommand::BindTexture { width: 256, .. })),
+                "bound: {bound:?}"
+            );
+            let seen = memory.seen.borrow();
+            let settled: Vec<(u64, usize)> = seen
+                .iter()
+                .filter(|(kind, ..)| *kind == "settle")
+                .map(|&(_, at, length)| (at, length))
+                .collect();
+            assert!(!settled.is_empty(), "bind {bind} settled nothing: {seen:?}");
+            // Every texel read lies in a span settled before it.
+            for (at, &(kind, address, length)) in seen.iter().enumerate() {
+                if kind != "read" || length < 0x1000 {
+                    continue;
+                }
+                let covered = seen[..at].iter().any(|&(kind, from, span)| {
+                    kind == "settle"
+                        && from <= address
+                        && address + length as u64 <= from + span as u64
+                });
+                assert!(
+                    covered,
+                    "bind {bind} read {address:#x}+{length:#x} unsettled: {seen:?}"
+                );
+            }
+        }
     }
 
     /// A 32-bpp texture in `4KB_S` binds, each texel read from where that swizzle puts it: the
@@ -15256,6 +15753,7 @@ mod tests {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         };
         assert!(super::shaped_for(command, &source(true)));
         assert!(
@@ -15882,6 +16380,7 @@ mod tests {
                     buffer_offset: None,
                     layered: false,
                     computed: None,
+                    sampler_words: None,
                 }],
             )]);
             let mut commands = vec![
@@ -16124,6 +16623,130 @@ mod tests {
         assert!(
             !aliased.unread[0],
             "the buffer is read before the run, since a slot loads from it"
+        );
+    }
+
+    /// An indirect dispatch's state is recorded beside the direct ones', one group standing in for
+    /// the grid it reads from memory (D989), so what it writes is bounded where the grid does not
+    /// decide it. Before, nothing it wrote was queued at all.
+    #[test]
+    fn an_indirect_dispatch_s_state_is_recorded() {
+        use crate::packet::build;
+        use crate::registers::RegisterWrite;
+        let write = |register: u32, value: u32| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        // COMPUTE_PGM_HI and LO, RSRC1, RSRC2 (twelve user words, the x group id), and
+        // NUM_THREAD_X to Z: radeonsi's compute clear.
+        let mut writes = vec![
+            write(0xB834 / 4, 0),
+            write(0xB830 / 4, 0x0401_a000),
+            write(0xB848 / 4, 0x002c_0001),
+            write(0xB84C / 4, 0x98),
+            write(0xB81C / 4, 0x40),
+            write(0xB820 / 4, 1),
+            write(0xB824 / 4, 1),
+        ];
+        writes.extend((0..12).map(|i| write(0xB900 / 4 + i, i)));
+        let words = [
+            &build::dispatch_indirect_args(0x1000, 0)[..],
+            &build::dispatch_direct(2, 1, 1)[..],
+        ]
+        .concat();
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let walked = crate::packet::walk(&stream);
+        let mut submission = super::Submission::default();
+        super::record_compute_work(&mut submission, &writes, (&walked, &stream), &[]);
+        assert_eq!(submission.dispatch_states.len(), 1);
+        let indirect = submission
+            .indirect_dispatch_states
+            .first()
+            .cloned()
+            .flatten()
+            .expect("the indirect dispatch's state");
+        assert_eq!(
+            (indirect.program, indirect.groups),
+            (0x4_01a0_0000, [1, 1, 1])
+        );
+    }
+
+    /// A device-addressed dispatch's queued writes are the buffers its stores go through where the
+    /// host resolves them, as its preparation binds them (D964, D989): a load through a descriptor
+    /// the program computes reaches guest memory by device address and writes nothing, and a store
+    /// through one leaves the writes unbounded.
+    #[test]
+    fn a_device_addressed_dispatch_writes_the_buffers_it_resolves() {
+        use super::Pipeline;
+        use crate::dispatch::DispatchState;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        const PROGRAM: u64 = 0x1_0000;
+        const BUFFER: u64 = 0x4_1260_0000;
+        // v_readfirstlane_b32 s4, v0: s[4:7] is a descriptor the program computes.
+        const COMPUTED: u32 = 0x7e08_0500;
+        let program = |load: u32, store: u32| {
+            // buffer_load_dword v1, v0, s[load], 0 offen; s_waitcnt;
+            // buffer_store_dword v1, v0, s[store], 0 offen; s_endpgm.
+            let mut bytes = [
+                COMPUTED,
+                0xe030_1000,
+                0x8000_0100 | load << 16,
+                0xbf8c_3f70,
+                0xe070_1000,
+                0x8000_0100 | store << 16,
+                0xbf81_0000,
+                0xbf9f_0000,
+            ]
+            .map(u32::to_le_bytes)
+            .concat();
+            bytes.resize(super::MAX_SHADER_BYTES, 0);
+            CountedMemory(
+                vec![(PROGRAM, bytes), (BUFFER, vec![0; 0x400])],
+                std::cell::Cell::new(0),
+            )
+        };
+        let mut user_data = vec![Some(0); 16];
+        for (at, word) in [BUFFER as u32, (BUFFER >> 32) as u32, 256, 0x3101_6fac]
+            .into_iter()
+            .enumerate()
+        {
+            user_data[4 + at] = Some(word);
+            user_data[12 + at] = Some(word);
+        }
+        let state = DispatchState {
+            program: PROGRAM,
+            user_data,
+            inputs: ComputeInputs {
+                thread_id_components: 1,
+                threads: [64, 1, 1],
+                device_addressed: true,
+                ..ComputeInputs::default()
+            },
+            width: Width::Wave64,
+            dx10_clamp: None,
+            local_words: None,
+            groups: [1, 1, 1],
+            vertex_streamout: false,
+        };
+        let pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        // Loaded through the computed s[4:7], stored through s[12:15] from the user data.
+        assert_eq!(
+            pipeline.dispatch_write_spans(&state, &program(1, 3)),
+            Some(vec![(BUFFER, 256)])
+        );
+        // Stored through the computed s[4:7].
+        assert_eq!(pipeline.dispatch_write_spans(&state, &program(3, 1)), None);
+        // The buffer a descriptor names is the same whatever the grid, so an indirect dispatch of
+        // the program writes it too (D989).
+        assert_eq!(
+            pipeline.indirect_dispatch_write_spans(&state, &program(1, 3)),
+            Some(vec![(BUFFER, 256)])
         );
     }
 
@@ -16850,6 +17473,75 @@ mod tests {
         );
     }
 
+    /// A pixel shader's format loads convert by its draw's descriptors as a primitive shader's do
+    /// (D738): traced with the pixel stage's own layout, resolved from its own words, and its
+    /// module, which needs a draw for no particular draw, translated for them. Grand Theft Auto V's
+    /// pixel shader at `0x74005b708000` was refused for want of them.
+    #[test]
+    fn a_pixel_shader_s_format_loads_take_its_draw_s_formats() {
+        use super::{ForDraw, Pipeline, PrepareFailure, ShaderStage, USER_DATA_WORDS, WaveWidths};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        // buffer_load_format_xyzw v0, v5, s[4:7], 0 idxen; s_endpgm.
+        let program: Vec<u8> = [0xe00c_2000_u32, 0x8001_0005, 0xbf81_0000]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        pipeline.feeds_user_data = true;
+        // The primitive stage's layout starts past s4; the pixel stage's holds it.
+        pipeline.user_data[0].first_register = 8;
+        pipeline.user_data[0].count = 20;
+        pipeline.user_data[1].count = 16;
+        // `32_32_32_32_FLOAT`, the identity selects.
+        let word = 0x3100_0fac | 77 << 12;
+        let mut words = [0u32; USER_DATA_WORDS];
+        words[7] = word;
+        let address = 0x50_0000;
+        pipeline.decoded.insert(address, program.clone());
+        let formats = pipeline.stage_buffer_formats(
+            (address, ShaderStage::Fragment),
+            (&words, &[]),
+            &Nothing,
+        );
+        assert_eq!(
+            formats.and_then(|f| f.get(0)),
+            Some(word),
+            "s7, its own word"
+        );
+        let prepare = |pipeline: &mut Pipeline, for_draw| {
+            pipeline.prepare_decoded(
+                address,
+                ShaderStage::Fragment,
+                (None, WaveWidths::default(), for_draw),
+                (&program, None),
+            )
+        };
+        assert!(
+            matches!(
+                prepare(&mut pipeline, ForDraw::default()),
+                Err(PrepareFailure::NeedsGeometry(_))
+            ),
+            "for no particular draw it needs one"
+        );
+        let for_draw = ForDraw {
+            buffer_formats: formats,
+            ..ForDraw::default()
+        };
+        if let Err(failure) = prepare(&mut pipeline, for_draw) {
+            panic!("translated for the draw's formats: {}", failure.reason());
+        }
+    }
+
     /// Each draw's pixel inputs are routed by the `SPI_PS_INPUT_CNTL` in force at it, not the
     /// stream's last: GTA V's title draws its logo with attribute 0 read from output 1 and then its
     /// text with another routing, and the logo's pixel shader, translated with the text's, read its
@@ -17227,6 +17919,7 @@ mod tests {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         };
         let cube = TextureSource { cube: true, ..flat };
         let compared = TextureSource {

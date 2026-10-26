@@ -124,7 +124,11 @@ pub fn widening<T>(run: impl FnOnce() -> T) -> T {
 }
 
 /// Whether the device samples `format` from an optimally tiled image, asked once a format.
-fn samples(instance: &ash::Instance, physical: vk::PhysicalDevice, format: vk::Format) -> bool {
+pub(crate) fn samples(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    format: vk::Format,
+) -> bool {
     static ASKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i32, bool>>> =
         std::sync::OnceLock::new();
     let mut asked = ASKED

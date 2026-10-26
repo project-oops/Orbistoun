@@ -5,7 +5,9 @@
 //! The capture keeps each image's texels but not the descriptor it was bound from, so a descriptor
 //! is matched to a captured image by its extent, its layers, and its format where several share an
 //! extent. A texel is answered as the image instruction returns it: normalised and float channels
-//! as float bits, integer channels as integers, ordered by the descriptor's destination selects.
+//! as float bits, integer channels as integers, ordered by the descriptor's destination selects -
+//! which an `8_8_8_8_UNORM` image's capture already holds its texels in, where they reorder its
+//! channels.
 //! A sample is a point or bilinear filter of the first level, which a device's own filter may round
 //! differently in its last bits.
 
@@ -211,10 +213,12 @@ impl CapturedImage<'_> {
                 unorm(texel[1] & 0xffff, 0xffff),
                 unorm(texel[1] >> 16, 0xffff),
             ],
+            // Blocks are not texels: a block image is not read texel by texel here (D990).
             DispatchFormat::R16Float
             | DispatchFormat::Rg16Float
             | DispatchFormat::Rgba16Float
-            | DispatchFormat::Float11_11_10 => return None,
+            | DispatchFormat::Float11_11_10
+            | DispatchFormat::Blocks { .. } => return None,
         })
     }
 }
@@ -282,14 +286,26 @@ const fn is_integer(format: DispatchFormat) -> bool {
 }
 
 /// `texel` ordered by the destination selects in `word3` (bits 11:0, three bits each for x, y, z
-/// and w): zero, one - an integer one for an integer format - or one of its channels.
+/// and w): zero, one - an integer one for an integer format - or one of its channels. An
+/// `8_8_8_8_UNORM` image whose selects reorder its four channels is captured with its texels
+/// already in the order the shader reads them, as the binding hands them to the device
+/// (`channel_order` in the pipeline), so it is answered as it is.
 fn selected(texel: [u32; 4], word3: u32, format: DispatchFormat) -> [u32; 4] {
+    let selects: [u32; 4] = std::array::from_fn(|component| word3 >> (3 * component) & 7);
+    let reordering = selects.iter().all(|select| *select >= SELECT_X)
+        && selects
+            .iter()
+            .fold(0_u32, |seen, select| seen | 1 << (select - SELECT_X))
+            == 0xf;
+    if format == DispatchFormat::Rgba8 && reordering {
+        return texel;
+    }
     let one = if is_integer(format) {
         1
     } else {
         1.0_f32.to_bits()
     };
-    std::array::from_fn(|component| match word3 >> (3 * component) & 7 {
+    std::array::from_fn(|component| match selects[component] {
         SELECT_ONE => one,
         select @ SELECT_X.. => texel[(select - SELECT_X) as usize],
         _ => 0,
@@ -307,4 +323,89 @@ fn wrapped(at: i64, size: u32, wrap: TextureWrap) -> Option<u32> {
         }
     };
     u32::try_from(at).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{selected, words_per_texel};
+    use crate::capture::{CapturedImage, ImageRole};
+    use crate::compute_images::DispatchFormat;
+    use std::borrow::Cow;
+
+    fn image(format: DispatchFormat, texels: Vec<u32>, width: u32) -> CapturedImage<'static> {
+        let height = u32::try_from(texels.len() / words_per_texel(format)).expect("texels") / width;
+        CapturedImage {
+            role: ImageRole::Fetched,
+            texels: Cow::Owned(texels),
+            format,
+            width,
+            height,
+            depth: None,
+            layers: None,
+            sampling: None,
+            cube: false,
+        }
+    }
+
+    /// A texel of each kind of format as a shader receives it: normalised channels as floats over
+    /// their range, a missing alpha one, integers as they are.
+    #[test]
+    fn a_texel_reads_as_a_shader_receives_it() {
+        let rgba8 = image(DispatchFormat::Rgba8, vec![0x00ff_8000, 0xff00_00ff], 2);
+        assert_eq!(
+            rgba8.components([1, 0, 0]),
+            Some([1.0_f32, 0.0, 0.0, 1.0].map(f32::to_bits))
+        );
+        assert_eq!(
+            rgba8
+                .components([0, 0, 0])
+                .map(|texel| texel.map(f32::from_bits)),
+            Some([0.0, 128.0 / 255.0, 1.0, 0.0])
+        );
+        let r32 = image(DispatchFormat::R32Uint, vec![9], 1);
+        assert_eq!(r32.components([0, 0, 0]), Some([9, 0, 0, 1]));
+        assert_eq!(r32.components([1, 0, 0]), None, "outside the image");
+    }
+
+    /// The selects order a texel's channels, and supply zero and one; an `8_8_8_8_UNORM` image whose
+    /// selects only reorder its channels is captured already in the shader's order, and is answered
+    /// as it is.
+    #[test]
+    fn selects_order_a_texel_unless_its_capture_already_is() {
+        let texel = [10, 20, 30, 40];
+        // X, Y, Z from R, G, B and W one: `4 | 5 << 3 | 6 << 6 | 1 << 9`.
+        let rgb_one = 4 | 5 << 3 | 6 << 6 | 1 << 9;
+        assert_eq!(
+            selected(texel, rgb_one, DispatchFormat::Rgba8),
+            [10, 20, 30, 1.0_f32.to_bits()]
+        );
+        assert_eq!(
+            selected(texel, rgb_one, DispatchFormat::R32Uint),
+            [10, 20, 30, 1]
+        );
+        // B, G, R, A: a reordering, which the capture already holds.
+        let bgra = 6 | 5 << 3 | 4 << 6 | 7 << 9;
+        assert_eq!(selected(texel, bgra, DispatchFormat::Rgba8), texel);
+    }
+
+    /// A store's channels land in the word as a device converts them: a normalised channel rounded
+    /// to its nearest step and clamped, the others left as they were.
+    #[test]
+    fn a_stored_channel_converts_into_the_texel_word() {
+        let r8 = image(DispatchFormat::R8, vec![0x77], 1);
+        assert_eq!(
+            r8.stored_word(&[(0, Some(0.5_f32.to_bits()))], 0x77),
+            Some(128)
+        );
+        assert_eq!(
+            r8.stored_word(&[(0, Some(2.0_f32.to_bits()))], 0),
+            Some(255)
+        );
+        assert_eq!(r8.stored_word(&[(0, None)], 0), None);
+        let rgba8 = image(DispatchFormat::Rgba8, vec![0], 1);
+        assert_eq!(
+            rgba8.stored_word(&[(1, Some(1.0_f32.to_bits()))], 0x1122_3344),
+            Some(0x1122_ff44)
+        );
+    }
 }

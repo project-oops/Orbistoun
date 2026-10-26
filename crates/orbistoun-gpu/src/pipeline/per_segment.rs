@@ -144,6 +144,7 @@ mod tests {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             }],
         );
         let (texels, width, height) = (0x1_0000_u64, 8u32, 4u32);

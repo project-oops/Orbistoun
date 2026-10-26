@@ -1238,6 +1238,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             },
             TextureSource {
                 slot: 1,
@@ -1256,6 +1257,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 buffer_offset: None,
                 layered: false,
                 computed: None,
+                sampler_words: None,
             },
         ]
     );
@@ -1860,6 +1862,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         }]
     );
 }

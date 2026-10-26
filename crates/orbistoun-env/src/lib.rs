@@ -231,7 +231,7 @@ pub const FRAME_EVERY: Var = Var {
 pub const FRAME_AT: Var = Var {
     name: "ORBISTOUN_FRAME_AT",
     kind: Kind::Diagnostic,
-    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba, with the submissions before each as flip-<n>-submission-<k>.txt; busy:N keeps the flip after the first frame of at least N draws",
+    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba, with the submissions before each as flip-<n>-submission-<k>.txt; busy:N keeps the flip after the first frame of at least N draws, and busy-every:K every Kth frame from it",
     example: "1,30,60",
     effect: Effect::Observes,
     read_by: "orbistoun-worker",
@@ -247,6 +247,22 @@ pub const FRAME_DIR: Var = Var {
     kind: Kind::Diagnostic,
     summary: "a directory the frames ORBISTOUN_FRAME_EVERY and ORBISTOUN_FRAME_AT keep are written to, instead of the traces directory",
     example: "compare-run",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Dump every pass of the frames `ORBISTOUN_FRAME_AT` names, one by one (D986).
+///
+/// Each compute dispatch, and each run of draws into one set of colour targets, writes the images
+/// it wrote after it ran - a dispatch's stored images, the draws' colour targets read back - into
+/// `passes-<flip>/` where the frames go, listed by pass with its kind, program and inputs, a refused
+/// pass among them. `orbistoun-cli passes` turns the dump into pictures and flags the passes whose
+/// output is implausible.
+pub const PASS_DUMP: Var = Var {
+    name: "ORBISTOUN_PASS_DUMP",
+    kind: Kind::Diagnostic,
+    summary: "1: every dispatch and run of draws of each frame ORBISTOUN_FRAME_AT names writes the images it wrote to passes-<flip>/ in ORBISTOUN_FRAME_DIR, listed in passes.tsv and outputs.tsv, for orbistoun-cli passes",
+    example: "1",
     effect: Effect::Observes,
     read_by: "orbistoun-worker",
 };
@@ -1005,6 +1021,7 @@ pub const REGISTRY: &[Var] = &[
     FRAME_EVERY,
     FRAME_AT,
     FRAME_DIR,
+    PASS_DUMP,
     WATCH_TEXTURE,
     DUMP_IMAGE,
     CAPTURE_DISPATCH,
@@ -1114,6 +1131,7 @@ mod tests {
         super::FRAME_EVERY,
         super::FRAME_AT,
         super::FRAME_DIR,
+        super::PASS_DUMP,
         super::WATCH_TEXTURE,
         super::DUMP_IMAGE,
         super::CAPTURE_DISPATCH,

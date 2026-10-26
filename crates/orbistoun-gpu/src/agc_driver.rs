@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 mod attachments;
 mod census;
+mod kept_images;
+pub use kept_images::{KeptImageReader, install_kept_image_reader};
 mod last_bound;
 mod stall;
 
@@ -964,6 +966,7 @@ impl GuestCp<'_> {
         }
         let drawn = self.draw_into_target(submission);
         if drawn.is_ok() {
+            crate::pass_dump::draws_ran(submission);
             note_delivered(submission);
             if stores {
                 self.write_back_pixel_stores()?;
@@ -1559,6 +1562,31 @@ pub type DispatchDone = (
     Vec<crate::dispatch::BufferAfter>,
 );
 
+/// Runs `prepared` through `execute` over the window's words and buffers `before` it, and tells the
+/// images the device keeps whether the dispatch that bound them ran (D990).
+fn execute_noting_kept(
+    execute: DispatchExecutor,
+    prepared: &crate::pipeline::PreparedDispatch,
+    (before, buffers_before): (&[u32], &[crate::dispatch::BufferBefore]),
+) -> Result<DispatchDone, String> {
+    let executed = crate::perf::span(crate::perf::Span::DispatchExecute, || {
+        execute(
+            (prepared.program, &prepared.module, prepared.module_hash),
+            before,
+            (&prepared.push, prepared.groups),
+            (&prepared.images, buffers_before),
+        )
+    });
+    crate::resident::with_registry(|registry| {
+        registry.ran(
+            &crate::resident::HostWatch,
+            &prepared.images.resident,
+            executed.is_ok(),
+        );
+    });
+    executed
+}
+
 fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
     static EXECUTOR: OnceLock<DispatchExecutor> = OnceLock::new();
     &EXECUTOR
@@ -1620,6 +1648,7 @@ pub fn passing_refused() -> bool {
 /// (D896, D948), so the run's report counts it beside those refused while it waited.
 pub fn note_draws_passed_over(why: &str) {
     note_draw_refusal(why.to_owned());
+    crate::pass_dump::draws_refused(why);
     let _ = pass_over("draws", why);
 }
 
@@ -1814,7 +1843,18 @@ fn stored_image_writes(
         ));
     }
     let mut writes = GuestWrites::default();
-    for (image, texels) in images.stored.iter().zip(stored) {
+    for (n, (image, texels)) in images.stored.iter().zip(stored).enumerate() {
+        // Kept on the device, its write-back deferred: nothing was read back to write (D990).
+        if images
+            .resident
+            .stored
+            .get(n)
+            .copied()
+            .flatten()
+            .is_some_and(|used| used.deferred)
+        {
+            continue;
+        }
         stored_image_into(&mut writes, image, texels)?;
     }
     Ok(writes)
@@ -2824,6 +2864,8 @@ impl GuestCp<'_> {
             .ok_or("no device is installed to run it")?;
         let mut prepared = prepare(self)?;
         prepared = self.settled_for(prepare, prepared)?;
+        // What a refusal from here on leaves unwritten, for a frame's pass dump (D986).
+        crate::pass_dump::dispatch_prepared(&prepared.images);
         let ((base, before), buffers_before) =
             span(Span::DispatchRead, || self.read_dispatch(&prepared))?;
         // For a backend's diagnostics, which see only the words.
@@ -2833,37 +2875,33 @@ impl GuestCp<'_> {
             &prepared.buffers,
         );
         let run = |prepared: &crate::pipeline::PreparedDispatch| {
-            let executed = span(Span::DispatchExecute, || {
-                execute(
-                    (prepared.program, &prepared.module, prepared.module_hash),
-                    &before,
-                    (&prepared.push, prepared.groups),
-                    (&prepared.images, &buffers_before),
-                )
-            });
-            // The images the device keeps learn whether the dispatch that bound them ran (D985).
-            crate::resident::with_registry(|registry| {
-                registry.ran(
-                    &crate::resident::HostWatch,
-                    &prepared.images.resident,
-                    executed.is_ok(),
-                );
-            });
-            executed
+            execute_noting_kept(*execute, prepared, (&before, &buffers_before))
         };
+        // What it stores to an image the device keeps stays there, its write-back deferred, where
+        // it can wait (D990).
+        kept_images::defer_where_possible(&mut prepared.images, prepared.device_addressed);
         let executed = match run(&prepared) {
             // The device no longer keeps an image it was asked to take: every image is let go and
-            // the dispatch prepared again, its images read afresh (D985).
+            // the dispatch prepared again, its images read afresh (D990).
             Err(why) if why == crate::resident::NOT_RESIDENT => {
                 span(Span::ResidentMissing, || ());
                 crate::resident::with_registry(crate::resident::Registry::forget_all);
                 prepared = prepare(self)?;
+                kept_images::defer_where_possible(&mut prepared.images, prepared.device_addressed);
                 run(&prepared)
             }
             executed => executed,
         };
         let (after, exactness, stored, buffers_after) = executed?;
         let _written_back = crate::perf::SpanGuard::start(Span::DispatchWriteBack);
+        // Each image whose write-back is deferred is left on the device over its guarded pages, at
+        // once: the device holds what it stored whatever is decided of the rest, so a dispatch
+        // refused below has its kept images' stores written back all the same (D990).
+        if !kept_images::defer_stored(&prepared.images) {
+            return Err(
+                "an image it stored to could not be written back from the device".to_owned(),
+            );
+        }
         // What a device-addressed dispatch stored is in guest memory already: every cache of it
         // learns so before anything else is decided, whatever the dispatch is then found to be.
         let exactness = if prepared.device_addressed {
@@ -2876,6 +2914,13 @@ impl GuestCp<'_> {
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
         }
+        // The images it stored, as the device answered them, for a frame's pass dump (D986).
+        crate::pass_dump::dispatch_ran(
+            (prepared.program, prepared.groups),
+            &prepared.images,
+            &stored,
+        );
+        crate::pass_dump::dispatch_done();
         let working_out = crate::perf::SpanGuard::start(Span::WriteBackChanges);
         let mut writes = GuestWrites::spare();
         if let Some(base) = base {
@@ -2905,7 +2950,7 @@ impl GuestCp<'_> {
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
-        // Guest memory now holds what the device keeps of each image the dispatch stored to (D985).
+        // Guest memory now holds what the device keeps of each image the dispatch stored to (D990).
         crate::resident::with_registry(|registry| {
             registry.written_back(&crate::resident::HostWatch, &prepared.images.resident);
         });
@@ -4714,6 +4759,14 @@ enum Held {
         /// As [`Held::Frame`]'s.
         memory_then: Contents,
     },
+    /// An image a dispatch stored to, as the device keeps it under `key` (D990): read off the
+    /// device and tiled over memory as it is when carried out.
+    DispatchImage {
+        key: u64,
+        generation: u64,
+        surface: crate::pipeline::DispatchSurface,
+        order: Option<[u8; 4]>,
+    },
 }
 
 impl Deferred {
@@ -4721,7 +4774,7 @@ impl Deferred {
     const fn snapshot(&self) -> Option<u64> {
         match self.held {
             Held::Frame { snapshot, .. } => Some(snapshot),
-            Held::Fill(_) | Held::Attachment { .. } => None,
+            Held::Fill(_) | Held::Attachment { .. } | Held::DispatchImage { .. } => None,
         }
     }
 
@@ -4814,6 +4867,12 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     }
     let (snapshot, target, swap, memory_then) = match &copy.held {
         Held::Fill(pattern) => return fill_guest(copy.destination, copy.length, *pattern),
+        Held::DispatchImage {
+            key,
+            generation,
+            surface,
+            order,
+        } => return kept_images::write_back(((*key, *generation), (*surface, *order))),
         Held::Attachment {
             id,
             target,
@@ -5448,6 +5507,7 @@ impl cp::CpMemory for GuestCp<'_> {
                         "the draws at bytes {:#x}..{:#x}: {why}",
                         segment.first, segment.end
                     ));
+                    crate::pass_dump::draws_refused(&why);
                     pass_over("draws", &why)
                 }
             }
@@ -5507,6 +5567,7 @@ impl cp::CpMemory for GuestCp<'_> {
                 let passed = pass_over("compute dispatch", &why);
                 let program = self.dispatch_program(dispatch.stream, dispatch.offset);
                 say_refused_dispatch((program, dispatch.offset, dispatch.groups), &why, passed);
+                crate::pass_dump::dispatch_refused(program, dispatch.groups, &why);
                 passed
             }
         }
@@ -6008,6 +6069,16 @@ impl GuestMemory for SettledReads<'_> {
             carry_out_overlapping(address, span);
             self.0.read(address, length)
         })
+    }
+
+    /// What [`Self::read`] settles before it reads, and nothing more (D986).
+    fn settle(&self, address: u64, length: usize) {
+        let span = length as u64;
+        command_processor::settle_over(address, span);
+        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, span)) {
+            let _ = write_back_at_this_flip();
+        }
+        carry_out_overlapping(address, span);
     }
 }
 
@@ -6515,8 +6586,9 @@ type QueuedWrites = Option<Vec<(u64, u64)>>;
 
 /// [`QueuedWrites`] for `submission`: its command processor's own packets' writes
 /// ([`cp::written_spans`]) and each dispatch's, from its bindings
-/// ([`Pipeline::dispatch_write_spans`]). Not bounded when a dispatch's state or bindings are not
-/// known before it runs, or a draw streams out.
+/// ([`Pipeline::dispatch_write_spans`]), an indirect one's too, whatever its grid
+/// ([`Pipeline::indirect_dispatch_write_spans`], D989). Not bounded when a dispatch's state or
+/// bindings are not known before it runs, or a draw streams out.
 fn queued_writes(
     pipeline: &Pipeline,
     bytes: &[u8],
@@ -6529,6 +6601,9 @@ fn queued_writes(
     let mut spans = cp::written_spans(bytes);
     for state in &submission.dispatch_states {
         spans.extend(pipeline.dispatch_write_spans(state.as_ref()?, reads)?);
+    }
+    for state in &submission.indirect_dispatch_states {
+        spans.extend(pipeline.indirect_dispatch_write_spans(state.as_ref()?, reads)?);
     }
     Some(spans)
 }
@@ -9813,6 +9888,57 @@ mod tests {
             memory,
             zerocopy::IntoBytes::as_bytes(expected.as_slice()),
             "memory holds the frame before the read returns"
+        );
+    }
+
+    /// Settling a range does what a read of it settles, and reads nothing: a frame pending over it
+    /// is written back, one pending elsewhere is left. What a cache asks before it answers without
+    /// reading (D986).
+    #[test]
+    fn settling_a_range_writes_back_a_frame_pending_over_it() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestMemory, MappedRegions, SettledReads, Written,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        allow_writes_to(base, span as u64);
+        fake::install();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            target,
+            contents: super::Contents::kept(memory.to_vec()),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        let before = memory.to_vec();
+        let regions = MappedRegions::current();
+        let reads = SettledReads(&regions);
+
+        reads.settle(base + span as u64, 4);
+        assert!(
+            super::pending_target().is_some(),
+            "settling elsewhere leaves it"
+        );
+
+        reads.settle(base, span);
+        assert!(super::pending_target().is_none(), "written back");
+        let mut expected = super::words_of(&before);
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame once it is settled"
         );
     }
 

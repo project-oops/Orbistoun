@@ -1684,3 +1684,115 @@ fn lanes_storing_one_byte_leave_one_lane_s_value() {
         "released, its mapping dropped first"
     );
 }
+
+/// 64-bit buffer atomics through a descriptor the program reads from an address it computes, by
+/// device address (D955's forms): each lane exchanges its own pair, answering what the pair held,
+/// and every lane ors `1 << (lane % 32)` and `lane / 32` into one shared pair, which ends all ones
+/// below and one above. The descriptor at the block `B` in user data words 0 and 1 names
+/// `B + 0x800`, its records `0x400` bytes, untyped.
+///
+/// ```text
+/// v_mov_b32 v1, s0 ; v_readfirstlane_b32 s10, v1 ; s_mov_b32 s11, s1   B, which the host cannot know
+/// s_load_dwordx4 s[4:7], s[10:11], 0x0                                  the descriptor at B
+/// v_lshlrev_b32 v8, 3, v0                                               the lane's pair, lane * 8
+/// v_mov_b32 v2, v0 ; v_add_nc_u32 v3, 0x1000, v0
+/// buffer_atomic_swap_x2 v[2:3], v8, s[4:7], 0 offen glc
+/// v_mov_b32 v9, 1 ; v_lshlrev_b32 v6, v0, v9 ; v_lshrrev_b32 v7, 5, v0
+/// buffer_atomic_or_x2 v[6:7], off, s[4:7], 0 offset:0x200
+/// v_add_nc_u32 v10, 0xc00, v8
+/// global_store_dwordx2 v10, v[2:3], s[0:1]                              what the pair held
+/// s_endpgm
+/// ```
+#[test]
+fn sixty_four_bit_buffer_atomics_land_by_device_address() {
+    const GLC: u32 = 1 << 14;
+    const OFFEN: u32 = 1 << 12;
+    let mut program = vec![
+        v_mov_scalar(1, 0),
+        head("v_readfirstlane_b32") | (10 << 17) | (256 + 1),
+        head("s_mov_b32") | (11 << 16) | 1,
+    ];
+    program.extend([head("s_load_dwordx4") | (4 << 6) | (10 >> 1), 0xfa00_0000]);
+    // v_lshlrev_b32 v8, 3, v0: the inline constant 3 is source code 131.
+    program.push(head("v_lshlrev_b32_e32") | (8 << 17) | 0x83);
+    program.push(v_mov_scalar(2, 256));
+    program.extend([head("v_add_nc_u32_e32") | (3 << 17) | 255, 0x1000]);
+    // MUBUF: the address register, data, the descriptor's register over four, and the inline
+    // constant zero as the scalar offset.
+    program.extend([head("buffer_atomic_swap_x2") | OFFEN | GLC, 0x8001_0208]);
+    // v_mov_b32 v9, 1: the inline constant 1 is source code 129.
+    program.push(v_mov_scalar(9, 129));
+    program.push(head("v_lshlrev_b32_e32") | (6 << 17) | (9 << 9) | 256);
+    // v_lshrrev_b32 v7, 5, v0: the inline constant 5 is source code 133.
+    program.push(head("v_lshrrev_b32_e32") | (7 << 17) | 0x85);
+    program.extend([head("buffer_atomic_or_x2") | 0x200, 0x8001_0600]);
+    program.extend([
+        head("v_add_nc_u32_e32") | (10 << 17) | (8 << 9) | 255,
+        0xc00,
+    ]);
+    program.extend([
+        head("global_store_dwordx2") & !(3 << 14) | GLOBAL << 14,
+        0xa | (2 << 8),
+    ]);
+    program.push(head("s_endpgm"));
+    // Translated before any device is asked for: the translation holds everywhere.
+    let modules = [false, true].map(|per_lane| device_addressed(&program, per_lane));
+    let Some(_) = direct_or_skip("sixty_four_bit_buffer_atomics_land_by_device_address") else {
+        return;
+    };
+    let base = BASES.take();
+    let mut space = orbistoun_mem::AddressSpace::new();
+    space
+        .reserve(base, RESERVED, read_write())
+        .expect("reserve");
+    let block = base + 0x1000;
+    let data = block + 0x800;
+    let descriptor = format_descriptor((data, 0, 0x400), [4, 5, 6, 7], (20, 3), None);
+    for (model, module) in ["whole wave", "per lane"].into_iter().zip(&modules) {
+        for (word, value) in (0u64..).zip(descriptor) {
+            write(block + word * 4, value);
+        }
+        for lane in 0..64u32 {
+            let pair = data + u64::from(lane) * 8;
+            write(pair, 0x5555_0000 | lane);
+            write(pair + 4, 0xaaaa_0000 | lane);
+        }
+        write(data + 0x200, 0);
+        write(data + 0x204, 0);
+        let mut push = vec![0_u32; USER_DATA_BLOCK_WORDS as usize];
+        #[expect(clippy::cast_possible_truncation, reason = "the halves of an address")]
+        push[..2].copy_from_slice(&[block as u32, (block >> 32) as u32]);
+        let done = dispatch_guest(
+            module,
+            &[0; 64],
+            (&push, [1, 1, 1]),
+            &DispatchImages::default(),
+        )
+        .expect("dispatched");
+        for lane in 0..64u32 {
+            let pair = data + u64::from(lane) * 8;
+            assert_eq!(
+                [read(pair), read(pair + 4)],
+                [lane, 0x1000 + lane],
+                "{model}: lane {lane}'s pair exchanged"
+            );
+            let held = block + 0xc00 + u64::from(lane) * 8;
+            assert_eq!(
+                [read(held), read(held + 4)],
+                [0x5555_0000 | lane, 0xaaaa_0000 | lane],
+                "{model}: lane {lane} answered what its pair held"
+            );
+        }
+        assert_eq!(
+            [read(data + 0x200), read(data + 0x204)],
+            [0xffff_ffff, 1],
+            "{model}: every lane's or, both words"
+        );
+        assert!(!done.escaped, "{model}: every pair is mapped");
+    }
+    let _ = orbistoun_gpu::device_addressed::take_written();
+    assert!(
+        space.release(base, RESERVED),
+        "released, its mapping dropped first"
+    );
+}

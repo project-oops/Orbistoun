@@ -149,3 +149,83 @@ fn a_stored_view_of_several_levels_is_refused() {
     .expect_err("refused");
     assert!(refused.contains("more than one level"), "{refused}");
 }
+
+/// What a store to an image writes is bounded by its descriptor before the dispatch runs (D989):
+/// the level it views, where the descriptor places it - a 256 x 256 four-byte image in `64KB_R_X`
+/// is two blocks across and two down, 256 KiB from its base.
+#[test]
+fn a_stored_image_writes_the_level_its_descriptor_places() {
+    let words = descriptor(57, 256, 27, (1, 0), IDENTITY);
+    let source = TextureSource {
+        user_data: Some(0),
+        ..TextureSource::default()
+    };
+    let memory = Memory(vec![0; 0x4_0000]);
+    assert_eq!(
+        super::stored_image_spans(&state(words), &source, &memory),
+        Some(vec![(IMAGE_AT, 0x4_0000)])
+    );
+    // A descriptor that does not place the image bounds nothing.
+    let several = descriptor(57, 256, 27, (6, 5), IDENTITY);
+    assert_eq!(
+        super::stored_image_spans(&state(several), &source, &memory),
+        None
+    );
+}
+
+/// A queued dispatch storing to an image is bounded once a translation of its program has named
+/// where the image's descriptor comes from, kept by the program's address and bytes (D989): before
+/// its first preparation it is not bounded, after it the image's level is what it writes.
+#[test]
+fn a_queued_image_store_is_bounded_once_its_program_is_translated() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    const PROGRAM: u64 = 0x1_0000;
+    struct Regions(Vec<(u64, Vec<u8>)>);
+    impl super::GuestMemory for Regions {
+        fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+            self.0.iter().find_map(|(base, bytes)| {
+                let start = usize::try_from(address.checked_sub(*base)?).ok()?;
+                bytes.get(start..start.checked_add(length)?)
+            })
+        }
+    }
+    // image_store v[2:5], v[0:1], s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm; s_endpgm.
+    let mut program: Vec<u8> = [0xf020_1f08_u32, 0x0002_0200, 0xbf81_0000, 0xbf9f_0000]
+        .map(u32::to_le_bytes)
+        .concat();
+    program.resize(super::MAX_SHADER_BYTES, 0);
+    let memory = Regions(vec![(PROGRAM, program), (IMAGE_AT, vec![0; 0x4_0000])]);
+    let mut user_data = vec![Some(0); 8];
+    user_data.extend(descriptor(56, 256, 27, (1, 0), IDENTITY).map(Some));
+    let state = DispatchState {
+        program: PROGRAM,
+        user_data,
+        inputs: ComputeInputs {
+            thread_id_components: 2,
+            threads: [8, 8, 1],
+            ..ComputeInputs::default()
+        },
+        width: Width::Wave64,
+        dx10_clamp: None,
+        local_words: None,
+        groups: [1, 1, 1],
+        vertex_streamout: false,
+    };
+    let mut pipeline = super::Pipeline::new(Strategy::Predicated {
+        fidelity: Fidelity::Wavefront,
+        width: Width::Wave64,
+    })
+    .expect("a pipeline");
+    assert_eq!(
+        pipeline.dispatch_write_spans(&state, &memory),
+        None,
+        "no translation has named the image's source yet"
+    );
+    pipeline
+        .prepare_dispatch(&state, &memory)
+        .expect("the store prepares");
+    assert_eq!(
+        pipeline.dispatch_write_spans(&state, &memory),
+        Some(vec![(IMAGE_AT, 0x4_0000)])
+    );
+}

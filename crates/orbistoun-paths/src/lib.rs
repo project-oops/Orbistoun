@@ -323,9 +323,11 @@ impl Paths {
             .join("shader-translations.json")
     }
 
-    /// Where one title's compiled host pipelines are kept, beside its translations (D744).
-    pub fn title_pipelines_file(&self, title: &str) -> PathBuf {
-        self.shared.title_dir(title).join("host-pipelines.bin")
+    /// Where one title's compiled host pipelines are kept, beside its translations: a directory of
+    /// checked entries, one a pipeline, under a directory for the device and driver that made them
+    /// (D994). D744's single cache file, `host-pipelines.bin` beside it, is dropped unread.
+    pub fn title_pipelines_dir(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("host-pipelines")
     }
 
     /// Where one title's mods are kept, each a directory of its own (D836).
@@ -347,7 +349,7 @@ impl Paths {
             self.title_link_plan_file(title),
             self.title_frames_file(title),
             self.title_translations_file(title),
-            self.title_pipelines_file(title),
+            self.title_pipelines_dir(title),
             self.title_savestates_dir(title),
             self.title_overlay_dir(title),
             self.title_mods_dir(title),

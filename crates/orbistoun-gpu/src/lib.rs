@@ -26,6 +26,7 @@ pub mod global_pages;
 pub mod memory_watch;
 pub mod msaa;
 pub mod packet;
+pub mod pass_dump;
 pub mod perf;
 pub mod pipeline;
 mod pixel_inputs;

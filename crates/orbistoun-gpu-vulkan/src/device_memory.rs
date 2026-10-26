@@ -361,6 +361,34 @@ fn by_name() -> Vec<(&'static str, u64)> {
     held
 }
 
+/// The device-local memory - the card's own, not host memory it maps - this process uses, and
+/// the most the driver says it may use (`VK_EXT_memory_budget`: each device-local heap's usage and
+/// budget, summed), where the device was made with the budget. Host memory imported for the device
+/// to address directly (D964) lies in a host heap and is not counted. Takes no lock.
+#[must_use]
+pub fn local() -> Option<(u64, u64)> {
+    let (instance, physical) = BUDGET.get()?;
+    let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+    // SAFETY: the physical device is the never-destroyed session's, valid for the process, and
+    // the chained structure outlives the call.
+    unsafe {
+        instance.get_physical_device_memory_properties2(*physical, &mut properties);
+    }
+    let memory = properties.memory_properties;
+    let local = (0..memory.memory_heap_count as usize).filter(|&heap| {
+        memory.memory_heaps[heap]
+            .flags
+            .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+    });
+    Some(local.fold((0, 0), |(used, most), heap| {
+        (
+            used + budget.heap_usage[heap],
+            most + budget.heap_budget[heap],
+        )
+    }))
+}
+
 /// The device memory the driver counts this process as using on every heap, where it offers the
 /// budget.
 fn budgeted() -> Option<u64> {

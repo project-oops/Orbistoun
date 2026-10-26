@@ -2235,3 +2235,284 @@ fn compared_against_half(module: &[u32], function: u8) -> Option<u32> {
     .expect("dispatched");
     done.stored.first().and_then(|t| t.first()).copied()
 }
+
+/// A dispatch's compare sample whose sampler the host cannot name reads the sampler's function and
+/// filter from its registers as the module runs: the program of
+/// [`a_dispatch_s_compare_sample_answers_each_function`], its sampler in user data words 8 to 11
+/// holding `DEPTH_COMPARE_FUNC` in word 0's bits 14:12 and, for the bilinear case, `XY_MAG_FILTER`
+/// 1 in word 2's bits 21:20. One module answers every function, point and bilinear alike: the 1 x 1
+/// image's four gathered texels are its one depth. The host's sampler compares nothing.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario, set up and checked end to end"
+)]
+fn a_dispatch_s_compare_reads_its_sampler_as_it_runs() {
+    use orbistoun_translate::wavefront::{SHADER_COMPARE, SHADER_COMPARE_RUNNING};
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let (_, opcode) = encodings
+        .find_by_name("image_sample_c_lz")
+        .expect("image_sample_c_lz");
+    let sample = (0xf09c_0f08_u32 & !(0x7f << 18) & !(0xf << 8)) | (opcode << 18) | (1 << 8);
+    let program = |reference: f32| {
+        [
+            0x7e00_02ff_u32,
+            reference.to_bits(),
+            0x7e02_02f0,
+            0x7e04_02f0,
+            0x7e10_0280,
+            0x7e12_0280,
+            sample,
+            0x0040_0400,
+            0xbf8c_3f70,
+            0xf020_1108,
+            0x0003_0408,
+            0xbf81_0000,
+            0xbf9f_0000,
+        ]
+    };
+    let module = |reference: f32| {
+        let bytes: Vec<u8> = program(reference)
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let mut compared = [0u8; orbistoun_translate::wavefront::MAX_TEXTURES];
+        compared[0] = SHADER_COMPARE | SHADER_COMPARE_RUNNING;
+        let (module, _, (textures, _)) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 20,
+                compute: Some(ComputeInputs {
+                    thread_id_components: 2,
+                    threads: [1, 1, 1],
+                    ..ComputeInputs::default()
+                }),
+                compared,
+                ..UserData::default()
+            },
+        )
+        .expect("a compare read as it runs translates");
+        assert!(
+            textures
+                .first()
+                .is_some_and(|t| t.compare && t.shader_compare),
+            "compared in the module"
+        );
+        module
+    };
+    // Translated before any device is asked for: the translation holds everywhere.
+    let modules = [(0.25f32, Less), (0.5, Equal), (0.75, Greater)]
+        .map(|(reference, ordering)| (reference, ordering, module(reference)));
+    if !device_or_skip("a dispatch's compare read as it runs") {
+        return;
+    }
+    let functions: [(&str, &[std::cmp::Ordering]); 8] = [
+        ("never", &[]),
+        ("less", &[Less]),
+        ("equal", &[Equal]),
+        ("less or equal", &[Less, Equal]),
+        ("greater", &[Greater]),
+        ("not equal", &[Less, Greater]),
+        ("greater or equal", &[Greater, Equal]),
+        ("always", &[Less, Equal, Greater]),
+    ];
+    let (depth, destination) = ([0.5f32.to_bits()], [0x5555_5555_u32]);
+    let image = |texels, sampling| DispatchImage {
+        texels,
+        format: DispatchFormat::R32Float,
+        width: 1,
+        height: 1,
+        depth: None,
+        layers: None,
+        sampling,
+        cube: false,
+    };
+    for (filter, magnify) in [("point", 0u32), ("bilinear", 1 << 20)] {
+        for (function, (name, holds)) in (0u32..).zip(functions) {
+            for (reference, ordering, module) in &modules {
+                let mut push = [0u32; 20];
+                push[8] = function << 12;
+                push[10] = magnify;
+                let done = dispatch_guest(
+                    module,
+                    &[0],
+                    (&push, [1, 1, 1]),
+                    &DispatchImages {
+                        selected: None,
+                        more_fetched: &[],
+                        fetched: Some(image(
+                            &depth,
+                            Some(orbistoun_gpu::TextureSampling::CLAMPED_POINT),
+                        )),
+                        stored: &[image(&destination, None)],
+                    },
+                )
+                .expect("dispatched");
+                let wanted = if holds.contains(ordering) {
+                    1.0f32
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    done.stored.first().and_then(|t| t.first()).copied(),
+                    Some(wanted.to_bits()),
+                    "{filter} {name}: reference {reference} against depth 0.5"
+                );
+            }
+        }
+    }
+}
+
+/// A dispatch image sampled through samplers the program builds from constants, which no table
+/// record or user-data word names, is read through those samplers' own wrap and filter modes
+/// (D995): the trace names their words, the host decodes them and binds each slot's sampler. One
+/// image, four texels across, sampled at `u = (lane - 16) / 32` - from half an image before it to
+/// half an image past it - through a point sampler clamping to the edge and a bilinear one
+/// repeating, each lane's two answers checked against the modes' arithmetic.
+///
+/// ```text
+/// s_movk_i32 s16, 0x12 ; s_mov_b32 s17..s19, 0          CLAMP_LAST_TEXEL across and down, point
+/// s_mov_b32 s20, 0 ; s21, 0 ; s22, 0x500000 ; s23, 0    WRAP, XY_MAG and XY_MIN_FILTER bilinear
+/// v_cvt_f32_u32 v1, v0 ; v_subrev_f32 v1, 16.0, v1 ; v_mul_f32 v1, 1/32, v1 ; v_mov_b32 v2, 0.5
+/// image_sample_lz v4, v[1:2], s[8:15], s[16:19] dmask:0x1
+/// image_sample_lz v5, v[1:2], s[8:15], s[20:23] dmask:0x1
+/// v_mov_b32 v6, v0 ; v_mov_b32 v7, 0 ; s_waitcnt
+/// image_store v4, v[6:7], s[24:31] dmask:0x1 unorm ; v_mov_b32 v7, 1
+/// image_store v5, v[6:7], s[24:31] dmask:0x1 unorm
+/// s_endpgm
+/// ```
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario, set up and checked end to end"
+)]
+fn constant_samplers_wrap_and_filter_as_the_guest_built_them() {
+    const PROGRAM: [u32; 28] = [
+        0xb010_0012,
+        0xbe91_0380,
+        0xbe92_0380,
+        0xbe93_0380,
+        0xbe94_0380,
+        0xbe95_0380,
+        0xbe96_03ff,
+        0x0050_0000,
+        0xbe97_0380,
+        0x7e02_0d00,
+        0x0a02_02ff,
+        0x4180_0000,
+        0x1002_02ff,
+        0x3d00_0000,
+        0x7e04_02f0,
+        0xf09c_0108,
+        0x0082_0401,
+        0xf09c_0108,
+        0x00a2_0501,
+        0x7e0c_0300,
+        0x7e0e_0280,
+        0xbf8c_3f70,
+        0xf020_1108,
+        0x0006_0406,
+        0x7e0e_0281,
+        0xf020_1108,
+        0x0006_0506,
+        0xbf81_0000,
+    ];
+    const TEXELS: [f32; 4] = [10.0, 20.0, 30.0, 70.0];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = PROGRAM.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    assert!(decoded.is_trustworthy(), "the program decodes cleanly");
+    let (module, _, (textures, _)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 32,
+            compute: Some(ComputeInputs {
+                thread_id_components: 1,
+                threads: [64, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the program translates");
+    // Each slot's sampler, as the host reads it from the words the trace names.
+    let samplings: Vec<orbistoun_gpu::TextureSampling> = textures
+        .iter()
+        .map(|source| {
+            let words = source
+                .sampler_words
+                .expect("the sampler's words are traced");
+            let words = words.map(|word| match word {
+                orbistoun_translate::draw_buffers::DescriptorWord::Constant(value) => value,
+                other => panic!("a constant sampler word, not {other:?}"),
+            });
+            orbistoun_gpu::registers::decode_sampler_descriptor(words).expect("a sampler")
+        })
+        .collect();
+    assert_eq!(samplings.len(), 2, "one slot a sampler (D690)");
+    if !device_or_skip("samplers built from constants") {
+        return;
+    }
+    let texels: Vec<u32> = TEXELS.iter().map(|t| t.to_bits()).collect();
+    let destination = vec![0x5555_5555_u32; 128];
+    let image = |texels, width, height, sampling| DispatchImage {
+        texels,
+        format: DispatchFormat::R32Float,
+        width,
+        height,
+        depth: None,
+        layers: None,
+        sampling,
+        cube: false,
+    };
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 32], [1, 1, 1]),
+        &DispatchImages {
+            selected: None,
+            fetched: Some(image(&texels, 4, 1, Some(samplings[0]))),
+            more_fetched: &[image(&texels, 4, 1, Some(samplings[1]))],
+            stored: &[image(&destination, 64, 2, None)],
+        },
+    )
+    .expect("dispatched");
+    let stored = done.stored.first().expect("the stored image");
+    // `u * 4` is `(lane - 16) / 8` texels across, and `u * 4 - 0.5`, a bilinear filter's place
+    // between texel centres, `(lane - 20) / 8`: both in whole eighths.
+    let texel = |at: i32| TEXELS[usize::try_from(at.rem_euclid(4)).unwrap_or(0)];
+    for lane in 0..64u8 {
+        let across = i32::from(lane) - 16;
+        let u = f32::from(lane) / 32.0 - 0.5;
+        // Point, clamped to the last texel: the texel the coordinate falls in, at the edge outside.
+        let clamped = texel(across.div_euclid(8).clamp(0, 3));
+        // Bilinear, repeating: the two texels either side of the coordinate's place, wrapped.
+        let place = across - 4;
+        let (first, eighths) = (place.div_euclid(8), place.rem_euclid(8));
+        let fraction = f32::from(u8::try_from(eighths).unwrap_or(0)) / 8.0;
+        let repeated = texel(first) * (1.0 - fraction) + texel(first + 1) * fraction;
+        let point = f32::from_bits(stored[usize::from(lane)]);
+        let blended = f32::from_bits(stored[64 + usize::from(lane)]);
+        assert!(
+            point.to_bits() == clamped.to_bits(),
+            "lane {lane}: point, clamped at u {u}: {point} against {clamped}"
+        );
+        // The device's filter weights are eight-bit fractions.
+        assert!(
+            (blended - repeated).abs() <= 0.25,
+            "lane {lane}: bilinear, repeating at u {u}: {blended} against {repeated}"
+        );
+    }
+}

@@ -13,8 +13,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
-use orbistoun_translate::wavefront::Stage;
-use orbistoun_translate::{Fidelity, Translated, translate_with_user_data};
+use orbistoun_translate::wavefront::{Stage, Window};
+use orbistoun_translate::{Fidelity, Translated, Warning, translate_with_user_data};
 
 use crate::translations::{Context, Kept, TranslationStore};
 
@@ -80,9 +80,187 @@ impl Program<'_> {
     }
 }
 
+/// How a census translated a kept program: as it was kept, or as a run would prepare it on another
+/// route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Route {
+    /// Against the context the store kept.
+    Kept,
+    /// A compute dispatch kept host-traced, translated again device-addressed (D964), as a run
+    /// prepares one whose ranges the host cannot know.
+    DeviceAddressed,
+}
+
+impl Route {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::DeviceAddressed => "device",
+        }
+    }
+}
+
+/// What a refusal is, so a census groups refusals that one fix answers: the decisions it cites and
+/// a category, where in the program it first stood and the instruction or construct it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Class {
+    /// The decision numbers the refusal cites, in order, each once.
+    pub decisions: Vec<u32>,
+    /// What kind of refusal: the translator's error, or `per-lane` for a dispatch kept whole.
+    pub category: &'static str,
+    /// The byte offset in the program it names, where it names one.
+    pub offset: Option<u32>,
+    /// The instruction or construct, without the offsets and counts that differ between programs.
+    pub construct: String,
+}
+
+impl Class {
+    /// The category, decisions and construct together: what rows of one class share.
+    pub fn key(&self) -> String {
+        let decisions: Vec<String> = self.decisions.iter().map(|d| format!("D{d}")).collect();
+        format!(
+            "{} [{}] {}",
+            self.category,
+            decisions.join(","),
+            self.construct
+        )
+    }
+
+    /// The class of a translator's refusal.
+    pub fn of(error: &orbistoun_translate::TranslateError) -> Self {
+        use orbistoun_translate::TranslateError as E;
+        let message = error.to_string();
+        let (category, offset, construct) = match error {
+            E::StrategyNotImplemented(_) => ("strategy", None, String::new()),
+            E::FidelityNotImplemented { level, .. } => ("fidelity", None, level.to_string()),
+            E::UntrustworthyDecode { reason } => ("decode", None, (*reason).to_owned()),
+            E::Unrecognised { offset } => ("unrecognised", Some(*offset), String::new()),
+            E::WaveGroup { .. } => ("wave-group", None, String::new()),
+            E::TooManyBuffers { .. } => ("too-many-buffers", None, String::new()),
+            E::Unsupported { offset, detail } => ("unsupported", Some(*offset), general(detail)),
+            E::NotTranslated {
+                offset,
+                mnemonic,
+                detail,
+            } => (
+                "not-translated",
+                Some(*offset),
+                format!("{}: {}", general(mnemonic), general(detail)),
+            ),
+            E::Untraced {
+                offset,
+                mnemonic,
+                store,
+                ..
+            } => (
+                "untraced",
+                Some(*offset),
+                format!("{mnemonic} after {store}"),
+            ),
+            E::ImageDimension {
+                offset,
+                mnemonic,
+                dimension,
+            } => (
+                "image-dimension",
+                Some(*offset),
+                format!("{mnemonic} {dimension}"),
+            ),
+            E::ReadsGeometryInputs => ("geometry-inputs", None, String::new()),
+            E::NeedsBufferFormats => ("buffer-formats", None, String::new()),
+            E::UnresolvedBufferFormat { offset, .. } => {
+                ("buffer-format-slot", Some(*offset), String::new())
+            }
+            E::NeedsFlatTwins => ("flat-twins", None, String::new()),
+            E::OperandsUnknown { offset, name, .. } => {
+                ("operands-unknown", Some(*offset), name.clone())
+            }
+            E::MalformedModule(_) => ("malformed", None, general(&message)),
+        };
+        Self {
+            decisions: decisions(&message),
+            category,
+            offset,
+            construct,
+        }
+    }
+
+    /// The class of a guest dispatch that keeps its whole wave in one invocation rather than
+    /// running one per lane (D880, D884, D973), for `because`.
+    pub fn kept_whole(because: &str) -> Self {
+        Self {
+            decisions: decisions(because),
+            category: "per-lane",
+            offset: None,
+            construct: general(because),
+        }
+    }
+
+    /// The class of a refusal given only as text: the decode checks a census makes itself.
+    fn text(category: &'static str, message: &str) -> Self {
+        Self {
+            decisions: decisions(message),
+            category,
+            offset: None,
+            construct: general(message),
+        }
+    }
+}
+
+/// The decision numbers `text` cites (`D` and three or four digits), in order, each once.
+fn decisions(text: &str) -> Vec<u32> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices('D') {
+        let before = at.checked_sub(1).map(|b| bytes[b]);
+        if before.is_some_and(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let digits: String = text[at + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if (3..=4).contains(&digits.len())
+            && let Ok(number) = digits.parse()
+            && !found.contains(&number)
+        {
+            found.push(number);
+        }
+    }
+    found
+}
+
+/// `text` with its hexadecimal numbers made `#`, so two programs' refusals of one kind read alike.
+fn general(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("0x") {
+        out.push_str(&rest[..at]);
+        let digits = rest[at + 2..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .count();
+        if digits == 0 {
+            out.push_str("0x");
+        } else {
+            out.push('#');
+        }
+        rest = &rest[at + 2 + digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What one kept translation costs this build.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
+    /// The route it was translated on.
+    pub route: Route,
+    /// What its refusal is, where it was refused, or why a guest dispatch kept its whole wave in
+    /// one invocation (category `per-lane`, D973).
+    pub class: Option<Class>,
+    /// The guest address it was translated for, where its context names one.
+    pub address: Option<u64>,
     /// The title whose store kept it.
     pub title: String,
     /// The guest program's content hash.
@@ -127,8 +305,9 @@ impl Row {
     }
 }
 
-/// What makes two translations one compile: the module, and the images its layout binds.
-type ModuleKey = (u64, usize, usize);
+/// What makes two translations one compile: the module, the images its layout binds, and the route
+/// that made it.
+type ModuleKey = (u64, usize, usize, Route);
 
 /// Translates every distinct translation `store` keeps for `title` again, on `threads` threads, and
 /// has `measure` time each distinct module's compile and `validate` validate it, each where given.
@@ -142,7 +321,7 @@ pub fn census(
 ) -> Vec<Row> {
     let programs = distinct(store);
     let next = AtomicUsize::new(0);
-    let rows = Mutex::new(vec![None; programs.len()]);
+    let rows = Mutex::new(vec![Vec::new(); programs.len()]);
     // Each module's first row, and how many translations made it.
     let modules: Mutex<HashMap<ModuleKey, (usize, usize)>> = Mutex::default();
     let first = |key: ModuleKey, at: usize| {
@@ -161,16 +340,30 @@ pub fn census(
                     let Some(kept) = programs.get(at) else {
                         break;
                     };
-                    let made = row(
-                        title,
-                        kept,
-                        (encodings, operands),
-                        (measure, validate),
-                        &|key| first(key, at),
-                    );
-                    if let Some(made) = &made {
-                        done(made);
-                    }
+                    let made: Vec<Row> = routes(&kept.context)
+                        .into_iter()
+                        .map(|(route, context)| match route {
+                            Route::Kept => (route, context),
+                            Route::DeviceAddressed => (
+                                route,
+                                renumbered(
+                                    &kept.bytes,
+                                    (&kept.context, context),
+                                    (encodings, operands),
+                                ),
+                            ),
+                        })
+                        .filter_map(|(route, context)| {
+                            row(
+                                (title, route),
+                                (&kept.bytes, &context),
+                                (encodings, operands),
+                                (measure, validate),
+                                &|key| first(key, at),
+                            )
+                        })
+                        .collect();
+                    made.iter().for_each(done);
                     rows.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)[at] = made;
                 }
@@ -183,12 +376,84 @@ pub fn census(
     let modules = modules
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (at, contexts) in modules.into_values() {
-        if let Some(row) = &mut rows[at] {
+    for ((.., route), (at, contexts)) in modules {
+        if let Some(row) = rows[at].iter_mut().find(|row| row.route == route) {
             row.contexts = contexts;
         }
     }
     rows.into_iter().flatten().collect()
+}
+
+/// A device-addressed context's per-slot state carried over from the host-traced one it was made
+/// from: a device-addressed dispatch binds only the buffers whose descriptors the host resolves
+/// (D964), so its slots are the kept ones less the computed and global ones, numbered again. Each
+/// slot's format word (D738) and its sampled and table bits (D951, D966) move to the slot its
+/// source now has, as a run's preparation would find them; a slot whose source the kept trace does
+/// not hold has none. Unchanged where either trace is refused.
+fn renumbered(
+    bytes: &[u8],
+    (kept, mut device): (&Context, Context),
+    (encodings, operands): (&EncodingTable, &OperandTable),
+) -> Context {
+    let decoded = decode_program(bytes, encodings, operands);
+    let trace = |context: &Context| {
+        orbistoun_translate::wavefront::draw_buffers_for(
+            &decoded,
+            encodings,
+            context.stage,
+            context.user_data,
+        )
+        .ok()
+    };
+    let (Some(before), Some(after)) = (trace(kept), trace(&device)) else {
+        return device;
+    };
+    let kept_inputs = kept.user_data.compute.unwrap_or_default();
+    let mut formats = kept
+        .user_data
+        .buffer_formats
+        .map(|_| orbistoun_translate::wavefront::BufferFormats::default());
+    let (mut sampled, mut tables) = (0u32, 0u64);
+    for (slot, source) in after.sources.iter().enumerate() {
+        let Some(was) = before.sources.iter().position(|held| held == source) else {
+            continue;
+        };
+        if let (Some(formats), Some(held)) = (&mut formats, kept.user_data.buffer_formats) {
+            orbistoun_translate::wavefront::BufferFormats::set(formats, slot, held.get(was));
+        }
+        if slot < 32 && kept_inputs.sampled_buffers >> was & 1 == 1 {
+            sampled |= 1 << slot;
+        }
+        if slot < 64 && kept_inputs.table_buffers >> was & 1 == 1 {
+            tables |= 1 << slot;
+        }
+    }
+    device.user_data.buffer_formats = formats;
+    if let Some(inputs) = &mut device.user_data.compute {
+        inputs.sampled_buffers = sampled;
+        inputs.table_buffers = tables;
+    }
+    device
+}
+
+/// The routes a run may translate a kept context on: as kept, and a compute dispatch kept
+/// host-traced also device-addressed (D964), each with its context.
+fn routes(context: &Context) -> Vec<(Route, Context)> {
+    let mut routes = vec![(Route::Kept, *context)];
+    if let Some(inputs) = context.user_data.compute
+        && context.stage == Stage::Compute
+        && !inputs.device_addressed
+    {
+        let mut device = *context;
+        if let Some(inputs) = &mut device.user_data.compute {
+            inputs.device_addressed = true;
+        }
+        // A device-addressed dispatch has no window: what no bound buffer serves it reaches where
+        // it lies.
+        device.window = Window::default();
+        routes.push((Route::DeviceAddressed, device));
+    }
+    routes
 }
 
 /// The store's translations, each program under each context once.
@@ -208,17 +473,19 @@ fn distinct(store: &TranslationStore) -> Vec<&Kept> {
 /// One kept translation made again, and compiled where `measure` is given and validated where
 /// `validate` is; `None` where `first` says another translation already made the same module.
 fn row(
-    title: &str,
-    kept: &Kept,
+    (title, route): (&str, Route),
+    (bytes, context): (&[u8], &Context),
     tables: (&EncodingTable, &OperandTable),
     (measure, validate): (Option<&Measure<'_>>, Option<&Validate<'_>>),
     first: &dyn Fn(ModuleKey) -> bool,
 ) -> Option<Row> {
-    let context = &kept.context;
-    let (instructions, translated) = translate(&kept.bytes, context, tables);
+    let (instructions, translated) = translate(bytes, context, tables);
     let mut row = Row {
+        route,
+        class: None,
+        address: context.user_data.program_address,
         title: title.to_owned(),
-        program: bytes_hash(&kept.bytes),
+        program: bytes_hash(bytes),
         context: serde_json::to_vec(context).map_or(0, |json| bytes_hash(&json)),
         stage: context.stage,
         instructions,
@@ -235,12 +502,17 @@ fn row(
                 crate::content_hash(&translated.module),
                 translated.textures.len(),
                 translated.storage.len(),
+                route,
             );
             if !first(key) {
                 return None;
             }
             row.words = translated.module.len();
             row.model = Some(translated.fidelity);
+            // A guest dispatch kept whole says why: what keeps it from one invocation a lane.
+            if context.user_data.compute.is_some() && translated.fidelity == Fidelity::Wavefront {
+                row.class = Some(Class::kept_whole(&kept_whole(&translated.warnings)));
+            }
             row.validated = validate.map(|validate| validate(&translated.module));
             row.compiled = measure.map(|measure| {
                 measure(&Program {
@@ -251,24 +523,39 @@ fn row(
                 })
             });
         }
-        Err(refusal) => row.refusal = Some(refusal),
+        Err((refusal, class)) => {
+            row.refusal = Some(refusal);
+            row.class = Some(class);
+        }
     }
     Some(row)
 }
 
-/// The program's instruction count, and its translation or why there is none: the checks a store's
-/// refill makes, then the translator's own.
+/// Why a guest dispatch's translation kept its whole wave in one invocation, from its warnings.
+fn kept_whole(warnings: &[Warning]) -> String {
+    warnings
+        .iter()
+        .find_map(|warning| match warning {
+            Warning::SlowestFidelity { because, .. } => Some((*because).to_owned()),
+            Warning::FloatMode { .. } => None,
+        })
+        .unwrap_or_else(|| "the program reads or writes a lane mask whole".to_owned())
+}
+
+/// The program's instruction count, and its translation or why there is none, with its class: the
+/// checks a store's refill makes, then the translator's own.
 fn translate(
     bytes: &[u8],
     context: &Context,
     (encodings, operands): (&EncodingTable, &OperandTable),
-) -> (usize, Result<Translated, String>) {
+) -> (usize, Result<Translated, (String, Class)>) {
     let decoded = decode_program(bytes, encodings, operands);
     let instructions = decoded.instructions.len();
     if !decoded.terminated || !decoded.is_trustworthy() || decoded.consumed != bytes.len() {
+        let why = "the program no longer decodes cleanly";
         return (
             instructions,
-            Err("the program no longer decodes cleanly".to_owned()),
+            Err((why.to_owned(), Class::text("decode", why))),
         );
     }
     let translated = translate_with_user_data(
@@ -279,7 +566,7 @@ fn translate(
         context.window,
         context.user_data,
     )
-    .map_err(|e| e.to_string());
+    .map_err(|e| (e.to_string(), Class::of(&e)));
     (instructions, translated)
 }
 
@@ -322,7 +609,7 @@ pub fn sort_by_words(rows: &mut [Row]) {
 /// made spaces; `valid` is empty where nothing was validated.
 pub fn tsv(rows: &[Row]) -> String {
     let mut out = String::from(
-        "title\tprogram\tcontext\tcontexts\tstage\tinstructions\twords\twords_per_instruction\tmodel\ttimed\tcompile_seconds\trefused\tvalid\tinvalid\n",
+        "title\tprogram\tcontext\tcontexts\tstage\tinstructions\twords\twords_per_instruction\tmodel\ttimed\tcompile_seconds\trefused\tvalid\tinvalid\troute\taddress\tclass\toffset\n",
     );
     for row in rows {
         let compiled = row.compiled.as_ref();
@@ -338,9 +625,24 @@ pub fn tsv(rows: &[Row]) -> String {
             Some(Some(_)) => "no",
         };
         let invalid = row.invalid().unwrap_or("").replace(['\t', '\n', '\r'], " ");
+        let class = row
+            .class
+            .as_ref()
+            .map(|class| class.key().replace(['\t', '\n', '\r'], " "))
+            .unwrap_or_default();
+        let offset = row
+            .class
+            .as_ref()
+            .and_then(|class| class.offset)
+            .map(|offset| format!("{offset:#x}"))
+            .unwrap_or_default();
+        let address = row
+            .address
+            .map(|address| format!("{address:#x}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{refused}\t{valid}\t{invalid}",
+            "{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{refused}\t{valid}\t{invalid}\t{}\t{address}\t{class}\t{offset}",
             row.title,
             row.program,
             row.context,
@@ -352,9 +654,107 @@ pub fn tsv(rows: &[Row]) -> String {
             row.model.map(|model| model.to_string()).unwrap_or_default(),
             compiled.map_or("", |compiled| compiled.timed.name()),
             compiled.map_or_else(String::new, |compiled| format!("{:.3}", compiled.seconds)),
+            row.route.name(),
         );
     }
     out
+}
+
+/// One class of refusal across a census: how many rows it holds, its programs, and where it first
+/// stood in the first of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassCount {
+    /// The route the rows were translated on.
+    pub route: Route,
+    /// The class, by [`Class::key`].
+    pub key: String,
+    /// Rows in it.
+    pub rows: usize,
+    /// Its distinct programs, by address where known, else by content hash, in first-seen order.
+    pub programs: Vec<String>,
+    /// The first program's offset, where the class names one.
+    pub offset: Option<u32>,
+}
+
+/// Every class of refusal in `rows`, the largest reach first: most programs, then most rows, then
+/// by route and key, so the order does not move between runs.
+pub fn classes(rows: &[Row]) -> Vec<ClassCount> {
+    let mut counted: Vec<ClassCount> = Vec::new();
+    for row in rows {
+        let Some(class) = &row.class else { continue };
+        let key = class.key();
+        let program = row.address.map_or_else(
+            || format!("{:016x}", row.program),
+            |address| format!("{address:#x}"),
+        );
+        let at = if let Some(at) = counted
+            .iter()
+            .position(|counted| counted.route == row.route && counted.key == key)
+        {
+            at
+        } else {
+            counted.push(ClassCount {
+                route: row.route,
+                key,
+                rows: 0,
+                programs: Vec::new(),
+                offset: class.offset,
+            });
+            counted.len() - 1
+        };
+        let counted = &mut counted[at];
+        counted.rows += 1;
+        if !counted.programs.contains(&program) {
+            counted.programs.push(program);
+        }
+    }
+    counted.sort_by(|a, b| {
+        b.programs
+            .len()
+            .cmp(&a.programs.len())
+            .then_with(|| b.rows.cmp(&a.rows))
+            .then_with(|| (a.route, &a.key).cmp(&(b.route, &b.key)))
+    });
+    counted
+}
+
+/// The refusal classes, as [`classes`] ranks them: route, rows, programs, the first offset and the
+/// class, then the programs, the first few.
+fn class_table(out: &mut String, rows: &[Row]) {
+    let counted = classes(rows);
+    if counted.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\nrefusal classes\n{:<7} {:>5} {:>8} {:>8} CLASS",
+        "ROUTE", "ROWS", "PROGRAMS", "OFFSET"
+    );
+    for class in counted {
+        let _ = writeln!(
+            out,
+            "{:<7} {:>5} {:>8} {:>8} {}",
+            class.route.name(),
+            class.rows,
+            class.programs.len(),
+            class
+                .offset
+                .map_or_else(|| "-".to_owned(), |offset| format!("{offset:#x}")),
+            class.key
+        );
+        let shown: Vec<&str> = class.programs.iter().take(6).map(String::as_str).collect();
+        let more = class.programs.len().saturating_sub(shown.len());
+        let _ = writeln!(
+            out,
+            "        {}{}",
+            shown.join(" "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        );
+    }
 }
 
 const fn stage_name(stage: Stage) -> &'static str {
@@ -472,6 +872,7 @@ pub fn report(rows: &[Row], top: usize) -> String {
     }
     sort_by_words(&mut ranked);
     table(&mut out, "by words", &ranked[..top.min(ranked.len())]);
+    class_table(&mut out, rows);
     invalid(&mut out, rows);
     out
 }
@@ -545,6 +946,9 @@ mod tests {
 
     fn row(program: u64, words: usize, seconds: Option<f64>) -> Row {
         Row {
+            route: super::Route::Kept,
+            class: None,
+            address: None,
             title: "T".to_owned(),
             program,
             context: 0,
@@ -619,11 +1023,79 @@ mod tests {
                 "2.500",
                 "",
                 "",
+                "",
+                "kept",
+                "",
+                "",
                 ""
             ]
         );
         let second = fields(lines[2]);
-        assert_eq!(second[8..], ["", "", "", "bad thing here", "", ""]);
+        assert_eq!(
+            second[8..],
+            ["", "", "", "bad thing here", "", "", "kept", "", "", ""]
+        );
+    }
+
+    /// A refusal's class keeps its decisions and its instruction, and drops the offsets that differ
+    /// between programs, so one fix's refusals count as one class; classes rank by the programs
+    /// they reach.
+    #[test]
+    fn refusals_group_into_classes_by_reach() {
+        use orbistoun_translate::TranslateError;
+        let refusal = |offset| TranslateError::NotTranslated {
+            offset,
+            mnemonic: "v_example_b32".to_owned(),
+            detail: "a form not translated (D979, D884 and D979 again)",
+        };
+        let class = super::Class::of(&refusal(0x40));
+        assert_eq!(class.decisions, [979, 884]);
+        assert_eq!(class.offset, Some(0x40));
+        assert_eq!(class.key(), super::Class::of(&refusal(0x80)).key());
+        assert_eq!(super::general("at 0x1f0 and 0x2"), "at # and #");
+        let classed = |program, error: &TranslateError| {
+            let mut row = row(program, 0, None);
+            row.refusal = Some(error.to_string());
+            row.class = Some(super::Class::of(error));
+            row
+        };
+        let other = TranslateError::NeedsFlatTwins;
+        let rows = [
+            classed(1, &other),
+            classed(1, &other),
+            classed(2, &refusal(0x10)),
+            classed(3, &refusal(0x20)),
+            row(4, 10, None),
+        ];
+        let counted = super::classes(&rows);
+        assert_eq!(counted.len(), 2);
+        assert_eq!(counted[0].programs.len(), 2);
+        assert_eq!(counted[0].offset, Some(0x10));
+        assert_eq!((counted[1].rows, counted[1].programs.len()), (2, 1));
+        assert!(report(&rows, 1).contains("refusal classes"));
+    }
+
+    /// A compute dispatch kept host-traced is also translated device-addressed, without its window;
+    /// one kept device-addressed, or a draw's stage, is translated only as kept.
+    #[test]
+    fn a_host_traced_dispatch_is_also_tried_device_addressed() {
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let mut context = Context {
+            strategy: Strategy::default(),
+            stage: Stage::Compute,
+            primitive: MeshPrimitive::default(),
+            window: Window::at(0x1000),
+            user_data: UserData::default(),
+        };
+        assert_eq!(super::routes(&context).len(), 1, "no entry state");
+        context.user_data.compute = Some(ComputeInputs::default());
+        let routes = super::routes(&context);
+        assert_eq!(routes.len(), 2);
+        let (route, device) = &routes[1];
+        assert_eq!(*route, super::Route::DeviceAddressed);
+        assert!(device.user_data.compute.is_some_and(|i| i.device_addressed));
+        assert_eq!(device.window, Window::default());
+        assert_eq!(super::routes(device).len(), 1);
     }
 
     /// The summary counts refusals and compile failures, sums words and seconds, and names the

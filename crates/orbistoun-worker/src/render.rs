@@ -1168,6 +1168,27 @@ pub fn execute_dispatch(
     .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
 }
 
+/// The image the device keeps under `key`, at `generation` or later, read off it on the device
+/// thread: what a deferred write-back of an image a dispatch stored to writes (D990).
+pub(crate) fn read_kept_image(key: u64, generation: u64) -> Option<Vec<u32>> {
+    on_device(|| orbistoun_gpu_vulkan::compute_images::read_kept(key, generation)).flatten()
+}
+
+/// Gives the images kept on the device what its own memory has free, past a headroom for the
+/// title's own, as the driver reports it (D990); the cap where it reports nothing.
+fn budget_kept_images() {
+    if let Some(local) = orbistoun_gpu_vulkan::device_memory::local() {
+        orbistoun_gpu::resident::with_registry(|registry| {
+            let budget = registry.budget_from(
+                local,
+                orbistoun_gpu::resident::DEVICE_HEADROOM,
+                orbistoun_gpu::resident::KEPT_BYTES_MOST,
+            );
+            registry.set_budget(budget);
+        });
+    }
+}
+
 /// [`execute_dispatch`] on the device thread.
 fn execute_dispatch_here(
     module: (&[u32], u64),
@@ -1220,7 +1241,8 @@ fn execute_dispatch_here(
         })
         .collect();
     let started = std::time::Instant::now();
-    // Each image's place among those the device keeps, and those it lets go first (D985).
+    budget_kept_images();
+    // Each image's place among those the device keeps, and those it lets go first (D990).
     let hints = orbistoun_gpu_vulkan::compute_images::Hints {
         uses: images.resident.clone(),
         dropped: orbistoun_gpu::resident::with_registry(
@@ -1239,7 +1261,7 @@ fn execute_dispatch_here(
         })
     });
     // An image it was asked to take that the device does not keep: the command processor lets
-    // every image go and prepares the dispatch again (D985).
+    // every image go and prepares the dispatch again (D990).
     if let Err(orbistoun_gpu_vulkan::DispatchError::Unsupported(why)) = &done
         && why == orbistoun_gpu::resident::NOT_RESIDENT
     {
@@ -1434,6 +1456,14 @@ fn dispatch_image(
             orbistoun_gpu::pipeline::TexelFormat::Float11_11_10 => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Float11_11_10
             }
+            // Blocks as they are, sampled on the device (D990).
+            orbistoun_gpu::pipeline::TexelFormat::Blocks {
+                native,
+                block_bytes,
+            } => orbistoun_gpu_vulkan::compute_images::DispatchFormat::Blocks {
+                native,
+                block_bytes,
+            },
             orbistoun_gpu::pipeline::TexelFormat::Rgba32Uint => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba32Uint
             }
@@ -1791,23 +1821,36 @@ struct KeptFlips {
     /// `busy:N` among them: the flip after the first frame that drew at least N draws, so a
     /// title's first busy frame is kept wherever its flip index falls.
     busy: Option<u64>,
+    /// `busy-every:K` among them: from that armed flip on, every Kth frame too, without its
+    /// submissions - a phase reached at a flip no run can name in advance, kept as a sequence for
+    /// comparing its frames with each other (D988).
+    busy_every: Option<u64>,
 }
 
 impl KeptFlips {
     /// From the two variables' values; anything that is not a positive number is ignored.
     fn parse(every: Option<&str>, at: Option<&str>) -> Self {
         let positive = |value: &str| value.trim().parse::<u64>().ok().filter(|&n| n > 0);
-        let busy = at.and_then(|list| {
-            list.split(',')
-                .find_map(|entry| entry.trim().strip_prefix("busy:").and_then(positive))
-        });
+        let tagged = |tag: &str| {
+            at.and_then(|list| {
+                list.split(',')
+                    .find_map(|entry| entry.trim().strip_prefix(tag).and_then(positive))
+            })
+        };
         Self {
             every: every.and_then(positive),
             at: at
                 .map(|list| list.split(',').filter_map(positive).collect())
                 .unwrap_or_default(),
-            busy,
+            busy: tagged("busy:"),
+            busy_every: tagged("busy-every:"),
         }
+    }
+
+    /// Whether flip `flip` is one of every Kth from the flip a busy frame armed, `armed`.
+    fn after_busy(&self, flip: u64, armed: Option<u64>) -> bool {
+        matches!((self.busy_every, armed), (Some(every), Some(armed))
+            if flip >= armed && (flip - armed) % every == 0)
     }
 
     /// Whether flip `flip` is kept with its submissions: one named, or the one a busy frame armed.
@@ -1817,7 +1860,10 @@ impl KeptFlips {
 
     /// Whether the frame drawn before guest flip `flip` (counted from 1) is kept.
     fn wants(&self, flip: u64) -> bool {
-        flip > 0 && (self.every.is_some_and(|every| (flip - 1) % every == 0) || self.names(flip))
+        flip > 0
+            && (self.every.is_some_and(|every| (flip - 1) % every == 0)
+                || self.names(flip)
+                || self.after_busy(flip, armed_busy_flip()))
     }
 }
 
@@ -1941,6 +1987,52 @@ fn keep_submission_before_named_flip(submission: &Submission) -> Option<String> 
     Some(name)
 }
 
+/// Dumps the passes of the frame after guest flip `flip` when `ORBISTOUN_PASS_DUMP` asks and
+/// `ORBISTOUN_FRAME_AT` names the flip that frame ends in, and ends the dump of any other (D986).
+fn arm_pass_dump(flip: u64) {
+    static ASKED: OnceLock<bool> = OnceLock::new();
+    if !*ASKED.get_or_init(|| orbistoun_env::PASS_DUMP.get().as_deref() == Some("1")) {
+        return;
+    }
+    let next = flip + 1;
+    match kept_frames_dir() {
+        Some(dir) if kept_flips().names(next) => {
+            orbistoun_gpu::pass_dump::arm(Some((next, dir)));
+        }
+        _ if orbistoun_gpu::pass_dump::armed() => orbistoun_gpu::pass_dump::arm(None),
+        _ => {}
+    }
+}
+
+/// Reads back the colour targets a run of draws drew into, for a frame's pass dump (D986): the
+/// [`orbistoun_gpu::pass_dump::TargetReader`] the worker installs. On the device thread.
+pub fn read_pass_targets(
+    targets: &[orbistoun_gpu::ResourceId],
+) -> Vec<Option<orbistoun_gpu::pass_dump::TargetTexels>> {
+    on_device(|| {
+        let mut held = live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(backend) = held.as_mut() else {
+            return vec![None; targets.len()];
+        };
+        targets
+            .iter()
+            .map(|&target| {
+                let encoding = backend.target_encoding(target);
+                let frame = backend.target_frame(target)?;
+                Some(orbistoun_gpu::pass_dump::TargetTexels {
+                    encoding,
+                    width: frame.width,
+                    height: frame.height,
+                    bytes: frame.bytes.clone(),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Keeps the frame drawn before this flip when `ORBISTOUN_FRAME_EVERY` or `ORBISTOUN_FRAME_AT`
 /// asks, named by the guest's flip index: the index a console reports for the same flip, so a
 /// kept frame can be compared with the console's frame of that index.
@@ -1949,13 +2041,18 @@ fn keep_frame_at_this_flip() {
         return;
     };
     // A frame's draws are counted to the flip that closes it, and a busy one arms the next.
-    if let Some(threshold) = kept_flips().busy {
+    {
         let mut busy = BUSY
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        busy.1 = arm_after_busy(Some(threshold), busy.0, flip, busy.1);
+        // A pad script step waiting for the guest's phase reads the frame's weight (D987).
+        orbistoun_input::script::frame_closed(busy.0);
+        if let Some(threshold) = kept_flips().busy {
+            busy.1 = arm_after_busy(Some(threshold), busy.0, flip, busy.1);
+        }
         busy.0 = 0;
     }
+    arm_pass_dump(flip);
     if !kept_flips().wants(flip) {
         return;
     }
@@ -4364,6 +4461,17 @@ mod tests {
             Some(10000),
             "a busy threshold beside named flips"
         );
+        // Every Kth flip from the armed one, and none before it is armed (D988).
+        let sequence = KeptFlips::parse(None, Some("busy:10000,busy-every:3"));
+        assert_eq!(
+            (sequence.busy, sequence.busy_every, sequence.at.as_slice()),
+            (Some(10000), Some(3), &[][..])
+        );
+        let kept: Vec<u64> = (0..=20)
+            .filter(|&flip| sequence.after_busy(flip, Some(8)))
+            .collect();
+        assert_eq!(kept, [8, 11, 14, 17, 20]);
+        assert!(!sequence.after_busy(8, None), "nothing before a busy frame");
         // The first frame of at least the threshold arms the flip after it, once.
         assert_eq!(super::arm_after_busy(Some(100), 99, 7, None), None);
         assert_eq!(super::arm_after_busy(Some(100), 100, 7, None), Some(8));

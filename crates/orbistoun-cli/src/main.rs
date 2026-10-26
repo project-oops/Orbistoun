@@ -14,6 +14,7 @@ mod lanes;
 mod learn;
 mod module;
 mod names;
+mod passes;
 mod perf;
 mod probe;
 mod progress;
@@ -156,6 +157,27 @@ enum Command {
         /// The second run, the same way.
         second: std::path::PathBuf,
     },
+    /// Whether a held stick moves the picture (D988): the change between each two consecutive
+    /// kept frames over a region, split by whether a stick was off centre between them, as a
+    /// captured input script (`run --capture-input`) says the guest read it.
+    Motion {
+        /// The directory of kept frames, `flip-<n>-<w>x<h>.rgba` (`ORBISTOUN_FRAME_DIR`).
+        frames: std::path::PathBuf,
+        /// The pad the guest read, as `run --capture-input` wrote it.
+        #[arg(long)]
+        input: std::path::PathBuf,
+        /// The region compared, as fractions of the frame `x,y,width,height`: the whole frame by
+        /// default.
+        #[arg(long, value_parser = frames::parse_region, default_value = "0,0,1,1")]
+        region: frames::Region,
+        /// Only kept frames from this flip on: the phase the question is about.
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        /// Fail unless the pairs with a stick held changed more than the pairs at rest, by this
+        /// factor.
+        #[arg(long)]
+        expect: Option<f64>,
+    },
     /// Print a default stub-policy file.
     Policy,
     /// Report a container's structure without executing or fully parsing it.
@@ -220,6 +242,10 @@ enum Command {
         /// A test's own input, or a recording of an earlier run replayed (D721).
         #[arg(long)]
         input: Option<std::path::PathBuf>,
+        /// Capture what the guest reads from its pad into this file, as a flip-timed script a
+        /// step per change (D721): what `motion --input` reads beside the kept frames (D988).
+        #[arg(long, value_name = "SCRIPT")]
+        capture_input: Option<std::path::PathBuf>,
         /// Run a loose build as a staged title, as though it lay under the library's
         /// `data/homebrew`.
         ///
@@ -842,6 +868,19 @@ enum Command {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Turn a frame's pass dump (`ORBISTOUN_PASS_DUMP`) into pictures and a table, flagging each
+    /// pass whose output holds NaN or infinity, is nothing but zero or is noise, was refused, reads
+    /// what a refused pass was to write, or changed nothing.
+    Passes {
+        /// The dump's directory, `passes-<flip>` where the run keeps its frames.
+        dir: std::path::PathBuf,
+        /// Where the pictures and `passes.html` go; beside the dump by default.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Every this many texels across and down make a picture's pixel.
+        #[arg(long, default_value_t = 2)]
+        step: u32,
+    },
     /// Run one wave of a captured guest dispatch on the host interpreter.
     ///
     /// The host and the translator are two implementations of the instruction set: from the same
@@ -866,6 +905,10 @@ enum Command {
         /// and every store they make is compared; `--points` shows the first.
         #[arg(long = "group", value_parser = parse_group, default_value = "0")]
         groups: Vec<[u32; 2]>,
+        /// Run every group of the dispatch on the host instead, and compare the stored images
+        /// whole: a texel the device changed that no host store wrote is reported too.
+        #[arg(long)]
+        every_group: bool,
         /// A `replay-dispatch --out` directory of the same capture, to compare stores with.
         #[arg(long)]
         against: Option<std::path::PathBuf>,
@@ -1224,12 +1267,14 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Lanes
         | Command::ShaderCensus { .. }
         | Command::ReplayDispatch { .. }
+        | Command::Passes { .. }
         | Command::TraceDispatch { .. }
         | Command::Verify { .. }
         | Command::Report { .. }
         | Command::Load { .. }
         | Command::Disasm { .. }
         | Command::Callers { .. }
+        | Command::Motion { .. }
         | Command::CallsDiff { .. } => dispatch_module(cli.command, service)?,
         Command::Ask { .. } | Command::Session { .. } => dispatch_probe(cli.command)?,
         Command::Probe {
@@ -1318,6 +1363,13 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::Policy => println!("{}", service.default_policy_toml()?),
         Command::Inspect { path } => cmd_inspect(service, &path)?,
         Command::CallsDiff { first, second } => cmd_calls_diff(&first, &second)?,
+        Command::Motion {
+            frames,
+            input,
+            region,
+            from,
+            expect,
+        } => frames::cmd_motion(&frames, &input, region, from, expect)?,
         Command::Disasm {
             path,
             from,
@@ -1360,12 +1412,14 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::ReplayDispatch { dir, repeat, out } => {
             cmd_replay_dispatch(&dir, repeat, out.as_deref())?;
         }
+        Command::Passes { dir, out, step } => passes::cmd_passes(&dir, out.as_deref(), step)?,
         Command::TraceDispatch {
             dir,
             kept,
             program,
             user_words,
             groups,
+            every_group,
             against,
             points,
             lane,
@@ -1381,6 +1435,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
             kept: kept.as_deref(),
             user_words,
             groups,
+            every_group,
             against: against.as_deref(),
             out: out.as_deref(),
             points,
@@ -1425,6 +1480,7 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             calls,
             profile,
             input,
+            capture_input,
             staged,
             relink,
         } => cmd_run(
@@ -1434,6 +1490,7 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             profile.as_deref(),
             (cli.symbols_db.as_deref(), input.as_deref()),
             (staged, relink),
+            capture_input.as_deref(),
         )?,
         Command::Handoff {
             ref path,

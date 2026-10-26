@@ -801,6 +801,9 @@ const fn format_name(format: DispatchFormat) -> &'static str {
         DispatchFormat::Rgba16Unorm => "rgba16-unorm",
         DispatchFormat::Rgba8Snorm => "rgba8-snorm",
         DispatchFormat::Float11_11_10 => "float11-11-10",
+        // A block image's blocks (D990) are named, and a capture holding one is not read back:
+        // the formats a capture is read with hold no blocks.
+        DispatchFormat::Blocks { .. } => "blocks",
     }
 }
 

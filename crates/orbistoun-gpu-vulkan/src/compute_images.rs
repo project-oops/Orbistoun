@@ -11,7 +11,7 @@ use ash::vk;
 use crate::compute::DispatchError;
 
 mod resident;
-pub use resident::{Hints, with_hints};
+pub use resident::{Hints, read_kept, with_hints};
 
 /// A dispatch image's texel format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,15 @@ pub enum DispatchFormat {
     /// Three packed unsigned floats, the guest's `10_11_11_FLOAT`: eleven bits of red from the low
     /// end, eleven of green, ten of blue, a word a texel (D908).
     Float11_11_10,
+    /// Four-by-four blocks in a host format that holds a guest block format's bits as they are
+    /// (D990): the image's words are its blocks', row-major by block, `block_bytes` a block. Only
+    /// fetched, never stored to.
+    Blocks {
+        /// The host format.
+        native: orbistoun_gpu::formats::HostFormat,
+        /// Bytes a block.
+        block_bytes: u32,
+    },
 }
 
 impl DispatchFormat {
@@ -80,6 +89,7 @@ impl DispatchFormat {
             Self::Rgba16Unorm => vk::Format::R16G16B16A16_UNORM,
             Self::Rgba8Snorm => vk::Format::R8G8B8A8_SNORM,
             Self::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
+            Self::Blocks { native, .. } => crate::guest_formats::vk_format(native),
         }
     }
 
@@ -94,7 +104,9 @@ impl DispatchFormat {
             | Self::Rg16Float
             | Self::R32Float
             | Self::Rgba8Snorm => 4,
-            Self::R8 | Self::R8Uint => 1,
+            // A block format takes at most a byte a texel; what a block image holds is counted by
+            // its blocks ([`DispatchImage::words`]).
+            Self::R8 | Self::R8Uint | Self::Blocks { .. } => 1,
             Self::R16Uint | Self::R16Unorm | Self::R16Float | Self::Rg8Unorm => 2,
             Self::Rgba16Float | Self::Rgba16Unorm | Self::Rg32Uint => 8,
             Self::Rgba32Uint => 16,
@@ -103,6 +115,10 @@ impl DispatchFormat {
 
     /// Words one texel takes in a dispatch image's texels, and bytes of each word that are its own.
     const fn words(self) -> (usize, usize) {
+        // A block's words are all its own.
+        if let Self::Blocks { block_bytes, .. } = self {
+            return (block_bytes as usize / 4, 4);
+        }
         let bytes = self.bytes();
         if bytes <= 4 {
             (1, bytes)
@@ -144,6 +160,18 @@ impl DispatchImage<'_> {
             * self.height as usize
             * self.depth.unwrap_or(1) as usize
             * self.layers.unwrap_or(1) as usize
+    }
+
+    /// Words its texels take: each texel's, or each four-by-four block's (D990).
+    fn words(&self) -> usize {
+        if let DispatchFormat::Blocks { block_bytes, .. } = self.format {
+            return self.width.div_ceil(4) as usize
+                * self.height.div_ceil(4) as usize
+                * self.depth.unwrap_or(1) as usize
+                * self.layers.unwrap_or(1) as usize
+                * (block_bytes as usize / 4);
+        }
+        self.count() * self.format.words().0
     }
 }
 
@@ -215,10 +243,10 @@ struct Bound {
     /// Whether its binding holds its sampler alone: a slot reading images selected at run time,
     /// whose image the arrays hold (D983).
     sampler_only: bool,
-    /// Where it is kept after the dispatch, where it has a place among the images kept (D985).
+    /// Where it is kept after the dispatch, where it has a place among the images kept (D990).
     place: Option<resident::Place>,
     /// The layout its contents were kept in, where they are taken as they are and nothing is
-    /// uploaded (D985).
+    /// uploaded (D990).
     kept_layout: Option<vk::ImageLayout>,
 }
 
@@ -280,7 +308,7 @@ impl BoundImages {
             selected_room((instance, physical), set)?;
         }
         let fillers = selected_fillers();
-        // Each image's place among those the device keeps, where it has one (D985).
+        // Each image's place among those the device keeps, where it has one (D990).
         let (places, dropped) = resident::wanted(images);
         resident::let_go(device, &dropped);
         let wanted = wanted_images(images, &fillers);
@@ -511,7 +539,7 @@ impl BoundImages {
                 vk::AccessFlags::SHADER_READ
             };
             // An image kept as it was left is moved to the layout the dispatch uses it in, its
-            // contents kept, after whatever last wrote it (D985).
+            // contents kept, after whatever last wrote it (D990).
             if let Some(kept) = image.kept_layout {
                 barrier(
                     device,
@@ -576,7 +604,12 @@ impl BoundImages {
     /// Records the stored image's copy back to its host buffer, after the dispatch's stores, into
     /// an open recording.
     pub(crate) fn record_readback(&self, device: &ash::Device, command: vk::CommandBuffer) {
-        for image in self.images.iter().filter(|image| image.stored) {
+        // One whose write-back is deferred stays on the device, read only when it is made (D990).
+        for image in self
+            .images
+            .iter()
+            .filter(|image| image.stored && !image.deferred())
+        {
             barrier(
                 device,
                 command,
@@ -615,7 +648,13 @@ impl BoundImages {
         self.images
             .iter()
             .filter(|image| image.stored)
-            .map(|image| read_back_image(device, image))
+            .map(|image| {
+                if image.deferred() {
+                    // Left on the device, its write-back deferred: nothing read (D990).
+                    return Ok(Vec::new());
+                }
+                read_back_image(device, image)
+            })
             .collect()
     }
 
@@ -628,7 +667,7 @@ impl BoundImages {
         }
         for image in self.images {
             // An image with a place among those kept is kept, in the layout the dispatch left it
-            // in (D985).
+            // in (D990).
             if let Some(place) = image.place {
                 let created = (
                     image.image,
@@ -785,6 +824,11 @@ fn wanted_images<'a>(
 }
 
 impl Bound {
+    /// Whether what the dispatch stores to it stays on the device, its write-back deferred (D990).
+    fn deferred(&self) -> bool {
+        self.place.is_some_and(|place| place.deferred())
+    }
+
     /// What its binding holds: a storage image, a sampler alone for a slot reading images selected
     /// at run time (D983), or an image with its sampler.
     const fn descriptor_type(&self) -> vk::DescriptorType {
@@ -992,7 +1036,7 @@ type Created = (
 );
 
 /// Creates one image and the host buffer holding its texels, for the roles `usage` names where it
-/// is given - an image kept between dispatches is made for every role it may be bound in (D985) -
+/// is given - an image kept between dispatches is made for every role it may be bound in (D990) -
 /// else for the one `stored` says.
 fn create_image(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
@@ -1000,13 +1044,22 @@ fn create_image(
     stored: bool,
     usage: Option<vk::ImageUsageFlags>,
 ) -> Result<Created, DispatchError> {
-    let words = texels.count() * texels.format.words().0;
+    let words = texels.words();
     if texels.texels.len() != words || words == 0 {
         return Err(DispatchError::Unsupported(format!(
             "a dispatch image's texels are not its extent: {} words for {}x{} {:?}",
             texels.texels.len(),
             texels.width,
             texels.height,
+            texels.format
+        )));
+    }
+    // Blocks are sampled as they are, where the device samples their format (D990).
+    if matches!(texels.format, DispatchFormat::Blocks { .. })
+        && (stored || !crate::guest_formats::samples(instance, physical, texels.format.vulkan()))
+    {
+        return Err(DispatchError::Unsupported(format!(
+            "a dispatch image of {:?} blocks this device does not sample",
             texels.format
         )));
     }
@@ -1263,7 +1316,7 @@ fn take_spare(
     key: SpareKey,
     texels: DispatchImage<'_>,
 ) -> Option<Result<Created, DispatchError>> {
-    let words = texels.count() * texels.format.words().0;
+    let words = texels.words();
     if texels.texels.len() != words || words == 0 {
         return None;
     }

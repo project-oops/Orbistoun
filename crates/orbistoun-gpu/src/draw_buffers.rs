@@ -239,6 +239,8 @@ impl BufferCache {
                 self.read_compared(address, length, memory)
             });
         }
+        // What is owed to it reaches memory first, so the cache sees it written (D986).
+        memory.settle(address, length);
         if let Some((since, buffer, _)) = self.entries.get(&(address, length))
             && span(Span::BufferWatch, || {
                 since.and_then(|since| orbistoun_mem::watch::written_since(address, span_of, since))

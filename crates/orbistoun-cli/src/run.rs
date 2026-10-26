@@ -162,6 +162,7 @@ pub(crate) fn cmd_run(
     profile: Option<&str>,
     (symbols_db, input): (Option<&std::path::Path>, Option<&std::path::Path>),
     (staged, relink): (bool, bool),
+    capture: Option<&std::path::Path>,
 ) -> Result<()> {
     set_profile_for_run(profile)?;
     let frame_every = keep_frames_for_run(path)?;
@@ -182,7 +183,7 @@ pub(crate) fn cmd_run(
             call_budget: (calls > 0).then_some(calls),
             // Absolute, because the worker resolves nothing against this process's directory.
             input_script: input.map(std::path::absolute).transpose()?,
-            capture_input: None,
+            capture_input: capture.map(std::path::absolute).transpose()?,
             staged,
             relink,
         })

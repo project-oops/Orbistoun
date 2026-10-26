@@ -839,7 +839,7 @@ const fn sign_extend(value: u32, bits: u32) -> i32 {
 
 /// An unsigned float of a five-bit exponent and `mantissa` bits (Vulkan 3.6, "Unsigned 11-Bit
 /// Floating-Point Numbers" and "Unsigned 10-Bit").
-fn small_float(value: u32, mantissa: u32) -> f32 {
+pub(crate) fn small_float(value: u32, mantissa: u32) -> f32 {
     let exponent = value >> mantissa;
     let bits = value & ((1 << mantissa) - 1);
     let fraction = f64::from(bits) / f64::from(1_u32 << mantissa);

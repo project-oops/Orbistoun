@@ -37,6 +37,10 @@ pub(crate) struct Breakdown {
     pub(crate) heap: u64,
     /// The named holders, each with its bytes and where they come from.
     pub(crate) holders: Vec<(&'static str, u64, Source)>,
+    /// The device-local memory - the card's own - in use and the driver's budget for it, where
+    /// the driver says (`VK_EXT_memory_budget`): host memory the device maps directly (D964) is
+    /// among the device's holders, and not here (D990).
+    pub(crate) local: Option<(u64, u64)>,
 }
 
 impl Breakdown {
@@ -90,6 +94,7 @@ impl Breakdown {
             guest: orbistoun_mem::lazy::census(),
             heap: super::heap::live(),
             holders,
+            local: orbistoun_gpu_vulkan::device_memory::local(),
         }
     }
 
@@ -171,6 +176,14 @@ impl Breakdown {
             }
         }
         let _ = write!(line, ", other {}", gib(self.unaccounted()));
+        if let Some((used, budget)) = self.local {
+            let _ = write!(
+                line,
+                "; device-local {} of a {} budget",
+                gib(used),
+                gib(budget)
+            );
+        }
         line
     }
 
@@ -224,6 +237,7 @@ mod tests {
                 ("frame snapshots", GIB / 4, Source::Device),
                 ("pipeline cache", GIB / 4, Source::Driver),
             ],
+            local: None,
         }
     }
 

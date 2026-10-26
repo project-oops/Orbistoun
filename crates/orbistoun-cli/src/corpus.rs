@@ -151,7 +151,15 @@ pub(crate) fn cmd_corpus_run(
             println!("=== {} / {} ===", src.name, a.file);
             // The ordinary run path, which records to `compat/` itself. No diagnostic handoff: an
             // intervened run is not recorded (D227), so this measures the default-entry baseline.
-            cmd_run(&path, limit, calls, profile, (None, None), (false, false))?;
+            cmd_run(
+                &path,
+                limit,
+                calls,
+                profile,
+                (None, None),
+                (false, false),
+                None,
+            )?;
         }
     }
     Ok(())

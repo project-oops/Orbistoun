@@ -746,6 +746,7 @@ fn run_with_budget(
         None,
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
         (reproduce.staged, false),
+        None,
     )?;
     Ok((reproduce, module))
 }

@@ -582,6 +582,26 @@ fn pipeline_key(
     orbistoun_gpu::content_hash(&shape)
 }
 
+/// A compute pipeline's state for its kept entry (D994): everything its layout is made from - each
+/// image binding's number, type and count, whether it binds a buffer set and the global share, and
+/// its push-constant size. Unlike [`pipeline_key`], the same in every run.
+fn compute_state(
+    images: &[vk::DescriptorSetLayoutBinding<'_>],
+    buffers: bool,
+    shares: bool,
+    push_bytes: u32,
+) -> u64 {
+    let mut shape = vec![u32::from(buffers), u32::from(shares), push_bytes];
+    for binding in images {
+        shape.extend([
+            binding.binding,
+            binding.descriptor_type.as_raw() as u32,
+            binding.descriptor_count,
+        ]);
+    }
+    orbistoun_gpu::content_hash(&shape)
+}
+
 /// Where a compute pipeline is compiled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compile {
@@ -680,20 +700,20 @@ pub(crate) fn make_pipeline(
             || "a compute pipeline".to_owned(),
             |program| format!("the compute pipeline for the program at {program:#x}"),
         );
-        let made = crate::compile_watch::compiling(what, &[module], || {
-            // SAFETY: the create info outlives the call and names a shader module still alive.
-            unsafe {
-                device.create_compute_pipelines(
-                    crate::pipeline_cache::cache(),
-                    &pipeline_info,
-                    None,
-                )
-            }
-        });
-        // Kept for the next run as a draw's pipeline is (D744): a guest compute pipeline compiles
-        // in a quarter of a second.
-        crate::pipeline_cache::keep(device);
-        made
+        // Kept for the next run as a draw's pipeline is (D994): a guest compute pipeline compiles
+        // in a quarter of a second, a large one in seconds. Its state is its layout: the images,
+        // the buffer set, the global share and the push block.
+        let shape = compute_state(images, buffers, global_share.0.is_some(), push_bytes);
+        let key = crate::pipeline_cache::Key::of(&[module], shape);
+        crate::compile_watch::compiling_found(what, &[module], || {
+            let (made, how) = crate::pipeline_cache::built(device, Some(key), |cache| {
+                // SAFETY: the create info outlives the call and names a shader module still alive.
+                unsafe { device.create_compute_pipelines(cache, &pipeline_info, None) }
+                    .map_err(|(_, e)| e)
+            });
+            (made, how == crate::pipeline_cache::Built::Found)
+        })
+        .map_err(|e| (Vec::new(), e))
     } else {
         // SAFETY: the create info outlives the call and names a shader module still alive.
         unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None) }
@@ -1030,6 +1050,10 @@ impl Session {
 
     /// Creates the logical device with the features and extensions the emitted modules declare,
     /// returning the core features requested and whether mesh shading was enabled.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one step per feature or extension the device is created with"
+    )]
     fn create_device(
         instance: &ash::Instance,
         physical: vk::PhysicalDevice,
@@ -1117,7 +1141,10 @@ impl Session {
         let direct_offered =
             crate::direct::offered(&extensions, &offered_float16, &wanted_features);
         let mut wanted_float16 = wanted_float16.buffer_device_address(direct_offered);
-        let enabled_extensions = offered_names([
+        // The extended dynamic states where offered: draw state set while recording rather than
+        // built into each pipeline (D995).
+        let dynamic_offered = crate::dynamic_state::offered(instance, physical, &extensions);
+        let mut enabled_extensions = offered_names([
             (mesh_offered, ash::ext::mesh_shader::NAME.as_ptr()),
             (
                 clip_control_offered,
@@ -1135,6 +1162,10 @@ impl Session {
                 ash::ext::external_memory_host::NAME.as_ptr(),
             ),
         ]);
+        enabled_extensions.extend(offered_names(crate::dynamic_state::extension_names(
+            dynamic_offered,
+        )));
+        let mut wanted_dynamic = crate::dynamic_state::Wanted::of(dynamic_offered);
         let mut wanted_mesh =
             vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(mesh_offered);
         let mut wanted_clip_control = vk::PhysicalDeviceDepthClipControlFeaturesEXT::default()
@@ -1154,6 +1185,7 @@ impl Session {
             .push_next(&mut wanted_clip_control)
             .push_next(&mut wanted_border)
             .push_next(&mut wanted_fault);
+        let device_info = wanted_dynamic.chained(device_info, dynamic_offered);
         let mut wanted_report =
             vk::PhysicalDeviceDeviceMemoryReportFeaturesEXT::default().device_memory_report(true);
         let mut report = crate::device_memory::report_info();
@@ -1172,6 +1204,7 @@ impl Session {
         if fault_offered {
             crate::device_lost::keep_fault_reader(instance, &device);
         }
+        crate::dynamic_state::note_enabled(dynamic_offered, instance, &device);
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
         crate::compute_images::note_enabled(&wanted_float16);
         CUSTOM_BORDER_COLOUR.store(border_offered, std::sync::atomic::Ordering::Relaxed);

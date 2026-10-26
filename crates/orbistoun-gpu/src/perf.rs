@@ -41,8 +41,19 @@ macro_rules! span_labels {
             Span::ResidentTaken => $as!("kept images: taken"),
             Span::ResidentRead => $as!("kept images: read"),
             Span::ResidentMissing => $as!("kept images: not kept"),
-            Span::UnboundedStore => $as!("unbounded: image or flat store"),
+            Span::ResidentSelection => $as!("kept images: a selection again"),
+            Span::ResidentDeferred => $as!("kept images: write-back deferred"),
+            Span::ResidentWrittenBack => $as!("kept images: written back"),
+            Span::StoredUnkept => $as!("stored image: not kept"),
+            Span::StoredMapped => $as!("stored image: the device maps it"),
+            Span::StoredPending => $as!("stored image: under a pending frame"),
+            Span::StoredOther => $as!("stored image: written back at once"),
+            Span::UnboundedStore => $as!("unbounded: other store"),
+            Span::UnboundedImage => $as!("unbounded: image store"),
+            Span::UnboundedFlat => $as!("unbounded: flat store"),
+            Span::UnboundedDevice => $as!("unbounded: device-addressed"),
             Span::UnboundedGlobal => $as!("unbounded: untraced global store"),
+            Span::UnboundedIndirect => $as!("unbounded: indirect grid"),
             Span::SettleOver => $as!("settle over"),
             Span::SettledRead => $as!("settled read"),
             Span::PrepareAgain => $as!("prepare again"),
@@ -531,17 +542,48 @@ pub enum Span {
     /// A submission queued whose writes are not bounded before it runs: every preparation read
     /// after it waits for it (D876). Counted, so the serialisation it costs is seen.
     QueuedUnbounded,
-    /// A dispatch image taken from those the device keeps, unchanged since (D985): counted.
+    /// A dispatch image taken from those the device keeps, unchanged since (D990): counted.
     ResidentTaken,
     /// A dispatch image with a place among those kept, read afresh: counted.
     ResidentRead,
     /// A dispatch prepared again because the device did not keep an image it was asked to take:
     /// counted.
     ResidentMissing,
-    /// Of those, a dispatch storing through an image or a flat address.
+    /// A dispatch's selected images found again from its unwritten tables, not read (D990):
+    /// counted.
+    ResidentSelection,
+    /// A stored image left on the device, its write-back deferred (D990): counted.
+    ResidentDeferred,
+    /// A deferred write-back of a stored image made, read off the device: timed.
+    ResidentWrittenBack,
+    /// An image a dispatch stores to with no place among the images kept - compressed, or in
+    /// memory not watched: its write-back is made at once. Counted.
+    StoredUnkept,
+    /// One kept whose write-back is made at once because the device maps its pages, which no
+    /// guard may stand over (D974). Counted.
+    StoredMapped,
+    /// One kept whose write-back is made at once because a frame pending on the device overlaps
+    /// it. Counted.
+    StoredPending,
+    /// One kept whose write-back is made at once for another reason. Counted.
+    StoredOther,
+    /// Of the [`Self::QueuedUnbounded`] submissions, a dispatch storing other than through a buffer,
+    /// an image, a flat or a global address.
     UnboundedStore,
+    /// Of those, a dispatch storing through an image whose source no translation of its program
+    /// has named yet, or whose descriptor does not place it before the run.
+    UnboundedImage,
+    /// Of those, a dispatch storing through a flat address that may reach guest memory, which its
+    /// buffers do not trace.
+    UnboundedFlat,
+    /// Of those, a device-addressed dispatch storing through a buffer the host does not resolve
+    /// (D964, D982, D989).
+    UnboundedDevice,
     /// Of those, a dispatch storing through a global address its buffers do not trace.
     UnboundedGlobal,
+    /// Of those, an indirect dispatch storing where its waves place the bytes, which its grid,
+    /// read from memory as it is carried out, decides (D989).
+    UnboundedIndirect,
     /// A preparation read waiting for the queue to drain because a queued submission writes over
     /// it (D874, D876).
     SettleOver,
@@ -862,7 +904,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 145] = [
+    pub const ALL: [Self; 156] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -870,8 +912,19 @@ impl Span {
         Self::ResidentTaken,
         Self::ResidentRead,
         Self::ResidentMissing,
+        Self::ResidentSelection,
+        Self::ResidentDeferred,
+        Self::ResidentWrittenBack,
+        Self::StoredUnkept,
+        Self::StoredMapped,
+        Self::StoredPending,
+        Self::StoredOther,
         Self::UnboundedStore,
+        Self::UnboundedImage,
+        Self::UnboundedFlat,
+        Self::UnboundedDevice,
         Self::UnboundedGlobal,
+        Self::UnboundedIndirect,
         Self::SettleOver,
         Self::SettledRead,
         Self::PrepareAgain,

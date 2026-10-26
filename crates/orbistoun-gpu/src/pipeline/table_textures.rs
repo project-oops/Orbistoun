@@ -87,6 +87,7 @@ mod tests {
             buffer_offset: None,
             layered: false,
             computed: None,
+            sampler_words: None,
         }
     }
 

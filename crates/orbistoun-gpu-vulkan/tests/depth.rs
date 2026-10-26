@@ -269,6 +269,32 @@ fn cull_state_discards_the_back_faces_it_names() {
     assert_eq!(centre(&mut kept), GREEN_PIXEL);
 }
 
+/// One shader pair drawn under two cull states by one backend: where the device sets the cull
+/// mode while recording, the two draws share one device pipeline (D995), built with the first's
+/// state, and each still culls as its own says: the culled draw leaves the clear, the kept one
+/// draws.
+#[test]
+fn draws_sharing_a_pipeline_each_cull_by_their_own_state() {
+    if !device_or_skip("draws_sharing_a_pipeline_each_cull_by_their_own_state") {
+        return;
+    }
+    let mut backend = backend(None);
+    run(&mut backend, &[RenderCommand::SetCull(decode_cull(0x2))]);
+    run(&mut backend, &draw(NEAR, GREEN));
+    assert_ne!(
+        centre(&mut backend),
+        GREEN_PIXEL,
+        "a back face was drawn with back faces culled"
+    );
+    run(&mut backend, &[RenderCommand::SetCull(decode_cull(0x6))]);
+    run(&mut backend, &draw(NEAR, GREEN));
+    assert_eq!(
+        centre(&mut backend),
+        GREEN_PIXEL,
+        "the kept face took the culled draw's state, which its pipeline was built with"
+    );
+}
+
 /// A guest pixel shader exporting depth to `mrtz` replaces the triangle's own: Mesa's MRTZ export
 /// carries Z in its first channel (`ac_get_spi_shader_z_format`), as 2 Ship 2 Harkinian's
 /// `gl_FragDepth = prim_depth` compiles to `exp mrtz v27`. The far triangle (0.75) exports 0.125

@@ -19,6 +19,7 @@ mod depth;
 mod device_lost;
 pub mod device_memory;
 pub mod direct;
+mod dynamic_state;
 pub use device_lost::{device_lost, note_dispatch, on_device_lost};
 
 /// The host memory the device's buffers held for reuse or upload take, by what holds it: spare
@@ -1605,6 +1606,11 @@ impl VulkanBackend {
         self.contents.get(&Some(target))
     }
 
+    /// How colour target `target`'s texels hold colour, as [`Self::target_frame`] answers them.
+    pub fn target_encoding(&self, target: ResourceId) -> orbistoun_gpu::TargetEncoding {
+        self.encoding_of(Some(target))
+    }
+
     /// How `target`'s texels hold colour; the interim square's are eight-bit `UNORM`.
     fn encoding_of(&self, target: Option<ResourceId>) -> orbistoun_gpu::TargetEncoding {
         target
@@ -1819,7 +1825,7 @@ impl VulkanBackend {
         self.current_viewport
             .map(|r| (r.x, r.y, r.width, r.height))
             .hash(&mut hasher);
-        let shape = hasher.finish();
+        let shape = self.shape_of(shaders);
         // The user clip planes are pushed with the draw (D857), and the textures - their contents,
         // formats and samplers - are the descriptor set's: a pipeline is kept with both, but the
         // device pipeline depends on neither. A texture slot only where it is bound, with its slot,
@@ -1832,6 +1838,50 @@ impl VulkanBackend {
         }
         let key = |value| std::num::NonZeroU64::new(value).unwrap_or(std::num::NonZeroU64::MIN);
         (key(hasher.finish()), key(shape))
+    }
+
+    /// The key of the next draw's shape (D856): what its device pipeline is built from and the
+    /// device cannot set while recording (D995). The viewport, scissor, attachment size, line width,
+    /// depth-bias factors and blend constants are always set so; cull, depth and stencil state, the
+    /// depth-bias switch and the blend state where the device has the extension that sets them.
+    fn shape_of(&self, shaders: (u64, u64)) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let offered = dynamic_state::enabled();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        shaders.hash(&mut hasher);
+        // A logic op, which stays built in, is refused under blending, so its blend stays too.
+        self.raster_op.hash(&mut hasher);
+        let logic_op = self.raster_op.is_some_and(|rop| rop != 0xCC);
+        if offered.blend && !logic_op {
+            self.more_outputs_for_draw().len().hash(&mut hasher);
+        } else {
+            self.blend.hash(&mut hasher);
+            self.write_mask.hash(&mut hasher);
+            self.more_outputs_for_draw().hash(&mut hasher);
+        }
+        // Whether a depth attachment is bound, and every attachment's encoding, decide the render
+        // pass the pipeline is built for.
+        self.current_depth.is_some().hash(&mut hasher);
+        self.encoding_of(self.current_target).hash(&mut hasher);
+        for target in &self.more_targets {
+            self.encoding_of(Some(*target)).hash(&mut hasher);
+        }
+        if !offered.tests {
+            self.depth_stencil.hash(&mut hasher);
+            self.cull.hash(&mut hasher);
+        }
+        if !offered.bias_enable {
+            matches!(
+                depth::depth_bias(self.depth_bias, self.cull),
+                Ok(Some(depth::DepthOffset::Bias(_)))
+            )
+            .hash(&mut hasher);
+        }
+        // Clipping z to `-w..w` is built in.
+        self.viewport_transform
+            .is_some_and(|t| t.depth.negative_one_to_one)
+            .hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so these

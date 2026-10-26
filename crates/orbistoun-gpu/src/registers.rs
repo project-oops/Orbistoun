@@ -328,6 +328,10 @@ impl<M: crate::pipeline::GuestMemory + ?Sized> crate::pipeline::GuestMemory
         });
         held.or_else(|| self.memory.read(address, length))
     }
+
+    fn settle(&self, address: u64, length: usize) {
+        self.memory.settle(address, length);
+    }
 }
 
 /// [`register_writes`], with the tables indirect register loads name read from `tables`: the

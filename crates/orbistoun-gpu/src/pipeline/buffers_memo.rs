@@ -106,6 +106,10 @@ impl<M: GuestMemory + ?Sized> GuestMemory for Recording<'_, M> {
         self.note((learned, address, length as u64));
         mapped
     }
+
+    fn settle(&self, address: u64, length: usize) {
+        self.memory.settle(address, length);
+    }
 }
 
 /// What an answer was worked out from.

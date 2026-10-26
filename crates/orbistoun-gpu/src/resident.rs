@@ -32,9 +32,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// command processor lets every image go and prepares the dispatch again.
 pub const NOT_RESIDENT: &str = "a dispatch image the device was asked to keep is not kept";
 
-/// The most bytes of images kept at once, before the oldest are let go: each is held on the device
-/// and again in the host-visible buffer it travels through, so twice this in all.
-pub const KEPT_BYTES_MOST: u64 = 3 << 29;
+/// The most bytes of images kept at once, before the least recently bound are let go, where the
+/// device does not report its budget; where it does, the budget follows what it reports
+/// ([`Registry::budget_from`]) up to this. A block image is held once, on the device; any other
+/// again in the host-visible buffer its texels travel through, which a stored image is read back
+/// by. At a fixed 5 GiB Grand Theft Auto V's device reached 16.08 GiB of a 16 GB card's memory,
+/// its images 4.98 GiB of it, with a 3,000-image texture table taking 0.75 GiB as blocks.
+pub const KEPT_BYTES_MOST: u64 = 3 << 30;
+
+/// What of the device's own memory budget is left free beside the images kept, for the title's
+/// own allocations: where the device reports its budget, the images kept take the rest up to
+/// [`KEPT_BYTES_MOST`].
+pub const DEVICE_HEADROOM: u64 = 1 << 30;
 
 /// One image's place in a dispatch: its key, the generation of its contents, and whether its
 /// texels come with it, to be uploaded and kept, or the device takes the image it keeps.
@@ -46,6 +55,9 @@ pub struct Use {
     pub generation: u64,
     /// Whether its texels were read for this dispatch.
     pub fresh: bool,
+    /// For an image the dispatch stores to, whether what it stores stays on the device, written
+    /// back only when something reads its bytes (D990), rather than read back after the dispatch.
+    pub deferred: bool,
 }
 
 /// A dispatch's images' places, by binding role, and the images the device is to let go first.
@@ -102,6 +114,36 @@ impl Watch for HostWatch {
     }
 }
 
+/// The host's write-watch over many spans asked at once: one walk of each reservation they lie in
+/// brings the record up to date (D974), and each span is then answered from the record. A table
+/// of thousands of images asked so costs one walk rather than one each.
+#[derive(Debug, Clone, Copy)]
+pub struct HarvestedWatch {
+    /// Whether every span was watched.
+    watched: bool,
+}
+
+impl HarvestedWatch {
+    /// The write-watch over `spans`, harvested now.
+    #[must_use]
+    pub fn over(spans: &[(u64, u64)]) -> Self {
+        Self {
+            watched: orbistoun_mem::watch::harvest_all(spans),
+        }
+    }
+}
+
+impl Watch for HarvestedWatch {
+    fn mark(&self, span: (u64, u64)) -> Option<u64> {
+        HostWatch.mark(span)
+    }
+
+    fn written_since(&self, (base, len): (u64, u64), since: u64) -> Option<bool> {
+        self.watched
+            .then(|| orbistoun_mem::watch::recorded_since(base, len, since))
+    }
+}
+
 /// Where a kept image's contents stand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -111,6 +153,10 @@ enum State {
     Writing,
     /// On the device and the same as guest memory since the mark.
     Kept { since: u64 },
+    /// Stored to, its write-back deferred until something reads its bytes: the device holds what
+    /// guest memory will, and the pages are guarded, so nothing reads or writes them before the
+    /// write-back is made. Never let go until it is.
+    Deferred,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,10 +197,48 @@ impl Registry {
         }
     }
 
+    /// Keeps at most `budget` bytes from now on, letting the least recently bound go at the next
+    /// image read past it.
+    pub fn set_budget(&mut self, budget: u64) {
+        self.budget = budget;
+    }
+
+    /// The device's room for kept images, from what it reports of its own memory: the bytes kept
+    /// now and what is free of its budget past `headroom`, at most `most` (D990).
+    #[must_use]
+    pub fn budget_from(&self, (used, budget): (u64, u64), headroom: u64, most: u64) -> u64 {
+        let free = budget.saturating_sub(used).saturating_sub(headroom);
+        (self.bytes + free).min(most)
+    }
+
     /// Starts the preparation of a dispatch: each image takes one place in it.
     pub fn begin(&mut self) {
         self.dispatch += 1;
         self.placed.clear();
+    }
+
+    /// The place in the dispatch being prepared of the image `key` the device keeps, its bytes
+    /// already settled, where it is kept and unwritten since: [`Self::place`]'s answer when it is
+    /// taken, and `None` - nothing marked, nothing given a place - where it would be read afresh,
+    /// which the caller then does through [`Self::place`]. What a table of thousands of images an
+    /// unchanged dispatch selects again asks of each.
+    pub fn take_kept(&mut self, watch: &impl Watch, key: u64) -> Option<Use> {
+        let entry = self.entries.get(&key)?;
+        let State::Kept { since } = entry.state else {
+            return None;
+        };
+        if watch.written_since(entry.span, since) != Some(false) || !self.placed.insert(key) {
+            return None;
+        }
+        let dispatch = self.dispatch;
+        let entry = self.entries.get_mut(&key)?;
+        entry.used = dispatch;
+        Some(Use {
+            key,
+            generation: entry.generation,
+            fresh: false,
+            deferred: false,
+        })
     }
 
     /// The place of the image `key`, `bytes` of texels lying over `span`, in the dispatch being
@@ -170,16 +254,19 @@ impl Registry {
             return None;
         }
         let dispatch = self.dispatch;
+        // Deferred, the device holds what guest memory will: taken whatever the watch says.
         if let Some(entry) = self.entries.get_mut(&key)
             && entry.span == span
-            && let State::Kept { since } = entry.state
-            && watch.written_since(span, since) == Some(false)
+            && (entry.state == State::Deferred
+                || matches!(entry.state, State::Kept { since }
+                    if watch.written_since(span, since) == Some(false)))
         {
             entry.used = dispatch;
             return Some(Use {
                 key,
                 generation: entry.generation,
                 fresh: false,
+                deferred: entry.state == State::Deferred,
             });
         }
         let Some(since) = watch.mark(span) else {
@@ -204,7 +291,49 @@ impl Registry {
             key,
             generation,
             fresh: true,
+            deferred: false,
         })
+    }
+
+    /// The place in the dispatch being prepared of the image `key` whose write-back is deferred:
+    /// taken, its bytes neither settled nor asked about, since its pages are guarded and settling
+    /// them would make the write-back. `None` for any other image.
+    pub fn take_deferred(&mut self, key: u64) -> Option<Use> {
+        let entry = self.entries.get(&key)?;
+        if entry.state != State::Deferred || !self.placed.insert(key) {
+            return None;
+        }
+        let dispatch = self.dispatch;
+        let entry = self.entries.get_mut(&key)?;
+        entry.used = dispatch;
+        // Still deferred: what a dispatch storing to it again stores stays on the device too.
+        Some(Use {
+            key,
+            generation: entry.generation,
+            fresh: false,
+            deferred: true,
+        })
+    }
+
+    /// The deferred write-back of the image `key` at `generation` is made: guest memory holds what
+    /// the device does, from a mark taken now. A later generation's is not this one's.
+    pub fn carried_out(&mut self, watch: &impl Watch, (key, generation): (u64, u64)) {
+        let Some(entry) = self.entries.get(&key).copied() else {
+            return;
+        };
+        if entry.generation != generation || entry.state != State::Deferred {
+            return;
+        }
+        // Unwatchable now: forgotten, as an image whose bytes cannot be watched is.
+        let state = watch
+            .mark(entry.span)
+            .map_or(State::Writing, |since| State::Kept { since });
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.state = state;
+        }
+        if state == State::Writing {
+            self.forget(key);
+        }
     }
 
     /// Lets the least recently bound images go until the rest fit the budget, never one bound in
@@ -214,7 +343,7 @@ impl Registry {
             let Some((&key, _)) = self
                 .entries
                 .iter()
-                .filter(|(_, entry)| entry.used < self.dispatch)
+                .filter(|(_, entry)| entry.used < self.dispatch && entry.state != State::Deferred)
                 .min_by_key(|(_, entry)| entry.used)
             else {
                 return;
@@ -223,8 +352,16 @@ impl Registry {
         }
     }
 
-    /// Forgets `key`, telling the device to let it go.
+    /// Forgets `key`, telling the device to let it go - but an image whose write-back is deferred,
+    /// which the device alone holds until it is made.
     fn forget(&mut self, key: u64) {
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.state == State::Deferred)
+        {
+            return;
+        }
         if let Some(entry) = self.entries.remove(&key) {
             self.bytes -= entry.bytes;
             self.dropped.push(key);
@@ -243,9 +380,17 @@ impl Registry {
                 self.forget(used.key);
                 continue;
             }
+            // What it stored stays on the device, its write-back deferred; one taken while deferred
+            // stays so, whatever this dispatch did with it.
+            if (stored && used.deferred) || entry.state == State::Deferred {
+                if let Some(entry) = self.entries.get_mut(&used.key) {
+                    entry.state = State::Deferred;
+                }
+                continue;
+            }
             let since = match entry.state {
                 State::Read { since } | State::Kept { since } => since,
-                State::Writing => {
+                State::Writing | State::Deferred => {
                     self.forget(used.key);
                     continue;
                 }
@@ -490,6 +635,101 @@ mod tests {
         };
         kept.begin();
         assert!(kept.place(&unwatched, IMAGE).is_none());
+    }
+
+    /// An image stored to with its write-back deferred is taken without its bytes being asked
+    /// about, is never let go - past the budget, by a failure, or with every image - and once its
+    /// write-back is made is kept from a mark taken then.
+    #[test]
+    fn a_deferred_image_is_taken_and_kept_until_written_back() {
+        let (watch, mut kept) = (Fake::default(), Registry::new(0x80));
+        kept.begin();
+        let first = kept.place(&watch, IMAGE).expect("watched");
+        let deferred = Use {
+            deferred: true,
+            ..first
+        };
+        kept.ran(&watch, &stored(deferred), true);
+        assert_eq!(kept.entries[&first.key].state, State::Deferred);
+        // Its pages are guarded, so a write the watch saw is not one to the image.
+        watch.write(0x1000);
+        kept.begin();
+        let taken = kept.take_deferred(first.key).expect("deferred");
+        assert!(!taken.fresh);
+        assert!(
+            kept.take_kept(&watch, first.key).is_none(),
+            "not as a kept image"
+        );
+        kept.ran(&watch, &fetched(taken), false);
+        kept.forget_all();
+        kept.begin();
+        let _ = kept.place(&watch, (9, (0x9000, 0x100), 0x100));
+        assert_eq!(
+            kept.entries[&first.key].state,
+            State::Deferred,
+            "never let go"
+        );
+        assert!(!kept.take_dropped().contains(&first.key));
+        kept.carried_out(&watch, (first.key, first.generation));
+        assert!(matches!(kept.entries[&first.key].state, State::Kept { .. }));
+        kept.begin();
+        assert!(
+            kept.take_kept(&watch, first.key).is_some(),
+            "kept from its write-back"
+        );
+    }
+
+    /// The budget follows the device's: what is kept and what is free past the headroom, at most
+    /// the cap.
+    #[test]
+    fn the_budget_follows_the_device_s() {
+        let (watch, mut kept) = (Fake::default(), Registry::new(1 << 20));
+        kept.begin();
+        let _ = kept.place(&watch, IMAGE);
+        assert_eq!(
+            kept.budget_from((0x1000, 0x5000), 0x1000, 1 << 20),
+            0x100 + 0x3000
+        );
+        assert_eq!(
+            kept.budget_from((0x5000, 0x5000), 0x1000, 1 << 20),
+            0x100,
+            "nothing free"
+        );
+        assert_eq!(kept.budget_from((0, 1 << 30), 0, 0x800), 0x800, "the cap");
+    }
+
+    /// A kept image unwritten is taken by its key alone; one written since, or read and not yet
+    /// kept, is not, and nothing is marked or placed for it, so it can still be read afresh.
+    #[test]
+    fn a_kept_image_is_taken_by_its_key_alone() {
+        let (watch, mut kept) = (Fake::default(), Registry::new(1 << 20));
+        kept.begin();
+        let first = kept.place(&watch, IMAGE).expect("watched");
+        assert!(
+            kept.take_kept(&watch, first.key).is_none(),
+            "read, not yet kept"
+        );
+        kept.ran(&watch, &fetched(first), true);
+        kept.begin();
+        let taken = kept.take_kept(&watch, first.key).expect("kept");
+        assert_eq!(
+            taken,
+            Use {
+                fresh: false,
+                ..first
+            }
+        );
+        assert!(
+            kept.take_kept(&watch, first.key).is_none(),
+            "one place a dispatch"
+        );
+        watch.write(0x1000);
+        kept.begin();
+        assert!(kept.take_kept(&watch, first.key).is_none(), "written since");
+        assert!(
+            kept.place(&watch, IMAGE).expect("watched").fresh,
+            "read afresh instead"
+        );
     }
 
     /// Past the budget the least recently bound image goes, never one of the dispatch being

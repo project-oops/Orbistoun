@@ -377,7 +377,8 @@ fn gathering(device: &ash::Device) -> Result<Gathering, DispatchError> {
         .layout(layout)];
     // SAFETY: the create info outlives the call and names a live shader module.
     let pipelines = unsafe {
-        device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
+        // Small and built once a session: not kept (D994).
+        device.create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
     };
     // SAFETY: the pipeline, made or not, no longer needs the module.
     unsafe { device.destroy_shader_module(shader, None) };

@@ -30,23 +30,110 @@ struct Compiling {
 
 static NOW: Mutex<Option<Compiling>> = Mutex::new(None);
 
+/// Every pipeline built under the watch this run: how many, how long they took together, and how
+/// many of them a kept pipeline answered (D994).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    /// Pipelines built.
+    pub built: u64,
+    /// Their time in the driver, together.
+    pub total: Duration,
+    /// The longest one.
+    pub longest: Duration,
+    /// Of them, those the driver found in a kept pipeline rather than compiled.
+    pub found: u64,
+    /// Of them, draws' pipelines ([`DRAW`]), and their time together.
+    pub draws: u64,
+    pub draw_total: Duration,
+    /// Words of SPIR-V the draws' pipelines were built from, every stage's.
+    pub draw_words: u64,
+}
+
+static TALLY: Mutex<Tally> = Mutex::new(Tally {
+    built: 0,
+    total: Duration::ZERO,
+    longest: Duration::ZERO,
+    found: 0,
+    draws: 0,
+    draw_total: Duration::ZERO,
+    draw_words: 0,
+});
+
+/// What a draw's pipeline is called under the watch, which the tally counts apart (D995).
+pub(crate) const DRAW: &str = "a draw's pipeline";
+
+/// How many pipelines a tally line is written after: often enough that a run's log says how much
+/// of its time went to building them before any point in it.
+const TALLY_EVERY: u64 = 50;
+
+/// The run's [`Tally`] so far.
+pub(crate) fn tally() -> Tally {
+    *TALLY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Counts one pipeline built in `took`, `found` where a kept pipeline answered it, and says the
+/// tally every [`TALLY_EVERY`] pipelines.
+pub(crate) fn count(took: Duration, found: bool, draw: Option<usize>) {
+    let tally = {
+        let mut tally = TALLY.lock().unwrap_or_else(PoisonError::into_inner);
+        tally.built += 1;
+        tally.total += took;
+        tally.longest = tally.longest.max(took);
+        tally.found += u64::from(found);
+        if let Some(words) = draw {
+            tally.draws += 1;
+            tally.draw_total += took;
+            tally.draw_words += words as u64;
+        }
+        *tally
+    };
+    if tally.built % TALLY_EVERY == 0 {
+        say(&tally);
+    }
+}
+
+/// Writes the run's tally to the log.
+pub(crate) fn report() {
+    say(&tally());
+}
+
+fn say(tally: &Tally) {
+    tracing::info!(
+        "pipelines built: {} in {:.1} s, the longest {:.1} s; {} found kept; {} of them draws' in {:.1} s, from {} words of SPIR-V",
+        tally.built,
+        tally.total.as_secs_f64(),
+        tally.longest.as_secs_f64(),
+        tally.found,
+        tally.draws,
+        tally.draw_total.as_secs_f64(),
+        tally.draw_words
+    );
+}
+
 fn now() -> std::sync::MutexGuard<'static, Option<Compiling>> {
     NOW.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Runs `compile`, the driver's compile of a pipeline for `what` from `modules`, under the watch.
-pub(crate) fn compiling<T>(what: String, modules: &[&[u32]], compile: impl FnOnce() -> T) -> T {
+/// Runs `compile`, the driver's build of a pipeline for `what` from `modules`, under the watch;
+/// `compile` says whether a kept pipeline answered it, which the tally counts.
+pub(crate) fn compiling_found<T>(
+    what: String,
+    modules: &[&[u32]],
+    compile: impl FnOnce() -> (T, bool),
+) -> T {
     start_watcher();
     let started = Instant::now();
+    let draw = (what == DRAW).then(|| modules.iter().map(|module| module.len()).sum());
     *now() = Some(Compiling {
         what,
         modules: modules.iter().map(|words| words.to_vec()).collect(),
         started,
         reported: false,
     });
-    let out = compile();
+    let (out, found) = compile();
     let ended = now().take();
     let took = started.elapsed();
+    count(took, found, draw);
     if let Some(ended) = ended
         && took >= SLOW
     {
@@ -164,9 +251,17 @@ mod tests {
         assert!(a.starts_with("slow-"));
     }
 
-    /// What the compile answers is what the watch answers.
+    /// What the compile answers is what the watch answers, and the tally counts it: built, and
+    /// found where the compile says a kept pipeline answered it.
     #[test]
-    fn the_watch_answers_the_compile_s_result() {
-        assert_eq!(super::compiling("a test pipeline".into(), &[&[1]], || 7), 7);
+    fn the_watch_answers_the_compile_s_result_and_counts_it() {
+        let before = super::tally();
+        assert_eq!(
+            super::compiling_found("a test pipeline".into(), &[&[1]], || (7, true)),
+            7
+        );
+        let after = super::tally();
+        assert!(after.built > before.built);
+        assert!(after.found > before.found);
     }
 }

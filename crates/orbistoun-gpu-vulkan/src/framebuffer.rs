@@ -4597,11 +4597,14 @@ struct BindState {
     window_offset: u32,
     /// The draw's buffers' set (D733), bound as set one.
     buffers: vk::DescriptorSet,
+    /// The state set after binding (D995).
+    dynamic: crate::dynamic_state::DrawState,
 }
 
 impl Pipeline {
     fn bind_state(&self) -> BindState {
         BindState {
+            dynamic: self.dynamic,
             handle: self.handle,
             layout: self.layout,
             set: self.set,
@@ -4620,6 +4623,7 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
     unsafe {
         device.cmd_bind_pipeline(command, vk::PipelineBindPoint::GRAPHICS, state.handle);
     }
+    crate::dynamic_state::record(device, command, &state.dynamic);
     // The set the fragment module's storage buffers live in, bound whether or not this module
     // writes them: a pipeline that statically uses a set needs one bound.
     let sets = [state.set];
@@ -6027,6 +6031,9 @@ struct Pipeline {
     window_offset: u32,
     /// The set of the buffers its latest draw binds (D733), which the draw-buffer cache owns.
     draw_buffers: vk::DescriptorSet,
+    /// The state its draws set after binding it (D995), which a shared shape's device pipeline
+    /// leaves to them.
+    dynamic: crate::dynamic_state::DrawState,
 }
 
 /// An attachment dimension as a float, exactly.
@@ -6074,6 +6081,7 @@ fn build_pipeline(
             "a pipeline built with no draw-buffer set to bind (D733)".to_owned(),
         ));
     };
+    let dynamic = draw_state(size, &bound)?;
     let resources = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildResources, || {
         create_bound_resources(devices, bound)
     })?;
@@ -6157,11 +6165,17 @@ fn build_pipeline(
         user_data: *bound.user_data,
         draw_places: bound.draw_buffers.places,
         textures_uploaded: false,
-        window_offset: bound
-            .guest_buffer
-            .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0)),
+        window_offset: window_offset(&bound),
         draw_buffers,
+        dynamic,
     })
+}
+
+/// The dynamic offset of a bound draw's guest-memory binding: which window-ring slot it reads.
+fn window_offset(bound: &Bound<'_>) -> u32 {
+    bound
+        .guest_buffer
+        .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0))
 }
 
 /// What a draw's device pipeline is built from and with: its modules, layouts and the pipeline,
@@ -6511,6 +6525,80 @@ fn pipeline_stages(
 /// A draw's vertex and fragment modules, with the words each was made from.
 type Stages<'a> = ((vk::ShaderModule, vk::ShaderModule), (&'a [u32], &'a [u32]));
 
+/// The state a draw into an attachment of `size` sets on the command buffer (D995), as its
+/// pipeline would be built with it.
+///
+/// # Errors
+///
+/// A depth, stencil or blend state with no exact Vulkan form, which is refused before a draw
+/// reaches here (`VulkanBackend`), and more colour attachments than the guest has.
+fn draw_state(
+    size: (u32, u32),
+    bound: &Bound<'_>,
+) -> Result<crate::dynamic_state::DrawState, DispatchError> {
+    let (width, height) = size;
+    // Guest pixels to drawn ones: a resident target may be drawn larger than the guest's (D862).
+    let scale = bound.resident.map_or(1, ResidentAttachment::scale);
+    // The guest's own transform when it gave one; otherwise clip space over the whole attachment.
+    // An attachment dimension is exact as `f32`.
+    let viewport = bound.viewport.map_or(
+        vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32_from(width),
+            height: f32_from(height),
+            min_depth: 0.0,
+            max_depth: 1.0,
+        },
+        |transform| scaled_viewport(offset_viewport(transform, bound), scale),
+    );
+    // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
+    // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
+    let full = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: vk::Extent2D { width, height },
+    };
+    let scissor = bound.scissor.map_or(full, |rect| {
+        clamp_scissor(scaled_rect(rect, scale), width, height)
+    });
+    // The guest's polygon offset, resolved before a draw reaches here; only a pass with a depth
+    // attachment has a depth to move.
+    let bias = match bound.depth_bias.filter(|_| bound.depth.is_some()) {
+        Some(crate::depth::DepthOffset::Bias(factors)) => (true, factors),
+        Some(crate::depth::DepthOffset::Pinned(_)) | None => (false, [0.0; 3]),
+    };
+    // The depth and stencil tests of a pass with a depth attachment; none without one.
+    let depth = match bound.depth {
+        Some(depth) => crate::depth::depth_stencil_state(depth.state)
+            .map_err(|what| DispatchError::Unsupported(what.to_owned()))?,
+        None => vk::PipelineDepthStencilStateCreateInfo::default(),
+    };
+    // The guest's blend state, or opaque with every channel written when it set none.
+    let attachments = colour_blend_attachments(bound)?;
+    let mut blend =
+        [vk::PipelineColorBlendAttachmentState::default(); crate::dynamic_state::MAX_ATTACHMENTS];
+    if attachments.len() > blend.len() {
+        return Err(DispatchError::Unsupported(format!(
+            "a draw to {} colour attachments",
+            attachments.len()
+        )));
+    }
+    blend[..attachments.len()].copy_from_slice(&attachments);
+    Ok(crate::dynamic_state::DrawState {
+        viewport,
+        scissor,
+        line_width: (drawn_line_width(bound.line_width) * f32_from(scale))
+            .min(crate::compute::max_line_width()),
+        bias,
+        blend_constants: blend_constants(bound.extras.blend_constants),
+        // The guest's cull state; culling off when it set none, so winding cannot fail a draw.
+        cull: crate::depth::rasterisation(bound.cull),
+        depth,
+        blend,
+        attachments: attachments.len(),
+    })
+}
+
 /// Creates the graphics pipeline from its stages, made from `words`, and fixed-function state.
 fn create_graphics_pipeline(
     device: &ash::Device,
@@ -6521,35 +6609,14 @@ fn create_graphics_pipeline(
     geometry: Geometry,
     bound: Bound<'_>,
 ) -> Result<vk::Pipeline, DispatchError> {
-    let (width, height) = size;
-    // Guest pixels to drawn ones: a resident target may be drawn larger than the guest's (D862).
-    let scale = bound.resident.map_or(1, ResidentAttachment::scale);
+    // What the command buffer sets is built in too, though a device that sets it ignores it here.
+    let state = draw_state(size, &bound)?;
     let stages = pipeline_stages(modules, geometry);
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    // The guest's own transform when it gave one; otherwise clip space over the whole attachment.
-    // An attachment dimension is exact as `f32`.
-    let viewports = [bound.viewport.map_or(
-        vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: f32_from(width),
-            height: f32_from(height),
-            min_depth: 0.0,
-            max_depth: 1.0,
-        },
-        |transform| scaled_viewport(offset_viewport(transform, &bound), scale),
-    )];
-    // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
-    // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
-    let full = vk::Rect2D {
-        offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D { width, height },
-    };
-    let scissors = [bound.scissor.map_or(full, |rect| {
-        clamp_scissor(scaled_rect(rect, scale), width, height)
-    })];
+    let viewports = [state.viewport];
+    let scissors = [state.scissor];
     // A guest clipping z to `-w..w`, as GL does, clips so here too: under Vulkan's own `0..w`
     // everything nearer than the middle of its depth range is lost, the near plane's HUD with it.
     let negative_one_to_one = bound
@@ -6570,41 +6637,32 @@ fn create_graphics_pipeline(
     } else {
         viewport_state
     };
-    // The guest's cull state; culling off when it set none, so winding order cannot fail a draw.
-    let (cull_mode, front_face) = crate::depth::rasterisation(bound.cull);
+    let (cull_mode, front_face) = state.cull;
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(cull_mode)
         .front_face(front_face)
-        .line_width(
-            (drawn_line_width(bound.line_width) * f32_from(scale))
-                .min(crate::compute::max_line_width()),
-        );
-    // The guest's polygon offset, resolved before a draw reaches here; only a pass with a depth
-    // attachment has a depth to move.
+        .line_width(state.line_width);
     let raster = biased(raster, bound.depth_bias.filter(|_| bound.depth.is_some()));
-    // Depth and stencil state only for a pass with a depth attachment; a state that does not map is
-    // refused before a draw reaches here.
-    let depth_stencil = bound
-        .depth
-        .map(|depth| crate::depth::depth_stencil_state(depth.state))
-        .transpose()
-        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?;
+    // Depth and stencil state only for a pass with a depth attachment.
+    let depth_stencil = bound.depth.map(|_| state.depth);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    // The guest's blend state, or opaque with every channel written when it set none. A state that
-    // does not map is refused before a draw reaches here (`VulkanBackend`).
-    let blend_attachments = colour_blend_attachments(&bound)?;
+    let blend_attachments = &state.blend[..state.attachments];
     let mut blend = vk::PipelineColorBlendStateCreateInfo::default()
-        .attachments(&blend_attachments)
-        .blend_constants(blend_constants(bound.extras.blend_constants));
+        .attachments(blend_attachments)
+        .blend_constants(state.blend_constants);
     if let Some(op) = logic_op(bound.raster_op, bound.blend, bound.encoding)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?
     {
         blend = blend.logic_op_enable(true).logic_op(op);
     }
+    // What the device sets while recording is left out of the pipeline (D995).
+    let dynamic_states = crate::dynamic_state::pipeline_states();
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
     let info = vk::GraphicsPipelineCreateInfo::default()
+        .dynamic_state(&dynamic)
         .stages(&stages)
         .vertex_input_state(&vertex_input)
         .input_assembly_state(&assembly)
@@ -6620,16 +6678,32 @@ fn create_graphics_pipeline(
         None => info,
     }];
     let pipelines = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildPipeline, || {
-        crate::compile_watch::compiling("a draw's pipeline".to_owned(), &[words.0, words.1], || {
-            // SAFETY: every referenced object is live and every slice outlives the call.
-            unsafe {
-                device.create_graphics_pipelines(crate::pipeline_cache::cache(), &infos, None)
-            }
-        })
+        build_kept(device, words, bound.extras.shape_key, &infos)
     })
-    .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
-    crate::pipeline_cache::keep(device);
+    .map_err(|e| DispatchError::Vulkan("create_graphics_pipelines", e))?;
     Ok(pipelines[0])
+}
+
+/// Builds a draw's pipeline from `infos` under the compile watch, kept for the next run under its
+/// shaders and its shape - the state the backend keys its pipelines by - where it has one (D994).
+fn build_kept(
+    device: &ash::Device,
+    words: (&[u32], &[u32]),
+    shape: Option<std::num::NonZeroU64>,
+    infos: &[vk::GraphicsPipelineCreateInfo<'_>],
+) -> ash::prelude::VkResult<Vec<vk::Pipeline>> {
+    let key = shape.map(|shape| crate::pipeline_cache::Key::of(&[words.0, words.1], shape.get()));
+    crate::compile_watch::compiling_found(
+        crate::compile_watch::DRAW.to_owned(),
+        &[words.0, words.1],
+        || {
+            let (made, how) = crate::pipeline_cache::built(device, key, |cache| {
+                // SAFETY: every referenced object is live and every slice outlives the call.
+                unsafe { device.create_graphics_pipelines(cache, infos, None) }.map_err(|(_, e)| e)
+            });
+            (made, how == crate::pipeline_cache::Built::Found)
+        },
+    )
 }
 
 /// Clears an attachment to `clear`, draws three vertices through the given shaders, and reads the
