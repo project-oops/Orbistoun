@@ -95,6 +95,24 @@ the guest's flips since the start, which presses at the same point in the title 
 the host runs it. A script uses one clock throughout, and steps out of order are refused rather
 than sorted.
 
+A step can wait for the title's phase instead of a time (D987). `wait_for_draws = N` holds it
+until the guest has closed a frame of at least `N` draws, and no earlier than its own time; the
+steps before it run until then, and the steps after it count their time from the moment it took
+effect. A world frame is far heavier than any menu, so in-world input lands in the world however
+long the menus and loads before it took:
+
+```toml
+[[step]]
+at_flip = 4000          # not before flip 4000
+wait_for_draws = 5000   # and not before a frame of 5000 draws
+
+[[step]]
+at_flip = 6             # six flips after that frame
+right_stick = [1.0, 0.0]
+```
+
+The run logs `input script: step N took effect at ...` when a wait is met.
+
 Name a script as a port's source in `config.toml`, relative to the directory holding it:
 
 ```toml
@@ -120,3 +138,19 @@ The toolbar records what a title reads from its pad and plays it back (D721).
 A capture and a playback end with the run, and nothing replays into the next launch unless
 chosen again. `orbistoun-gui --title <name> --playback <file>` launches a title with a capture
 playing, and `orbistoun-cli run --input <file>` replays one without a window.
+`orbistoun-cli run --capture-input <file>` captures without a window.
+
+## Checking that the title answers
+
+`orbistoun-cli motion <frames> --input <capture>` says whether a held stick moves the picture
+(D988). Keep a sequence of frames from the title's first heavy frame
+(`ORBISTOUN_FRAME_AT=busy:5000,busy-every:1` with `ORBISTOUN_FRAME_DIR=<frames>`), capture the pad
+the guest read, and the command measures the change between each two consecutive kept frames,
+split by whether a stick was held between them:
+
+```bash
+orbistoun-cli motion <frames> --input <capture> --region 0.25,0.25,0.5,0.5 --from 5900 --expect 2
+```
+
+`--region` is `x,y,width,height` as fractions of the frame; `--expect` fails the command unless
+the pairs with a stick held changed that many times as much as the pairs at rest.

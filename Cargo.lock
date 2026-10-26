@@ -3244,6 +3244,7 @@ dependencies = [
  "orbistoun-systemservice",
  "serde",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]

@@ -6,7 +6,14 @@
 //! in [`crate::latest`]: a press and its release are two steps, and a press with no release is
 //! held for the rest of the run. This module carries typed [`PadState`] and never bytes; the
 //! byte layout a title reads belongs to `pad.rs` (D345).
+//!
+//! A step can also wait for the guest to reach a phase rather than a time (D987): its
+//! `wait_for_draws` holds it back until the guest has closed a frame of at least that many draws,
+//! and the steps after it count their time from the moment it took effect. A title's in-world
+//! frames are orders of magnitude heavier than its menus', so "the first world frame" is found
+//! wherever a slower load or a saved profile puts it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -40,6 +47,12 @@ pub struct Step {
     /// Triggers, as `[left, right]` in `0.0..=1.0`. Absent means released.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggers: Option<[f32; 2]>,
+    /// The guest's phase to wait for (D987): the step takes effect at its time or later, at the
+    /// first moment the guest's last closed frame held at least this many draws, and every step
+    /// after it counts its time from that moment rather than from the start of the run. The steps
+    /// before it run until it takes effect, whatever their own times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_draws: Option<u64>,
 }
 
 impl Step {
@@ -61,7 +74,27 @@ impl Step {
             left_stick: stick(state.sticks[0]),
             right_stick: stick(state.sticks[1]),
             triggers: (off(state.triggers[0]) || off(state.triggers[1])).then_some(state.triggers),
+            wait_for_draws: None,
         }
+    }
+
+    /// The pad as this step sets it.
+    fn state(&self) -> PadState {
+        let mut state = PadState::default();
+        for &button in &self.buttons {
+            state.set(button, true);
+        }
+        if let Some([x, y]) = self.left_stick {
+            state.sticks[0] = Stick { x, y };
+        }
+        if let Some([x, y]) = self.right_stick {
+            state.sticks[1] = Stick { x, y };
+        }
+        if let Some([left, right]) = self.triggers {
+            state.set_trigger(false, left);
+            state.set_trigger(true, right);
+        }
+        state
     }
 
     /// When it takes effect, on whichever clock it names; `None` when it names neither or both.
@@ -197,7 +230,9 @@ impl Script {
                 if clock != before_clock {
                     return Err(ScriptError::MixedClocks { step: index });
                 }
-                if at <= after {
+                // A step that waits for a phase is bounded below by its time on the count before
+                // it, not ordered among those steps (D987).
+                if at <= after && step.wait_for_draws.is_none() {
                     return Err(ScriptError::OutOfOrder {
                         step: index,
                         at,
@@ -206,7 +241,8 @@ impl Script {
                     });
                 }
             }
-            previous = Some((clock, at));
+            // The steps after a wait count from the moment it took effect, where it stands at zero.
+            previous = Some((clock, if step.wait_for_draws.is_some() { 0 } else { at }));
 
             for (field, axes) in [
                 ("left_stick", step.left_stick),
@@ -267,35 +303,87 @@ impl Script {
             .map_or(Clock::Millis, |(clock, _)| clock)
     }
 
-    /// The pad's state at `elapsed` on the script's clock: the most recent step at or before it.
+    /// The pad's state at `elapsed` on the script's clock: the most recent step at or before it,
+    /// among the steps before the first that waits for a phase (D987), which this does not know
+    /// the moment of.
     ///
     /// Before the first step the pad is at rest, the same as with no script.
     #[must_use]
     pub fn at(&self, elapsed: u64) -> PadState {
-        let mut state = PadState::default();
-        // `validate` guarantees order, so the step in force is found by bisection.
-        let past = self
-            .steps
-            .partition_point(|step| step.when().is_some_and(|(_, at)| at <= elapsed));
-        let Some(step) = past.checked_sub(1).map(|index| &self.steps[index]) else {
-            return state;
-        };
-
-        for &button in &step.buttons {
-            state.set(button, true);
-        }
-        if let Some([x, y]) = step.left_stick {
-            state.sticks[0] = Stick { x, y };
-        }
-        if let Some([x, y]) = step.right_stick {
-            state.sticks[1] = Stick { x, y };
-        }
-        if let Some([left, right]) = step.triggers {
-            state.set_trigger(false, left);
-            state.set_trigger(true, right);
-        }
-        state
+        self.in_count(None, elapsed)
     }
+
+    /// The first step after `after` (or from the start, for `None`) that waits for a phase.
+    fn next_wait(&self, after: Option<usize>) -> Option<usize> {
+        let from = after.map_or(0, |index| index + 1);
+        (from..self.steps.len()).find(|&index| self.steps[index].wait_for_draws.is_some())
+    }
+
+    /// The pad's state `elapsed` into the count `wait` began (D987): `None` for the run's own
+    /// count, which holds the steps before the first wait, or the index of the wait that took
+    /// effect, which stands at zero in its count and holds the steps up to the next wait.
+    fn in_count(&self, wait: Option<usize>, elapsed: u64) -> PadState {
+        let start = wait.unwrap_or(0);
+        let end = self.next_wait(wait).unwrap_or(self.steps.len());
+        let steps = self.steps.get(start..end).unwrap_or_default();
+        // `validate` guarantees order within a count, so the step in force is found by bisection.
+        let past = steps.partition_point(|step| {
+            let at = if step.wait_for_draws.is_some() {
+                Some(0)
+            } else {
+                step.when().map(|(_, at)| at)
+            };
+            at.is_some_and(|at| at <= elapsed)
+        });
+        past.checked_sub(1)
+            .map_or_else(PadState::default, |index| steps[index].state())
+    }
+}
+
+/// Where a script with waits stands (D987): which wait took effect last, and when on the script's
+/// clock. A plain function of what it is shown, so the playing script and a test step it alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Progress {
+    /// The index of the last wait that took effect; `None` before any has.
+    wait: Option<usize>,
+    /// When it took effect, on the script's clock; zero before any has.
+    since: u64,
+}
+
+impl Progress {
+    /// The pad at `elapsed` on the script's clock, with the guest's last closed frame holding
+    /// `draws` draws: each wait whose time has come, counted from the one before it, takes effect
+    /// once a frame that heavy has closed. Answers the wait that took effect just now, if one did.
+    fn step(&mut self, script: &Script, elapsed: u64, draws: u64) -> (PadState, Option<usize>) {
+        let mut took = None;
+        while let Some(next) = script.next_wait(self.wait) {
+            let wait = &script.steps[next];
+            let due = wait
+                .when()
+                .is_some_and(|(_, at)| elapsed.saturating_sub(self.since) >= at);
+            if !due || wait.wait_for_draws.is_some_and(|least| draws < least) {
+                break;
+            }
+            *self = Self {
+                wait: Some(next),
+                since: elapsed,
+            };
+            took = Some(next);
+        }
+        (
+            script.in_count(self.wait, elapsed.saturating_sub(self.since)),
+            took,
+        )
+    }
+}
+
+/// The draws in the guest's last closed frame, as the renderer counted them (D987).
+static LAST_FRAME_DRAWS: AtomicU64 = AtomicU64::new(0);
+
+/// The renderer closed a frame of `draws` draws at a flip: what a step waiting for a phase reads
+/// (D987).
+pub fn frame_closed(draws: u64) {
+    LAST_FRAME_DRAWS.store(draws, Ordering::Relaxed);
 }
 
 /// The script this run is playing, and when it started.
@@ -310,6 +398,8 @@ struct Playing {
     script: Script,
     started: Instant,
     started_flip: u64,
+    /// Which wait for a phase took effect last, and when (D987).
+    progress: Progress,
 }
 
 /// The guest's flip count, handed in by whoever can see the video shim (D721).
@@ -333,6 +423,7 @@ pub fn install(script: Script) {
         script,
         started: Instant::now(),
         started_flip: flips(),
+        progress: Progress::default(),
     });
 }
 
@@ -347,13 +438,22 @@ pub fn clear() {
 /// milliseconds or flips (D721), so no thread races the guest's polling.
 #[must_use]
 pub fn poll() -> Option<PadState> {
-    let held = lock();
-    let playing = held.as_ref()?;
-    let elapsed = match playing.script.clock() {
+    let mut held = lock();
+    let playing = held.as_mut()?;
+    let clock = playing.script.clock();
+    let elapsed = match clock {
         Clock::Millis => u64::try_from(playing.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         Clock::Flips => flips().saturating_sub(playing.started_flip),
     };
-    Some(playing.script.at(elapsed))
+    let draws = LAST_FRAME_DRAWS.load(Ordering::Relaxed);
+    let (state, took) = playing.progress.step(&playing.script, elapsed, draws);
+    if let Some(wait) = took {
+        tracing::info!(
+            "input script: step {wait} took effect at {elapsed}{}, after a frame of {draws} draws; the steps after it count from here",
+            clock.unit()
+        );
+    }
+    Some(state)
 }
 
 /// The guard, with a poisoned lock treated as ordinary, as in [`crate::latest`]: what is behind
@@ -570,6 +670,77 @@ mod tests {
         expected.set(Button::Shell, false);
         assert_eq!(replayed.at(7), expected);
         assert_eq!(replayed.at(6), crate::pad::PadState::default());
+    }
+
+    /// A step that waits for a phase takes effect at the first moment both its time has come and
+    /// the last closed frame is heavy enough; the steps before it run until then, whatever their
+    /// times, and the steps after it count from that moment (D987).
+    #[test]
+    fn a_wait_for_a_heavy_frame_starts_a_count_of_its_own() {
+        let script = script(concat!(
+            "[[step]]\nat_flip = 10\nbuttons = [\"south\"]\n\n",
+            "[[step]]\nat_flip = 12\n\n",
+            "[[step]]\nat_flip = 40\nbuttons = [\"south\"]\n\n",
+            // Not before flip 20, and not before a frame of 1000 draws.
+            "[[step]]\nat_flip = 20\nwait_for_draws = 1000\n\n",
+            "[[step]]\nat_flip = 3\nright_stick = [1.0, 0.0]\n\n",
+            "[[step]]\nat_flip = 5\n",
+        ))
+        .expect("a script with a wait is well formed");
+        let mut progress = super::Progress::default();
+        let mut at = |flip, draws| progress.step(&script, flip, draws);
+
+        assert!(at(10, 5000).0.is_down(Button::South), "too early to wait");
+        assert!(
+            !at(19, 5000).0.is_down(Button::South),
+            "the count before it runs"
+        );
+        assert_eq!(at(25, 50), (crate::pad::PadState::default(), None));
+        assert!(
+            at(45, 50).0.is_down(Button::South),
+            "its later steps too, while the frames stay light"
+        );
+        let (state, took) = at(50, 1200);
+        assert_eq!(took, Some(3), "a heavy frame once its time has come");
+        assert_eq!(state, crate::pad::PadState::default(), "its own state");
+        assert_eq!(
+            at(52, 0),
+            (crate::pad::PadState::default(), None),
+            "taken once, and not undone by a light frame"
+        );
+        assert!(at(53, 0).0.sticks[1].x > 0.9, "three flips after it");
+        assert!(at(54, 0).0.sticks[1].x > 0.9);
+        assert_eq!(at(55, 0).0, crate::pad::PadState::default());
+
+        // Before the wait is known, the plain view holds the run's own count alone.
+        assert!(script.at(40).is_down(Button::South));
+        assert!(script.at(10_000).is_down(Button::South));
+    }
+
+    /// The steps after a wait are ordered from zero, its own time is not ordered among the steps
+    /// before it, and a step after it at zero is refused (D987).
+    #[test]
+    fn the_steps_after_a_wait_are_ordered_from_zero() {
+        assert!(
+            script("[[step]]\nat_flip = 90\n\n[[step]]\nat_flip = 5\nwait_for_draws = 1\n\n[[step]]\nat_flip = 1\n")
+                .is_ok()
+        );
+        assert!(matches!(
+            script("[[step]]\nat_flip = 5\nwait_for_draws = 1\n\n[[step]]\nat_flip = 0\n"),
+            Err(ScriptError::OutOfOrder {
+                step: 1,
+                at: 0,
+                after: 0,
+                ..
+            })
+        ));
+        // A recorded step never waits, so a recording reads back as it was written.
+        let step = super::Step::at_flip(3, &crate::pad::PadState::default());
+        assert!(
+            !toml::to_string(&step)
+                .expect("a step writes")
+                .contains("wait")
+        );
     }
 
     /// An axis outside its own range is refused: `-0.5` is valid for a stick and not for a

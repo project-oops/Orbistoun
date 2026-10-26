@@ -20,6 +20,8 @@ orbistoun-mem = { workspace = true }
 orbistoun-systemservice = { workspace = true }
 orbistoun-shell = { workspace = true }
 serde = { workspace = true }
+# When a script's wait for a phase takes effect (D987).
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Registering the module, to see which NID a declared name links to.

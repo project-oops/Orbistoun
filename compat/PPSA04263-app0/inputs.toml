@@ -6492,3 +6492,363 @@ buttons = ["south"]
 
 [[step]]
 at_flip = 39983
+
+# In the world (D987): from the first frame of 5000 draws or more, the North Yankton interior about
+# flip 5840 on a first launch, the Cross presses above stop and the sticks are held in alternating
+# six-flip stretches, so `orbistoun-cli motion` compares the picture with a stick held and at rest
+# (D988): the right stick full right (the camera turns), released, the left stick full forward
+# (the character walks), released. Flips from here count from that frame.
+
+[[step]]
+at_flip = 4000
+wait_for_draws = 5000
+
+[[step]]
+at_flip = 6
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 12
+
+[[step]]
+at_flip = 18
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 24
+
+[[step]]
+at_flip = 30
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 36
+
+[[step]]
+at_flip = 42
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 48
+
+[[step]]
+at_flip = 54
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 60
+
+[[step]]
+at_flip = 66
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 72
+
+[[step]]
+at_flip = 78
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 84
+
+[[step]]
+at_flip = 90
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 96
+
+[[step]]
+at_flip = 102
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 108
+
+[[step]]
+at_flip = 114
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 120
+
+[[step]]
+at_flip = 126
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 132
+
+[[step]]
+at_flip = 138
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 144
+
+[[step]]
+at_flip = 150
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 156
+
+[[step]]
+at_flip = 162
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 168
+
+[[step]]
+at_flip = 174
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 180
+
+[[step]]
+at_flip = 186
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 192
+
+[[step]]
+at_flip = 198
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 204
+
+[[step]]
+at_flip = 210
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 216
+
+[[step]]
+at_flip = 222
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 228
+
+[[step]]
+at_flip = 234
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 240
+
+[[step]]
+at_flip = 246
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 252
+
+[[step]]
+at_flip = 258
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 264
+
+[[step]]
+at_flip = 270
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 276
+
+[[step]]
+at_flip = 282
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 288
+
+[[step]]
+at_flip = 294
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 300
+
+[[step]]
+at_flip = 306
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 312
+
+[[step]]
+at_flip = 318
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 324
+
+[[step]]
+at_flip = 330
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 336
+
+[[step]]
+at_flip = 342
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 348
+
+[[step]]
+at_flip = 354
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 360
+
+[[step]]
+at_flip = 366
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 372
+
+[[step]]
+at_flip = 378
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 384
+
+[[step]]
+at_flip = 390
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 396
+
+[[step]]
+at_flip = 402
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 408
+
+[[step]]
+at_flip = 414
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 420
+
+[[step]]
+at_flip = 426
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 432
+
+[[step]]
+at_flip = 438
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 444
+
+[[step]]
+at_flip = 450
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 456
+
+[[step]]
+at_flip = 462
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 468
+
+[[step]]
+at_flip = 474
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 480
+
+[[step]]
+at_flip = 486
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 492
+
+[[step]]
+at_flip = 498
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 504
+
+[[step]]
+at_flip = 510
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 516
+
+[[step]]
+at_flip = 522
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 528
+
+[[step]]
+at_flip = 534
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 540
+
+[[step]]
+at_flip = 546
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 552
+
+[[step]]
+at_flip = 558
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 564
+
+[[step]]
+at_flip = 570
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 576
+
+[[step]]
+at_flip = 582
+right_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 588
+
+[[step]]
+at_flip = 594
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 600
